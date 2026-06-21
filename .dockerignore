@@ -1,0 +1,13 @@
+# Keep the build context lean + correct.
+# tools/ holds the host-arch tailwind CLI (Daniel builds on macOS) - MUST be
+# excluded so the linux builder redownloads the linux binary.
+tools/
+bin/
+.git/
+.github/
+.gitea/
+.forgejo/
+*.md
+.env
+.env.*
+!.env.example

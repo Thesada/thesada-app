@@ -1,0 +1,99 @@
+{{define "title"}}Admin - Tenants - thesada{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-semibold">Tenants</h1>
+  <a href="/admin" class="text-sm text-slate-500 hover:underline">back to admin</a>
+</div>
+
+{{if .Error}}
+<div class="bg-red-50 border border-red-200 text-red-700 rounded p-3 mb-4 text-sm">
+  {{.Error}}
+</div>
+{{end}}
+
+<div class="bg-white border border-slate-200 rounded-xl overflow-x-auto mb-6">
+  <table class="min-w-full text-sm">
+    <thead class="bg-slate-50 text-slate-600 text-xs uppercase tracking-wide">
+      <tr>
+        <th class="text-left px-4 py-2">Slug</th>
+        <th class="text-left px-4 py-2 hidden md:table-cell">Display name</th>
+        <th class="text-right px-4 py-2 hidden sm:table-cell">Users</th>
+        <th class="text-right px-4 py-2 hidden sm:table-cell">Devices</th>
+        <th class="text-right px-4 py-2">Actions</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-100">
+      {{range .Rows}}
+      <tr class="{{if .IsCurrent}}bg-amber-50{{end}}">
+        <td class="px-4 py-2 font-mono">
+          {{.Tenant.ID}}
+          {{if .IsDefault}}<span class="text-xs text-slate-500">(default)</span>{{end}}
+          {{if .IsCurrent}}<span class="text-xs text-amber-700">(current)</span>{{end}}
+          {{if .CrossTenantRead}}<span class="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300" title="mqtt_cross_tenant_read=true: paired devices in this tenant subscribe across ALL tenants">cross-tenant read</span>{{end}}
+          <div class="text-xs text-slate-500 md:hidden">{{.Tenant.DisplayName}}</div>
+          <div class="text-xs text-slate-500 sm:hidden">{{.UserCount}} users / {{.DeviceCount}} devices</div>
+        </td>
+        <td class="px-4 py-2 hidden md:table-cell">{{.Tenant.DisplayName}}</td>
+        <td class="px-4 py-2 text-right hidden sm:table-cell">{{.UserCount}}</td>
+        <td class="px-4 py-2 text-right hidden sm:table-cell">{{.DeviceCount}}</td>
+        <td class="px-4 py-2 text-right">
+          <div class="flex flex-wrap gap-2 justify-end items-center">
+            <a href="/admin/tenants/{{.Tenant.ID}}/users" class="text-xs px-2 py-1 rounded bg-slate-200 hover:bg-slate-300 text-slate-700">users</a>
+            {{if not .IsCurrent}}
+            <form method="POST" action="/admin/impersonate/{{.Tenant.ID}}" class="inline">
+              <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+              <button type="submit" class="text-xs px-2 py-1 rounded bg-sky-600 hover:bg-sky-500 text-white">
+                view as
+              </button>
+            </form>
+            {{end}}
+            {{if and (not .IsDefault) (not .IsCurrent)}}
+            <form method="POST" action="/admin/tenants/{{.Tenant.ID}}/delete" class="inline"
+                  onsubmit="return confirm('Delete tenant {{.Tenant.ID}}? Users, devices, alerts and telemetry for this tenant will be deleted (cascade).');">
+              <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+              <button type="submit" class="text-xs px-2 py-1 rounded bg-red-600 hover:bg-red-500 text-white">
+                delete
+              </button>
+            </form>
+            {{end}}
+          </div>
+        </td>
+      </tr>
+      {{else}}
+      <tr>
+        <td colspan="5" class="px-4 py-8 text-center text-slate-500">No tenants yet.</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+
+<div class="bg-white border border-slate-200 rounded-xl p-5">
+  <h2 class="text-lg font-semibold mb-3">Create tenant</h2>
+  <form method="POST" action="/admin/tenants" class="flex flex-col gap-3 max-w-md">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <label class="text-sm">
+      <span class="block text-slate-700 font-medium mb-1">Slug</span>
+      <input type="text" name="slug" required minlength="3" maxlength="32"
+             pattern="[a-z0-9-]+"
+             placeholder="acme"
+             class="w-full border border-slate-300 rounded px-3 py-2 font-mono">
+      <span class="text-xs text-slate-500 mt-1 block">
+        3-32 chars, lowercase letters, digits, or hyphen. Used as the URL slug
+        and MQTT topic prefix (<code>thesada/&lt;slug&gt;/...</code>). Immutable.
+      </span>
+    </label>
+    <label class="text-sm">
+      <span class="block text-slate-700 font-medium mb-1">Display name</span>
+      <input type="text" name="display_name" maxlength="128"
+             placeholder="ACME Corp"
+             class="w-full border border-slate-300 rounded px-3 py-2">
+    </label>
+    <div>
+      <button type="submit" class="px-4 py-2 rounded bg-slate-900 hover:bg-slate-800 text-white text-sm">
+        Create tenant
+      </button>
+    </div>
+  </form>
+</div>
+{{end}}

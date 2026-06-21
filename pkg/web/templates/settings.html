@@ -1,0 +1,198 @@
+{{define "title"}}Settings - thesada{{end}}
+{{define "content"}}
+<section class="max-w-md">
+  <h1 class="text-2xl font-semibold mb-1">Account settings</h1>
+  <p class="text-sm text-slate-500 mb-6">Signed in as {{.User.Email}}.</p>
+
+  {{if eq .SavedSection "profile"}}
+  <div class="mb-4 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+    Profile updated.
+  </div>
+  {{end}}
+
+  <h2 class="text-lg font-medium mb-2">Profile</h2>
+  <form method="POST" action="/settings/profile" class="space-y-4 mb-8">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <div>
+      <label class="block text-sm font-medium mb-1" for="display_name">Display name</label>
+      <input type="text" id="display_name" name="display_name" value="{{if .User.DisplayName}}{{deref .User.DisplayName}}{{end}}"
+             placeholder="Optional"
+             class="w-full rounded border border-slate-300 px-3 py-2 text-sm">
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1" for="telegram_chat_id">Telegram chat ID</label>
+      <input type="text" id="telegram_chat_id" name="telegram_chat_id" value="{{if .User.TelegramChatID}}{{deref .User.TelegramChatID}}{{end}}"
+             placeholder="e.g. 123456789 or -100987654321"
+             class="w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono">
+      <p class="text-xs text-slate-500 mt-1">
+        To get your chat ID: message <a href="https://t.me/userinfobot" class="text-sky-700 hover:underline" target="_blank">@userinfobot</a> on Telegram.
+        For group alerts, use the group chat ID (starts with -100).
+      </p>
+    </div>
+    <button type="submit"
+            class="rounded bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800">
+      Save profile
+    </button>
+  </form>
+
+  <h2 class="text-lg font-medium mb-2">
+    {{if .HasPassword}}Change password{{else}}Set a password{{end}}
+  </h2>
+  <p class="text-sm text-slate-500 mb-4">
+    {{if .HasPassword}}
+      You can keep using magic links, or update your password below.
+    {{else}}
+      You currently sign in with magic links only. Set a password to enable
+      password login as well.
+    {{end}}
+  </p>
+
+  {{if .Saved}}
+  <div class="mb-4 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+    Password updated.
+  </div>
+  {{end}}
+  {{if .Error}}
+  <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+    {{.Error}}
+  </div>
+  {{end}}
+
+  <form method="POST" action="/settings/password" class="space-y-4 mb-8">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <div>
+      <label class="block text-sm font-medium mb-1" for="password">New password</label>
+      <input type="password" id="password" name="password" required minlength="10"
+             class="w-full rounded border border-slate-300 px-3 py-2 text-sm">
+      <p class="text-xs text-slate-500 mt-1">Minimum 10 characters.</p>
+    </div>
+    <div>
+      <label class="block text-sm font-medium mb-1" for="confirm">Confirm</label>
+      <input type="password" id="confirm" name="confirm" required minlength="10"
+             class="w-full rounded border border-slate-300 px-3 py-2 text-sm">
+    </div>
+    <button type="submit"
+            class="rounded bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800">
+      Save password
+    </button>
+  </form>
+
+  <h2 class="text-lg font-medium mb-2">Alert notifications</h2>
+  <p class="text-sm text-slate-500 mb-4">
+    Subscribe to receive alerts via email or Telegram. Applies to all devices in your tenant.
+  </p>
+
+  {{if eq .SavedSection "notifications"}}
+  <div class="mb-4 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+    Notification settings updated.
+  </div>
+  {{end}}
+
+  {{if .Subscriptions}}
+  <div class="bg-white border border-slate-200 rounded-xl overflow-x-auto mb-4">
+    <table class="min-w-full text-sm">
+      <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+        <tr>
+          <th class="text-left px-4 py-2">Channel</th>
+          <th class="text-left px-4 py-2">Min severity</th>
+          <th class="text-right px-4 py-2"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100">
+        {{range .Subscriptions}}
+        <tr>
+          <td class="px-4 py-2">{{.Channel}}</td>
+          <td class="px-4 py-2">
+            <span class="text-xs px-2 py-0.5 rounded
+              {{if eq .MinSeverity "crit"}}bg-red-100 text-red-700
+              {{else if eq .MinSeverity "warn"}}bg-amber-100 text-amber-700
+              {{else}}bg-slate-100 text-slate-700{{end}}">{{.MinSeverity}}</span>
+          </td>
+          <td class="px-4 py-2 text-right">
+            <form method="POST" action="/settings/notifications/delete" class="inline">
+              <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+              <input type="hidden" name="sub_id" value="{{.ID}}">
+              <button type="submit" class="text-xs text-red-600 hover:underline">Remove</button>
+            </form>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="text-sm text-slate-400 mb-4">No subscriptions yet.</p>
+  {{end}}
+
+  <form method="POST" action="/settings/notifications/add" class="flex flex-wrap gap-2 items-end">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <div>
+      <label class="block text-xs font-medium mb-1">Channel</label>
+      <select name="channel" class="text-sm border border-slate-300 rounded px-2 py-1">
+        <option value="email">Email</option>
+        <option value="telegram">Telegram</option>
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs font-medium mb-1">Min severity</label>
+      <select name="min_severity" class="text-sm border border-slate-300 rounded px-2 py-1">
+        <option value="warn">warn</option>
+        <option value="crit">crit</option>
+        <option value="info">info</option>
+      </select>
+    </div>
+    <button type="submit"
+            class="rounded bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800">
+      Add
+    </button>
+  </form>
+</section>
+
+<section id="sso" class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mt-6">
+  <h2 class="text-lg font-semibold mb-2">Connected accounts</h2>
+  {{if eq .OAuthError "identity_taken"}}
+  <div class="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">
+    That external identity is already linked to a different Thesada account.
+  </div>
+  {{else if eq .OAuthError "last_credential"}}
+  <div class="mb-3 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+    Set a password before removing your last connected account.
+  </div>
+  {{end}}
+
+  {{if .OAuthIdentities}}
+  <ul class="divide-y divide-slate-200 mb-4">
+    {{range .OAuthIdentities}}
+    <li class="py-2 flex items-center justify-between gap-3">
+      <div>
+        <div class="text-sm font-medium">{{.ProviderLabel}}</div>
+        <div class="text-xs text-slate-500">
+          {{if .Email}}{{.Email}}{{else}}{{.Subject}}{{end}}
+          {{if .LastLoginAt}} - last used {{.LastLoginAt.Format "2006-01-02"}}{{end}}
+        </div>
+      </div>
+      <form method="POST" action="/settings/oauth/{{.ID}}/unlink">
+        <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+        <button type="submit" class="text-xs text-red-700 hover:text-red-800 underline">
+          Disconnect
+        </button>
+      </form>
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="text-sm text-slate-500 mb-3">No external accounts connected.</p>
+  {{end}}
+
+  {{if .OAuthProviders}}
+  <div class="space-y-2">
+    {{range .OAuthProviders}}
+    <a href="/auth/oidc/{{.Slug}}/start?linking=1&rt=/settings%23sso"
+       class="block w-full text-center bg-white hover:bg-slate-50 border border-slate-300 text-slate-900 text-sm font-medium py-2 rounded">
+      Connect {{.DisplayName}}
+    </a>
+    {{end}}
+  </div>
+  {{end}}
+</section>
+{{end}}

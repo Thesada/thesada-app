@@ -1,0 +1,8 @@
+# Files allowed to call pools.App.{Query,Exec,...} directly, bypassing the
+# db.WithTenant contract. One repo-root-relative path or directory prefix
+# (trailing slash) per line; # comments and blank lines ignored. The CI
+# guard scripts/check-pools-app.sh fails any new caller outside this list.
+# See docs/invariants.md "Tenant isolation".
+
+# pkg/db internals: the helpers themselves wrap the pool.
+pkg/db/

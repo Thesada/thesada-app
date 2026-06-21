@@ -1,0 +1,51 @@
+# thesada-app self-host stack (quickstart - not hardened; see deploy docs).
+# Run ./startup.sh to scaffold env + secrets, or set them by hand (see *.env.example).
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.27.1-pg17
+    restart: unless-stopped
+    env_file: db.env
+    environment:
+      POSTGRES_USER: thesada_app
+      POSTGRES_DB: thesada_app
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    networks: [thesada-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U thesada_app -d thesada_app"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+    networks: [thesada-broker]
+
+  app:
+    image: ghcr.io/thesada/thesada-app:latest
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    env_file: app.env
+    ports:
+      - "127.0.0.1:8080:8080"   # localhost only; front with a TLS proxy
+    volumes:
+      - ca-data:/opt/thesada-app/ca
+    networks: [thesada-net, thesada-broker]
+
+networks:
+  thesada-net:
+  thesada-broker:
+
+volumes:
+  timescale-data:
+  mosquitto-data:
+  ca-data:

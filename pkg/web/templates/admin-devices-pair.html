@@ -1,0 +1,110 @@
+{{define "title"}}Device pairing - thesada{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+  <h1 class="text-2xl font-semibold">Device pairing (mTLS)</h1>
+  <a href="/admin" class="text-sm text-slate-500 hover:underline">back to admin</a>
+</div>
+<div class="mb-6">
+  <p class="text-sm text-slate-500">
+    Issue per-device X.509 client certs signed by the platform CA and push them over MQTT CLI.
+    Device switches to mTLS on the broker cert-listener after <code class="text-xs bg-slate-100 px-1 rounded">cert.apply</code>.
+  </p>
+</div>
+
+{{if .Flash}}<div class="mb-4 rounded-md bg-emerald-50 border border-emerald-200 p-3 text-sm text-emerald-800">{{.Flash}}</div>{{end}}
+{{if .FlashErr}}<div class="mb-4 rounded-md bg-rose-50 border border-rose-200 p-3 text-sm text-rose-800">{{.FlashErr}}</div>{{end}}
+
+<div class="mb-4 text-sm flex items-center gap-3">
+  {{if .CAReady}}
+    <a href="/admin/ca.crt" class="text-sky-700 hover:underline font-medium">Download CA certificate (ca.crt)</a>
+    <span class="text-slate-500">Needed by Mosquitto cert listener operators.</span>
+  {{else}}
+    <span class="text-rose-700">CA not initialized. Check app startup logs.</span>
+  {{end}}
+</div>
+
+<div class="bg-white border border-slate-200 rounded-xl overflow-x-auto">
+  <table class="min-w-full text-sm">
+    <thead class="bg-slate-50 text-xs uppercase text-slate-500">
+      <tr>
+        <th class="text-left py-2 px-3 hidden md:table-cell">Tenant</th>
+        <th class="text-left py-2 px-3">Device</th>
+        <th class="text-left py-2 px-3">Status</th>
+        <th class="text-left py-2 px-3 hidden lg:table-cell">CN / serial</th>
+        <th class="text-left py-2 px-3 hidden md:table-cell">Valid until</th>
+        <th class="text-left py-2 px-3">Action</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-100">
+      {{range .Rows}}
+      <tr>
+        <td class="py-2 px-3 hidden md:table-cell">{{.Device.TenantID}}</td>
+        <td class="py-2 px-3 font-mono">
+          {{.Device.DeviceID}}
+          <div class="text-xs text-slate-400 md:hidden">{{.Device.TenantID}}{{if .Cert}} - exp {{.Cert.NotAfter.Format "2006-01-02"}}{{end}}</div>
+        </td>
+        <td class="py-2 px-3">
+          {{if eq .Status "paired"}}
+            <span class="inline-block text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">paired</span>
+          {{else}}
+            <span class="inline-block text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-700">unpaired</span>
+          {{end}}
+        </td>
+        <td class="py-2 px-3 text-xs font-mono text-slate-600 hidden lg:table-cell">
+          {{if .Cert}}{{.Cert.CN}}<br><span class="text-slate-400">{{.Cert.SerialHex}}</span>{{else}}-{{end}}
+        </td>
+        <td class="py-2 px-3 text-xs hidden md:table-cell">{{if .Cert}}{{.Cert.NotAfter.Format "2006-01-02"}}{{else}}-{{end}}</td>
+        <td class="py-2 px-3">
+          <div class="flex flex-wrap gap-1 items-center">
+          {{if eq .Status "paired"}}
+            <form method="POST" action="/admin/devices/{{.Device.ID}}/pair/revoke"
+                  onsubmit="return confirm('Revoke cert + push cert.clear to {{.Device.DeviceID}}?')">
+              <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+              <button class="text-xs px-2 py-1 rounded bg-rose-600 text-white hover:bg-rose-700">Revoke</button>
+            </form>
+          {{else}}
+            <form method="POST" action="/admin/devices/{{.Device.ID}}/pair/issue"
+                  onsubmit="return confirm('Issue cert + push to {{.Device.DeviceID}}?')">
+              <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+              <button class="text-xs px-2 py-1 rounded bg-sky-600 text-white hover:bg-sky-700">Issue + push</button>
+            </form>
+          {{end}}
+          <form method="POST" action="/admin/devices/{{.Device.ID}}/delete"
+                onsubmit="return confirmDelete(this, '{{.Device.DeviceID}}');"
+                class="inline-flex gap-1 items-center">
+            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+            <input type="hidden" name="confirm_device_id" value="">
+            <button class="text-xs px-2 py-1 rounded bg-rose-800 text-white hover:bg-rose-900"
+                    title="Delete device + cascade">Delete</button>
+          </form>
+          </div>
+        </td>
+      </tr>
+      {{else}}
+      <tr><td colspan="6" class="py-4 px-3 text-slate-500 text-center">No devices.</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+
+<script>
+// Strong confirm for destructive device delete. Requires the operator
+// to type the device_id back to prove they read it. Sets the hidden
+// confirm_device_id input on the form so the server-side check matches.
+function confirmDelete(form, deviceID) {
+  var typed = window.prompt(
+    'DELETE device "' + deviceID + '"?\n\n' +
+    'This drops the cert, dynsec client + role, and all telemetry / files / ' +
+    'config snapshots / alerts. Re-pairing is the only way back.\n\n' +
+    'Type the device_id to confirm:'
+  );
+  if (typed === null) return false;
+  if (typed !== deviceID) {
+    alert('device_id did not match. Aborted.');
+    return false;
+  }
+  form.querySelector('input[name=confirm_device_id]').value = typed;
+  return true;
+}
+</script>
+{{end}}

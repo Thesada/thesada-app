@@ -1,0 +1,45 @@
+{{define "title"}}Edit user - {{.EditUser.Email}} - thesada{{end}}
+{{define "content"}}
+<div class="mb-4">
+  <a href="/admin/tenants/{{.Tenant.ID}}/users" class="text-xs text-slate-500 hover:underline">&larr; Users</a>
+  <h1 class="text-2xl font-semibold mt-1">Edit user</h1>
+  <p class="text-sm text-slate-500 font-mono">{{.EditUser.Email}}</p>
+</div>
+
+<div class="bg-white border border-slate-200 rounded-xl p-5 mb-6">
+  <form method="POST" action="/admin/tenants/{{.Tenant.ID}}/users/{{.EditUser.ID}}/edit" class="flex flex-col gap-3 max-w-md">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <label class="text-sm">
+      <span class="block text-slate-700 font-medium mb-1">Display name</span>
+      <input type="text" name="display_name" value="{{deref .EditUser.DisplayName}}"
+             class="w-full border border-slate-300 rounded px-3 py-2">
+    </label>
+    <label class="text-sm flex items-center gap-2">
+      <input type="checkbox" name="is_admin" {{if .EditUser.IsAdmin}}checked{{end}}>
+      <span class="text-slate-700">Tenant admin</span>
+    </label>
+    {{if .EditUser.IsSuperAdmin}}
+    <p class="text-xs text-amber-700 bg-amber-50 rounded px-3 py-2">This user is a super admin. That flag is managed separately.</p>
+    {{end}}
+    <div>
+      <button type="submit" class="px-4 py-2 rounded bg-slate-900 hover:bg-slate-800 text-white text-sm">Save</button>
+    </div>
+  </form>
+  <form method="POST" action="/admin/tenants/{{.Tenant.ID}}/users/{{.EditUser.ID}}/send-reset" class="mt-4">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <button type="submit" class="px-4 py-2 rounded bg-sky-600 hover:bg-sky-500 text-white text-sm">Send password reset email</button>
+    <p class="text-xs text-slate-500 mt-1">Sends a 30-minute reset link to {{.EditUser.Email}}.</p>
+  </form>
+</div>
+
+{{if ne .EditUser.ID .Me.ID}}
+<div class="bg-white border border-red-200 rounded-xl p-5">
+  <h2 class="text-lg font-semibold text-red-700 mb-2">Danger zone</h2>
+  <form method="POST" action="/admin/tenants/{{.Tenant.ID}}/users/{{.EditUser.ID}}/delete"
+        onsubmit="return confirm('Really delete {{.EditUser.Email}}? Sessions, magic links, and alert subscriptions cascade.');">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <button type="submit" class="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white text-sm">Delete user</button>
+  </form>
+</div>
+{{end}}
+{{end}}

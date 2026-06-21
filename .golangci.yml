@@ -1,0 +1,48 @@
+# golangci-lint v2 config. Curated linter set; not the kitchen-sink
+# default. Goals:
+#   - catch unhandled errors (covers the 89 LOW-severity gosec findings)
+#   - flag dead/unused code
+#   - keep CI under 60s; no slow analyzers
+#
+# Run locally:  golangci-lint run ./...
+# Run in CI:    .forgejo/workflows/security.yml job 'golangci-lint'
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - errorlint
+    - misspell
+    - prealloc
+    - unconvert
+  settings:
+    errcheck:
+      # json.NewEncoder(w).Encode is the response-writer pattern; surfacing
+      # the error from there rarely changes behavior. Surfaced via gosec at
+      # LOW already. Revisit when we add structured request-id logging.
+      exclude-functions:
+        - encoding/json.NewEncoder.Encode
+        - (net/http.ResponseWriter).Write
+    misspell:
+      # Mosquitto is the actual product name (Eclipse Mosquitto MQTT broker).
+      # Don't flag it as a misspelling of "mosquito" the insect.
+      ignore-rules:
+        - mosquitto
+        - Mosquitto
+
+  exclusions:
+    rules:
+      - path: pkg/web/static/
+        linters:
+          - errcheck
+          - staticcheck

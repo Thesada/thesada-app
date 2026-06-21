@@ -1,0 +1,61 @@
+{{define "title"}}Admin - Waitlist - thesada{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-semibold">Waitlist</h1>
+  <a href="/admin" class="text-sm text-slate-500 hover:underline">back to admin</a>
+</div>
+<p class="text-sm text-slate-500 mb-4">
+  Pending signups waiting to be promoted to real users. Converting creates the user row and emails them a password-reset link so they can set their initial password via the normal /reset-password flow.
+</p>
+
+{{if .Rows}}
+<div class="bg-white border border-slate-200 rounded-xl overflow-x-auto">
+  <table class="min-w-full text-sm">
+    <thead class="bg-slate-50 text-slate-600 text-xs uppercase tracking-wide">
+      <tr>
+        <th class="text-left px-4 py-2">Email</th>
+        <th class="text-left px-4 py-2 hidden sm:table-cell">Note</th>
+        <th class="text-left px-4 py-2">From tenant</th>
+        <th class="text-left px-4 py-2 hidden sm:table-cell">Signed up</th>
+        <th class="text-right px-4 py-2">Convert</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-100">
+      {{range .Rows}}
+      <tr>
+        <td class="px-4 py-2 truncate max-w-[200px]">{{.Entry.Email}}</td>
+        <td class="px-4 py-2 text-slate-600 text-xs hidden sm:table-cell">{{derefOrDash .Entry.Note}}</td>
+        <td class="px-4 py-2 font-mono text-xs">{{.Entry.TenantID}}</td>
+        <td class="px-4 py-2 text-slate-500 text-xs hidden sm:table-cell">{{fmtTime .Entry.CreatedAt}}</td>
+        <td class="px-4 py-2 text-right">
+          <form method="POST" action="/admin/waitlist/{{.Entry.ID}}/convert" class="inline-flex flex-wrap gap-1 items-center"
+                onsubmit="return confirm('Convert {{.Entry.Email}} to a user in the selected tenant? They will get a password-reset email.');">
+            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+            <select name="target_tenant" class="text-xs border border-slate-300 rounded px-2 py-1">
+              {{$src := .Entry.TenantID}}
+              {{range .Tenants}}
+              <option value="{{.ID}}" {{if eq .ID $src}}selected{{end}}>{{.ID}}</option>
+              {{end}}
+            </select>
+            <label class="text-xs flex items-center gap-1">
+              <input type="checkbox" name="is_admin"> admin
+            </label>
+            <button type="submit" class="text-xs px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 text-white">convert</button>
+          </form>
+          <form method="POST" action="/admin/waitlist/{{.Entry.ID}}/delete" class="inline"
+                onsubmit="return confirm('Really delete {{.Entry.Email}} from the waitlist?');">
+            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+            <button type="submit" class="text-xs px-2 py-1 rounded bg-red-600 hover:bg-red-500 text-white">delete</button>
+          </form>
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{else}}
+<div class="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500">
+  No pending signups.
+</div>
+{{end}}
+{{end}}

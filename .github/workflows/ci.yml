@@ -1,0 +1,81 @@
+# PR gate + post-merge run on main: lint, pools-App guard, unit tests, and
+# Go security scanners. Go comes from go.mod via actions/setup-go.
+name: ci
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+  push:
+    branches:
+      - main
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+      # --build-tags integration so //go:build integration files lint too.
+      - name: Run lint
+        run: $(go env GOPATH)/bin/golangci-lint run --build-tags integration ./...
+
+  # Forbid new pools.App.{Query,Exec,...} callers outside the pkg/db contract.
+  pools-app-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Guard pools.App direct callers
+        run: bash scripts/check-pools-app.sh
+
+  # Unit tests (no DB). Integration lane needs a Docker-capable runner with
+  # testcontainers; add when one is wired up.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Run unit tests
+        run: make test
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+      - name: Run govulncheck
+        run: $(go env GOPATH)/bin/govulncheck ./...
+
+  gosec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
+      # Full report to logs (non-gating), then gate on HIGH severity.
+      - name: Full report
+        run: $(go env GOPATH)/bin/gosec -fmt text ./... || true
+      - name: Gate on HIGH severity
+        run: $(go env GOPATH)/bin/gosec -severity high -confidence medium -fmt text -quiet ./...

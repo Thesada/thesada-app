@@ -1,0 +1,652 @@
+{{define "title"}}Config - {{.Device.DeviceID}} - thesada{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+  <div>
+    <a href="/admin/devices" class="text-xs text-slate-500 hover:underline">&larr; All devices</a>
+    <h1 class="text-2xl font-semibold mt-1">{{.Device.DeviceID}} - Config</h1>
+    <p class="text-sm text-slate-500">{{derefOrDash .Device.HardwareType}} - fw {{derefOrDash .Device.FirmwareVersion}} - tenant {{.Device.TenantID}}</p>
+    <p class="text-xs text-slate-400 font-mono mt-1">{{.TopicPrefix}}</p>
+  </div>
+  <div class="flex gap-2">
+    <a href="/devices/{{.Device.ID}}" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Device page</a>
+  </div>
+</div>
+
+<div id="status-bar" class="hidden mb-4 px-4 py-2 rounded text-sm"></div>
+
+<!-- Config section -->
+<section class="mb-8">
+  <div class="flex items-center justify-between mb-2">
+    <h2 class="text-lg font-semibold">Device config</h2>
+    <div class="flex gap-2">
+      <button onclick="loadConfig()" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Load from device</button>
+    </div>
+  </div>
+  <div class="bg-white border border-slate-200 rounded-xl p-4">
+    {{if .LastSnapshot}}
+    <p id="snapshot-notice" class="text-xs text-amber-700 bg-amber-50 border border-amber-300 rounded px-3 py-1 mb-2">
+      Showing last snapshot from <span class="font-mono">{{.LastSnapshot.Source}}</span> at {{fmtTime .LastSnapshot.UpdatedAt}}. Hit "Load from device" before pushing - snapshot may be stale.
+    </p>
+    {{end}}
+    <textarea id="config-editor" class="w-full font-mono text-xs border border-slate-300 rounded p-3 min-h-[200px] resize-y" placeholder="Click 'Load from device' to fetch config...">{{if .LastSnapshot}}{{.LastSnapshot.Content}}{{end}}</textarea>
+    <div class="flex justify-end gap-2 mt-2">
+      <button onclick="saveConfig()" class="text-xs px-3 py-1 rounded bg-amber-600 text-white hover:bg-amber-700">Push config keys</button>
+    </div>
+    <p class="text-xs text-slate-400 mt-1">Pushes changed keys via config.set. Network keys (mqtt.*, wifi.*) trigger a reconnect on the device.</p>
+  </div>
+</section>
+
+<!-- Scripts section -->
+<section class="mb-8">
+  <div class="flex items-center justify-between mb-2">
+    <h2 class="text-lg font-semibold">Scripts</h2>
+    <div class="flex gap-2">
+      <button onclick="loadFileList()" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Refresh file list</button>
+      <button onclick="reloadLua()" class="text-xs px-3 py-1 rounded bg-sky-700 text-white hover:bg-sky-800">lua.reload</button>
+    </div>
+  </div>
+  <div id="file-list" class="bg-white border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100">
+    <p class="px-4 py-8 text-center text-sm text-slate-500">Click 'Refresh file list' to load.</p>
+  </div>
+</section>
+
+<!-- File editor modal -->
+<div id="file-editor-overlay" class="hidden fixed inset-0 bg-black/50 z-40" onclick="closeEditor()"></div>
+<div id="file-editor" class="hidden fixed inset-4 sm:inset-x-16 sm:inset-y-8 bg-white rounded-xl shadow-xl z-50 flex flex-col overflow-hidden">
+  <div class="flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200">
+    <span id="editor-title" class="font-mono text-sm font-semibold"></span>
+    <div class="flex gap-2">
+      <button onclick="saveFile()" class="text-xs px-3 py-1 rounded bg-amber-600 text-white hover:bg-amber-700">Save to device</button>
+      <button onclick="closeEditor()" class="text-xs px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Close</button>
+    </div>
+  </div>
+  <textarea id="editor-content" class="flex-1 font-mono text-xs p-4 resize-none border-none outline-none"></textarea>
+  <div id="editor-status" class="px-4 py-2 text-xs text-slate-500 bg-slate-50 border-t border-slate-200"></div>
+</div>
+
+<!-- Version history section -->
+<section class="mb-8">
+  <div class="flex items-center justify-between mb-2">
+    <h2 class="text-lg font-semibold">Snapshot history</h2>
+    <div class="flex gap-2">
+      <select id="history-path" class="text-sm border border-slate-300 rounded px-2 py-1">
+        <option value="config.json">config.json</option>
+        <option value="/scripts/main.lua">/scripts/main.lua</option>
+        <option value="/scripts/rules.lua">/scripts/rules.lua</option>
+      </select>
+      <select id="history-page-size" class="text-sm border border-slate-300 rounded px-2 py-1" title="Rows per page">
+        <option value="10">10</option>
+        <option value="25">25</option>
+        <option value="50" selected>50</option>
+        <option value="100">100</option>
+      </select>
+      <button onclick="loadHistory()" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Load</button>
+    </div>
+  </div>
+  <div id="history-list" class="bg-white border border-slate-200 rounded-xl overflow-hidden">
+    <p class="px-4 py-4 text-center text-sm text-slate-500">Select a path and click Load.</p>
+  </div>
+  <div id="history-pager" class="flex items-center justify-between mt-2 text-xs text-slate-600 hidden">
+    <span id="history-pager-info"></span>
+    <div class="flex gap-1">
+      <button id="history-prev" onclick="historyPage(-1)" class="px-3 py-1 rounded border border-slate-300 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+      <button id="history-next" onclick="historyPage(1)" class="px-3 py-1 rounded border border-slate-300 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+    </div>
+  </div>
+</section>
+
+<!-- Disk usage section -->
+<section class="mb-8">
+  <div class="flex items-center justify-between mb-2">
+    <h2 class="text-lg font-semibold">Disk usage</h2>
+    <button onclick="loadDiskUsage()" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Refresh</button>
+  </div>
+  <div id="disk-info" class="bg-white border border-slate-200 rounded-xl p-4">
+    <p class="text-sm text-slate-500">Click 'Refresh' to load disk usage.</p>
+  </div>
+</section>
+
+<!-- CLI section -->
+<section class="mb-8">
+  <h2 class="text-lg font-semibold mb-2">CLI</h2>
+  <div class="bg-white border border-slate-200 rounded-xl p-4">
+    <div class="flex gap-2 mb-2">
+      <input id="cli-cmd" type="text" placeholder="command (e.g. heap, version, sensors)" class="flex-1 text-sm border border-slate-300 rounded px-3 py-1 font-mono">
+      <input id="cli-payload" type="text" placeholder="payload (optional)" class="flex-1 text-sm border border-slate-300 rounded px-3 py-1 font-mono">
+      <button onclick="runCLI()" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Send</button>
+    </div>
+    <pre id="cli-output" class="font-mono text-xs bg-slate-50 rounded p-3 min-h-[60px] max-h-[300px] overflow-auto text-slate-700"></pre>
+  </div>
+</section>
+
+<script>
+(function() {
+  var deviceID = "{{.Device.ID}}";
+  var csrfToken = "{{.CSRFToken}}";
+  var originalConfig = null;
+
+  /* ---- helpers ---- */
+
+  var statusHideTimer = null;
+  function status(msg, ok) {
+    var bar = document.getElementById("status-bar");
+    bar.textContent = msg;
+    bar.className = "mb-4 px-4 py-2 rounded text-sm " +
+      (ok ? "bg-green-50 text-green-800 border border-green-200" :
+            "bg-red-50 text-red-800 border border-red-200");
+    if (statusHideTimer) { clearTimeout(statusHideTimer); }
+    statusHideTimer = setTimeout(function() {
+      bar.className = "hidden mb-4 px-4 py-2 rounded text-sm";
+    }, 5000);
+  }
+
+  /* Sticky status: stays visible until the next status() / statusPending()
+     call clears it. Use for long-running async work (cellular CLI can take
+     up to cliTimeoutSeconds), where the default 5s auto-hide misleads the
+     operator into thinking the request finished. */
+  function statusPending(msg) {
+    var bar = document.getElementById("status-bar");
+    bar.textContent = msg;
+    bar.className = "mb-4 px-4 py-2 rounded text-sm bg-sky-100 text-sky-800 border border-sky-500";
+    if (statusHideTimer) { clearTimeout(statusHideTimer); statusHideTimer = null; }
+  }
+
+  /* Robust JSON parse: surface HTTP status + first chunk of body on non-JSON
+     responses instead of letting r.json() throw a bare SyntaxError. Reverse
+     proxies / Cloudflare can swap a JSON 504 for an HTML error page on long-
+     running upstream calls; without this, the browser sees only "SyntaxError:
+     The string did not match the expected pattern." (#221 / #222). */
+  function readJSON(r) {
+    return r.text().then(function(text) {
+      var ct = r.headers.get("content-type") || "";
+      if (!ct.includes("application/json")) {
+        throw new Error("HTTP " + r.status + " " + r.statusText + ": " +
+          (text || "").slice(0, 200));
+      }
+      try {
+        return JSON.parse(text);
+      } catch (e) {
+        throw new Error("Bad JSON from server (HTTP " + r.status + "): " +
+          (text || "").slice(0, 200));
+      }
+    });
+  }
+
+  var cliTimeoutSeconds = {{.CLITimeoutSeconds}};
+
+  /* Async CLI: POST enqueues, GET /result?id=... is polled every 2s until
+     terminal. Resolves with the CLIResponse (as the old postCmd did) or
+     rejects with an Error carrying status + message. */
+  function postCmd(command, payload) {
+    return fetch("/admin/devices/" + deviceID + "/config/cmd", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: JSON.stringify({ command: command, payload: payload || "" })
+    }).then(readJSON).then(function(enq) {
+      if (!enq.request_id) {
+        throw new Error("enqueue failed: " + JSON.stringify(enq));
+      }
+      return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds);
+    });
+  }
+
+  function postWrite(path, content) {
+    return fetch("/admin/devices/" + deviceID + "/config/write", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: JSON.stringify({ path: path, content: content })
+    }).then(readJSON).then(function(enq) {
+      if (!enq.request_id) {
+        throw new Error("enqueue failed: " + JSON.stringify(enq));
+      }
+      return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds)
+        .then(function(resp) {
+          /* Synthesize the legacy write-response shape (ok/bytes/chunks)
+             from the goroutine's summary so saveFile() does not need to
+             know about the async refactor. */
+          if (!resp.ok) { return { ok: false, error: (resp.output || []).join(" ") }; }
+          var line = (resp.output && resp.output[0]) || "";
+          var m = line.match(/^(\d+) bytes in (\d+) chunk/);
+          return { ok: true, bytes: m ? parseInt(m[1], 10) : 0, chunks: m ? parseInt(m[2], 10) : 0 };
+        });
+    });
+  }
+
+  function pollResult(requestID, timeoutSeconds) {
+    var pollInterval = 2000;
+    var deadline = Date.now() + (timeoutSeconds * 1000) + 5000; /* grace */
+    return new Promise(function(resolve, reject) {
+      function tick() {
+        if (Date.now() > deadline) {
+          reject(new Error("client poll deadline exceeded (" + timeoutSeconds + "s)"));
+          return;
+        }
+        fetch("/admin/devices/" + deviceID + "/config/cmd/result?id=" +
+          encodeURIComponent(requestID), { credentials: "same-origin" })
+          .then(readJSON).then(function(res) {
+            if (res.status === "pending") {
+              setTimeout(tick, pollInterval);
+              return;
+            }
+            if (res.status === "done") {
+              resolve(res.response || {});
+              return;
+            }
+            reject(new Error(res.status + ": " + (res.error || "no detail")));
+          }).catch(reject);
+      }
+      tick();
+    });
+  }
+
+  /* ---- config ---- */
+
+  /* Chunked fs.cat /config.json instead of single-shot config.dump.
+     On cellular the single-shot publish of a multi-KB config JSON
+     overflows the SIM7080 AT-bus line buffer (cellATWrite logs "line
+     overflow - dropping"). fs.cat takes offset + chunkSize args and
+     the firmware streams ~2KB per response - cellular-friendly and
+     identical to the proven file editor read path. */
+  window.loadConfig = function() {
+    statusPending("Loading config from device (chunked, up to " + cliTimeoutSeconds + "s per chunk on cellular)...");
+    var path = "/config.json";
+    var content = "";
+    var offset = 0;
+    var chunkSize = 2048;
+    function readChunk() {
+      postCmd("fs.cat", path + " " + offset + " " + chunkSize).then(function(resp) {
+        if (!resp.ok) {
+          status("Load failed: " + (resp.output || []).join(" "), false);
+          return;
+        }
+        content += resp.data || "";
+        offset += resp.length || 0;
+        if (resp.total) {
+          statusPending("Loading config: " + offset + " / " + resp.total + " bytes...");
+        }
+        if (!resp.done) {
+          readChunk();
+        } else {
+          var pretty = content;
+          try {
+            var obj = JSON.parse(content);
+            pretty = JSON.stringify(obj, null, 2);
+            originalConfig = obj;
+          } catch (e) {
+            originalConfig = null;
+            status("Load completed but JSON parse failed: " + e.message, false);
+            document.getElementById("config-editor").value = content;
+            return;
+          }
+          document.getElementById("config-editor").value = pretty;
+          var notice = document.getElementById("snapshot-notice");
+          if (notice) { notice.remove(); }
+          /* Record the assembled content as a snapshot row. The previous
+             single-shot config.dump path did this implicitly server-side
+             via snapshotFromCmdResponse; chunked fs.cat needs an explicit
+             upsert because the backend only sees per-chunk responses. */
+          fetch("/admin/devices/" + deviceID + "/config/snapshot", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+            body: JSON.stringify({ path: "config.json", content: content, source: "read" })
+          }).then(readJSON).then(function(r) {
+            if (!r.ok) {
+              console.warn("snapshot upsert returned non-ok:", r);
+            }
+          }).catch(function(e) {
+            console.warn("snapshot upsert failed:", e);
+          });
+          status("Config loaded (" + content.length + " bytes)", true);
+        }
+      }).catch(function(e) {
+        status("Error: " + (e.message || e), false);
+      });
+    }
+    readChunk();
+  };
+
+  window.saveConfig = function() {
+    var editor = document.getElementById("config-editor");
+    var newConfig;
+    try {
+      newConfig = JSON.parse(editor.value);
+    } catch(e) {
+      status("Invalid JSON: " + e.message, false);
+      return;
+    }
+    if (!originalConfig) {
+      status("Load config first to detect changes", false);
+      return;
+    }
+
+    /* Diff flat dot-notation keys */
+    var changes = [];
+    function diff(obj1, obj2, prefix) {
+      var allKeys = {};
+      Object.keys(obj1 || {}).forEach(function(k) { allKeys[k] = true; });
+      Object.keys(obj2 || {}).forEach(function(k) { allKeys[k] = true; });
+      Object.keys(allKeys).forEach(function(k) {
+        var path = prefix ? prefix + "." + k : k;
+        var v1 = obj1 ? obj1[k] : undefined;
+        var v2 = obj2 ? obj2[k] : undefined;
+        if (typeof v1 === "object" && v1 !== null && typeof v2 === "object" && v2 !== null) {
+          diff(v1, v2, path);
+        } else if (JSON.stringify(v1) !== JSON.stringify(v2)) {
+          changes.push({ key: path, value: v2 });
+        }
+      });
+    }
+    diff(originalConfig, newConfig, "");
+
+    if (changes.length === 0) {
+      status("No changes detected", true);
+      return;
+    }
+
+    statusPending("Pushing " + changes.length + " config key(s) (up to " +
+      cliTimeoutSeconds + "s each on cellular)...");
+    /* Track which keys actually landed so a partial-success push does
+       not rewind originalConfig past a failure. Surface device-side
+       rejects (e.g. "Array index out of range" from the firmware
+       walker) instead of silently flipping to "Pushed N keys" - that
+       used to mask real failures. */
+    var landed = JSON.parse(JSON.stringify(originalConfig));
+    function applyLanded(obj, keyPath, value) {
+      var parts = keyPath.split(".");
+      var node = obj;
+      for (var i = 0; i < parts.length - 1; i++) {
+        if (node[parts[i]] === undefined || node[parts[i]] === null) {
+          node[parts[i]] = {};
+        }
+        node = node[parts[i]];
+      }
+      node[parts[parts.length - 1]] = value;
+    }
+    var chain = Promise.resolve();
+    var ok = 0;
+    changes.forEach(function(c) {
+      chain = chain.then(function() {
+        statusPending("Pushing " + c.key + " (" + (ok + 1) + "/" +
+          changes.length + ")...");
+        return postCmd("config.set", c.key + " " + JSON.stringify(c.value)).then(function(resp) {
+          if (!resp.ok) {
+            throw new Error(c.key + ": " + (resp.output || []).join(" "));
+          }
+          applyLanded(landed, c.key, c.value);
+          ok++;
+        });
+      });
+    });
+    chain.then(function() {
+      originalConfig = landed;
+      status("Pushed " + ok + " key(s)", true);
+    }).catch(function(e) {
+      /* Stop on first failure: later keys often depend on earlier ones.
+         Keep originalConfig at the partial-success state so the next
+         editor diff retries only what's still pending. */
+      originalConfig = landed;
+      status("Push failed (" + ok + "/" + changes.length + " landed): " +
+        (e.message || e), false);
+    });
+  };
+
+  /* ---- file list ---- */
+
+  window.loadFileList = function() {
+    statusPending("Listing /scripts on device (up to " + cliTimeoutSeconds + "s, runs in background)...");
+    document.getElementById("file-list").innerHTML =
+      '<p class="px-4 py-4 text-center text-sm text-slate-500">Awaiting response from device...</p>';
+    postCmd("fs.ls", "/scripts").then(function(resp) {
+      var container = document.getElementById("file-list");
+      if (!resp.ok) {
+        container.innerHTML = '<p class="px-4 py-4 text-sm text-red-600">' + (resp.output || []).join(" ") + '</p>';
+        status("File list failed", false);
+        return;
+      }
+      var html = '';
+      (resp.output || []).forEach(function(line) {
+        var match = line.trim().match(/^(\d+)\s+(.+)$/);
+        if (!match) return;
+        var size = match[1];
+        var name = match[2];
+        // fs.ls v1.3.9+ emits absolute paths; older firmware emits basenames.
+        var path = name.charAt(0) === "/" ? name : "/scripts/" + name;
+        var display = name.charAt(0) === "/" ? name.replace(/^\/scripts\//, "") : name;
+        html += '<div class="flex items-center justify-between px-4 py-2 hover:bg-slate-50">' +
+          '<div><span class="font-mono text-sm">' + display + '</span>' +
+          '<span class="text-xs text-slate-400 ml-2">' + size + ' bytes</span></div>' +
+          '<div class="flex gap-2">' +
+          '<button onclick="openFile(\'' + path + '\')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">Edit</button>' +
+          '</div></div>';
+      });
+      if (!html) html = '<p class="px-4 py-4 text-sm text-slate-500">No files found.</p>';
+      container.innerHTML = html;
+      status("File list loaded", true);
+    }).catch(function(e) {
+      document.getElementById("file-list").innerHTML =
+        '<p class="px-4 py-4 text-sm text-red-600">Error: ' + (e.message || e) + '</p>';
+      status("File list error: " + (e.message || e), false);
+    });
+  };
+
+  /* ---- file editor ---- */
+
+  var currentFilePath = "";
+
+  window.openFile = function(path) {
+    currentFilePath = path;
+    document.getElementById("editor-title").textContent = path;
+    document.getElementById("editor-content").value = "Loading...";
+    document.getElementById("editor-status").textContent =
+      "Reading " + path + " from device (up to " + cliTimeoutSeconds + "s per chunk)...";
+    document.getElementById("file-editor-overlay").classList.remove("hidden");
+    document.getElementById("file-editor").classList.remove("hidden");
+
+    /* Chunked read */
+    var content = "";
+    var offset = 0;
+    var chunkSize = 2048;
+
+    function readChunk() {
+      postCmd("fs.cat", path + " " + offset + " " + chunkSize).then(function(resp) {
+        if (!resp.ok) {
+          document.getElementById("editor-content").value = "Error: " + (resp.output || []).join(" ");
+          document.getElementById("editor-status").textContent = "Read failed";
+          return;
+        }
+        content += resp.data || "";
+        var total = resp.total || 0;
+        var done = resp.done;
+        offset += resp.length || 0;
+        document.getElementById("editor-status").textContent = "Read " + offset + " / " + total + " bytes";
+        if (!done) {
+          readChunk();
+        } else {
+          document.getElementById("editor-content").value = content;
+          document.getElementById("editor-status").textContent = total + " bytes loaded";
+        }
+      }).catch(function(e) {
+        document.getElementById("editor-status").textContent = "Error: " + e;
+      });
+    }
+    readChunk();
+  };
+
+  window.saveFile = function() {
+    var content = document.getElementById("editor-content").value;
+    document.getElementById("editor-status").textContent = "Saving " + content.length + " bytes...";
+    postWrite(currentFilePath, content).then(function(resp) {
+      if (resp.ok) {
+        document.getElementById("editor-status").textContent =
+          "Saved " + resp.bytes + " bytes in " + resp.chunks + " chunk(s)";
+        status("Saved " + currentFilePath, true);
+      } else {
+        document.getElementById("editor-status").textContent = "Error: " + (resp.error || "unknown");
+        status("Save failed: " + (resp.error || "unknown"), false);
+      }
+    }).catch(function(e) {
+      document.getElementById("editor-status").textContent = "Error: " + e;
+    });
+  };
+
+  window.closeEditor = function() {
+    document.getElementById("file-editor-overlay").classList.add("hidden");
+    document.getElementById("file-editor").classList.add("hidden");
+  };
+
+  /* ---- lua reload ---- */
+
+  window.reloadLua = function() {
+    statusPending("Reloading Lua on device (up to " + cliTimeoutSeconds + "s, runs in background)...");
+    postCmd("lua.reload").then(function(resp) {
+      if (resp.ok) {
+        status("Lua reloaded: " + (resp.output || []).join(" "), true);
+      } else {
+        status("Reload failed: " + (resp.output || []).join(" "), false);
+      }
+    }).catch(function(e) { status("Error: " + (e.message || e), false); });
+  };
+
+  /* ---- disk usage ---- */
+
+  window.loadDiskUsage = function() {
+    statusPending("Reading disk usage from device (up to " + cliTimeoutSeconds + "s, runs in background)...");
+    document.getElementById("disk-info").innerHTML =
+      '<p class="text-sm text-slate-500">Awaiting response from device...</p>';
+    postCmd("fs.df").then(function(resp) {
+      var container = document.getElementById("disk-info");
+      if (!resp.ok) {
+        container.innerHTML = '<p class="text-sm text-red-600">' + (resp.output || []).join(" ") + '</p>';
+        status("Disk usage failed", false);
+        return;
+      }
+      container.innerHTML = '<pre class="font-mono text-xs text-slate-700">' +
+        (resp.output || []).join("\n") + '</pre>';
+      status("Disk usage loaded", true);
+    }).catch(function(e) {
+      document.getElementById("disk-info").innerHTML =
+        '<p class="text-sm text-red-600">Error: ' + (e.message || e) + '</p>';
+      status("Disk usage error: " + (e.message || e), false);
+    });
+  };
+
+  /* ---- CLI ---- */
+
+  window.runCLI = function() {
+    var cmd = document.getElementById("cli-cmd").value.trim();
+    var payload = document.getElementById("cli-payload").value;
+    if (!cmd) return;
+    document.getElementById("cli-output").textContent =
+      "Awaiting response from device (up to " + cliTimeoutSeconds + "s)...";
+    postCmd(cmd, payload).then(function(resp) {
+      var out = JSON.stringify(resp, null, 2);
+      document.getElementById("cli-output").textContent = out;
+    }).catch(function(e) {
+      document.getElementById("cli-output").textContent = "Error: " + (e.message || e);
+    });
+  };
+
+  document.getElementById("cli-cmd").addEventListener("keydown", function(e) {
+    if (e.key === "Enter") { window.runCLI(); }
+  });
+
+  /* ---- version history ---- */
+
+  var historySnapshots = [];
+  var historyOffset = 0;
+  var historyTotal = 0;
+
+  function historyPageSize() {
+    return parseInt(document.getElementById("history-page-size").value, 10) || 50;
+  }
+
+  window.historyPage = function(delta) {
+    var size = historyPageSize();
+    var next = historyOffset + delta * size;
+    if (next < 0) next = 0;
+    if (next >= historyTotal) return;
+    historyOffset = next;
+    loadHistory(true);
+  };
+
+  window.loadHistory = function(keepOffset) {
+    if (!keepOffset) historyOffset = 0;
+    var path = document.getElementById("history-path").value;
+    var size = historyPageSize();
+    var url = "/admin/devices/" + deviceID + "/config/history" +
+              "?path=" + encodeURIComponent(path) +
+              "&limit=" + size + "&offset=" + historyOffset;
+    fetch(url, { credentials: "same-origin" })
+      .then(function(r) { return r.json(); }).then(function(resp) {
+      historySnapshots = (resp && resp.snapshots) || [];
+      historyTotal = (resp && resp.total) || 0;
+      var pager = document.getElementById("history-pager");
+      var info = document.getElementById("history-pager-info");
+      var prev = document.getElementById("history-prev");
+      var next = document.getElementById("history-next");
+      var container = document.getElementById("history-list");
+      if (historyTotal === 0) {
+        container.innerHTML = '<p class="px-4 py-4 text-center text-sm text-slate-500">No snapshots yet.</p>';
+        pager.classList.add("hidden");
+        return;
+      }
+      pager.classList.remove("hidden");
+      var pageStart = historyOffset + 1;
+      var pageEnd = Math.min(historyOffset + historySnapshots.length, historyTotal);
+      info.textContent = "Showing " + pageStart + "-" + pageEnd + " of " + historyTotal;
+      prev.disabled = historyOffset === 0;
+      next.disabled = pageEnd >= historyTotal;
+      var html = '<table class="min-w-full text-sm"><thead class="bg-slate-50 text-slate-600 text-xs uppercase">' +
+        '<tr><th class="text-left px-4 py-2">Time</th><th class="text-left px-4 py-2">Source</th>' +
+        '<th class="text-left px-4 py-2">SHA256</th><th class="text-left px-4 py-2">Size</th>' +
+        '<th class="text-right px-4 py-2">Actions</th></tr></thead><tbody class="divide-y divide-slate-100">';
+      historySnapshots.forEach(function(s, idx) {
+        var t = new Date(s.created_at).toLocaleString();
+        var sourceClass = s.source === "drift" ? "bg-amber-100 text-amber-700" :
+                          s.source === "write" ? "bg-sky-100 text-sky-700" :
+                          "bg-slate-100 text-slate-600";
+        html += '<tr>' +
+          '<td class="px-4 py-2 text-xs text-slate-500"><time datetime="' + s.created_at + '">' + t + '</time></td>' +
+          '<td class="px-4 py-2"><span class="text-xs px-2 py-0.5 rounded ' + sourceClass + '">' + s.source + '</span></td>' +
+          '<td class="px-4 py-2 font-mono text-xs text-slate-400">' + s.sha256.substring(0, 12) + '</td>' +
+          '<td class="px-4 py-2 text-xs text-slate-500">' + s.content.length + ' B</td>' +
+          '<td class="px-4 py-2 text-right">' +
+          '<button onclick="viewSnapshot(' + idx + ')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">View</button> ' +
+          '<button onclick="restoreSnapshot(' + idx + ')" class="text-xs px-2 py-1 rounded border border-amber-300 text-amber-700 hover:bg-amber-50">Restore</button>' +
+          '</td></tr>';
+      });
+      html += '</tbody></table>';
+      container.innerHTML = html;
+    });
+  };
+
+  window.viewSnapshot = function(idx) {
+    var s = historySnapshots[idx];
+    if (!s) return;
+    currentFilePath = s.path;
+    document.getElementById("editor-title").textContent = s.path + " (snapshot #" + s.id + ")";
+    document.getElementById("editor-content").value = s.content;
+    document.getElementById("editor-status").textContent = s.content.length + " bytes (read-only snapshot)";
+    document.getElementById("file-editor-overlay").classList.remove("hidden");
+    document.getElementById("file-editor").classList.remove("hidden");
+  };
+
+  window.restoreSnapshot = function(idx) {
+    var s = historySnapshots[idx];
+    if (!s) return;
+    if (!confirm("Push this snapshot back to the device at " + s.path + "?")) return;
+    status("Restoring " + s.path + "...", true);
+    postWrite(s.path, s.content).then(function(resp) {
+      if (resp.ok) {
+        status("Restored " + s.path + " (" + resp.bytes + " bytes)", true);
+      } else {
+        status("Restore failed: " + (resp.error || "unknown"), false);
+      }
+    });
+  };
+})();
+</script>
+{{end}}

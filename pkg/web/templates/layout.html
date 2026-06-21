@@ -1,0 +1,88 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{block "title" .}}thesada{{end}}</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <!-- vendored JS - check quarterly, see  -->
+  <!-- htmx 2.0.9 - https://htmx.org/docs/#installing -->
+  <script src="/static/js/htmx.min.js" defer></script>
+  <!-- chart.js 4.5.1 - https://www.chartjs.org/docs/latest/ -->
+  <script src="/static/js/chart.umd.min.js" defer></script>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen">
+  <header class="bg-slate-900 text-slate-100">
+    <div class="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-2">
+      <a href="/" class="font-semibold text-lg tracking-tight shrink-0">thesada</a>
+      <nav class="flex flex-wrap gap-x-4 gap-y-1 text-sm items-center justify-end">
+        {{if .User}}
+        <a href="/devices" class="hover:text-white text-slate-300">Devices</a>
+        <a href="/alerts" class="hover:text-white text-slate-300">Alerts</a>
+        <a href="/settings" class="hover:text-white text-slate-300">Settings</a>
+        {{if .User.IsSuperAdmin}}
+        <a href="/admin" class="hover:text-white text-amber-300">Admin</a>
+        {{end}}
+        {{if and .User.IsSuperAdmin .EffectiveTenantID}}
+          {{if ne .EffectiveTenantID .User.TenantID}}
+          <form method="POST" action="/admin/impersonate" class="inline">
+            <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+            <button type="submit" class="text-xs px-2 py-1 rounded bg-amber-700 hover:bg-amber-600 text-amber-50" title="Viewing as {{.EffectiveTenantID}}">
+              viewing: {{.EffectiveTenantID}} &times;
+            </button>
+          </form>
+          {{end}}
+        {{end}}
+        <span class="text-slate-400 text-xs truncate max-w-[140px] sm:max-w-none">{{.User.Email}}</span>
+        <form method="POST" action="/logout" class="inline">
+          <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+          <button type="submit" class="hover:text-white text-slate-300">Logout</button>
+        </form>
+        {{else}}
+        <a href="/signup" class="hover:text-white text-slate-300">Sign up</a>
+        <a href="/login" class="hover:text-white text-slate-300">Login</a>
+        {{end}}
+      </nav>
+    </div>
+  </header>
+  <main class="max-w-5xl mx-auto px-4 py-8">
+    {{block "content" .}}{{end}}
+  </main>
+  <footer class="max-w-5xl mx-auto px-4 py-6 text-xs text-slate-500">
+    thesada-app dev build - {{.Now}}
+  </footer>
+  <script>
+    document.querySelectorAll('time[datetime]').forEach(function (el) {
+      var d = new Date(el.getAttribute('datetime'));
+      if (!isNaN(d)) el.textContent = d.toLocaleString();
+    });
+  </script>
+  {{if .User}}
+  <script>
+    (function () {
+      var proto = location.protocol === "https:" ? "wss:" : "ws:";
+      var url = proto + "//" + location.host + "/ws";
+      var backoff = 1000;
+      function connect() {
+        var s = new WebSocket(url);
+        s.onopen = function () { backoff = 1000; };
+        s.onmessage = function (ev) {
+          try {
+            var m = JSON.parse(ev.data);
+            document.dispatchEvent(new CustomEvent("thesada:event", { detail: m }));
+          } catch (e) {}
+        };
+        s.onclose = function () {
+          setTimeout(connect, backoff);
+          backoff = Math.min(backoff * 2, 30000);
+        };
+        s.onerror = function () { s.close(); };
+      }
+      connect();
+    })();
+  </script>
+  {{end}}
+</body>
+</html>
+{{end}}
