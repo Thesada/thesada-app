@@ -1,0 +1,36 @@
+{{define "title"}}Alerts - thesada{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4"
+     hx-get="/alerts" hx-trigger="thesada:event from:body throttle:2s" hx-select="#alerts-live" hx-target="#alerts-live" hx-swap="outerHTML">
+  <h1 class="text-2xl font-semibold">Alerts</h1>
+  <span class="text-sm text-slate-500">{{len .Alerts}} recent</span>
+</div>
+<div id="alerts-live">
+{{if .Alerts}}
+<ul class="space-y-2">
+  {{range .Alerts}}
+  <li class="bg-white border border-slate-200 rounded p-3 text-sm flex items-start gap-3">
+    <span class="inline-block px-2 py-0.5 text-xs rounded shrink-0
+      {{if eq .Severity "crit"}}bg-red-100 text-red-700
+      {{else if eq .Severity "warn"}}bg-amber-100 text-amber-700
+      {{else}}bg-slate-100 text-slate-700{{end}}">
+      {{.Severity}}
+    </span>
+    <div class="flex-1 min-w-0">
+      <div class="flex items-center gap-2 text-xs text-slate-500">
+        <a href="/devices/{{.DevicePK}}" class="hover:underline font-medium text-slate-700">{{.DeviceID}}</a>
+        <span>{{fmtTime .ReceivedAt}}</span>
+        {{if .Code}}<span class="font-mono">{{deref .Code}}</span>{{end}}
+      </div>
+      <div class="mt-1">{{.Message}}</div>
+    </div>
+  </li>
+  {{end}}
+</ul>
+{{else}}
+<div class="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500">
+  No alerts yet.
+</div>
+{{end}}
+</div>
+{{end}}

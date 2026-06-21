@@ -1,0 +1,190 @@
+{{define "title"}}Admin - Devices - thesada{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-semibold">All devices</h1>
+  <a href="/admin" class="text-sm text-slate-500 hover:underline">back to admin</a>
+</div>
+<p class="text-sm text-slate-500 mb-4">
+  Cross-tenant view. Move a device to a different tenant by picking a target and clicking reassign. <strong>You must update the on-device <code class="text-xs">mqtt.topic_prefix</code> separately</strong> - this form only touches the app-side row.
+</p>
+
+<!-- Bulk form is empty + sits OUTSIDE the table. Per-row checkboxes,
+     the action select, and the submit button reach back into it via
+     the HTML5 `form="bulk-form"` attribute. This keeps the per-row
+     reassign forms (`POST /admin/devices/{id}/reassign`) as siblings
+     instead of nesting them inside the bulk form, which is invalid
+     HTML and was rendering the last column oddly. -->
+<form id="bulk-form" method="POST" action="/admin/devices/bulk"
+      onsubmit="return confirmBulk(this);">
+  <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+  <input type="hidden" name="confirm_cross_tenant" id="bulk-confirm-cross-tenant" value="">
+</form>
+
+<div class="bg-white border border-slate-200 rounded-xl px-4 py-3 mb-3 flex flex-wrap gap-2 items-center">
+  <span class="text-xs text-slate-500" id="bulk-count">0 selected</span>
+  <select form="bulk-form" name="action" id="bulk-action" class="text-xs border border-slate-300 rounded px-2 py-1">
+    <option value="ota">Force OTA check</option>
+    <option value="reassign">Reassign tenant</option>
+    <option value="delete">Delete (destructive)</option>
+  </select>
+  <select form="bulk-form" name="target_tenant" id="bulk-target-tenant"
+          class="text-xs border border-slate-300 rounded px-2 py-1 hidden">
+    {{range .Tenants}}
+    <option value="{{.ID}}">{{.ID}}</option>
+    {{end}}
+  </select>
+  <button form="bulk-form" type="submit" id="bulk-submit"
+          class="text-xs px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 text-white">
+    apply to selected
+  </button>
+</div>
+
+<div class="bg-white border border-slate-200 rounded-xl overflow-x-auto">
+  <table class="min-w-full text-sm">
+    <thead class="bg-slate-50 text-slate-600 text-xs uppercase tracking-wide">
+      <tr>
+        <th class="text-left px-4 py-2 w-8">
+          <input type="checkbox" id="bulk-all" aria-label="Select all">
+        </th>
+        <th class="text-left px-4 py-2 hidden md:table-cell">Tenant</th>
+        <th class="text-left px-4 py-2">Device ID</th>
+        <th class="text-left px-4 py-2 hidden lg:table-cell">Hardware</th>
+        <th class="text-left px-4 py-2 hidden lg:table-cell">Firmware</th>
+        <th class="text-left px-4 py-2 hidden md:table-cell">Uptime</th>
+        <th class="text-left px-4 py-2 hidden sm:table-cell">Last seen</th>
+        <th class="text-right px-4 py-2">Reassign</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-100">
+      {{range .Devices}}
+      <tr>
+        <td class="px-4 py-2">
+          <input type="checkbox" form="bulk-form" name="device_ids" value="{{.ID}}"
+                 class="bulk-row" data-tenant="{{.TenantID}}" data-device-id="{{.DeviceID}}"
+                 aria-label="Select {{.DeviceID}}">
+        </td>
+        <td class="px-4 py-2 font-mono text-xs hidden md:table-cell">{{.TenantID}}</td>
+        <td class="px-4 py-2">
+          <a href="/devices/{{.ID}}" class="text-sky-700 hover:underline">{{.DeviceID}}</a>
+          <a href="/admin/devices/{{.ID}}/config" class="ml-2 text-xs text-slate-400 hover:text-slate-600" title="Config">config</a>
+          <div class="text-xs text-slate-500 md:hidden">
+            {{.TenantID}}{{with derefOrDash .HardwareType}}{{if ne . "-"}} - {{.}}{{end}}{{end}}{{with derefOrDash .FirmwareVersion}}{{if ne . "-"}} - fw {{.}}{{end}}{{end}}
+          </div>
+          <div class="text-xs text-slate-400 sm:hidden">{{timeOrDash .LastSeenAt}}</div>
+        </td>
+        <td class="px-4 py-2 hidden lg:table-cell">{{derefOrDash .HardwareType}}</td>
+        <td class="px-4 py-2 hidden lg:table-cell">{{derefOrDash .FirmwareVersion}}</td>
+        <td class="px-4 py-2 text-slate-500 text-xs hidden md:table-cell">{{uptimeLive .LastUptimeSeconds .LastUptimeAt}}</td>
+        <td class="px-4 py-2 text-slate-500 text-xs whitespace-nowrap hidden sm:table-cell">{{timeOrDash .LastSeenAt}}</td>
+        <td class="px-4 py-2 text-right">
+          <form method="POST" action="/admin/devices/{{.ID}}/reassign" class="inline-flex flex-wrap gap-1 items-center"
+                onsubmit="return confirm('Reassign {{.DeviceID}} to the selected tenant? Remember to also update the on-device mqtt.topic_prefix.');">
+            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+            <select name="target_tenant" class="text-xs border border-slate-300 rounded px-2 py-1">
+              {{$cur := .TenantID}}
+              {{range $.Tenants}}
+              <option value="{{.ID}}" {{if eq .ID $cur}}selected{{end}}>{{.ID}}</option>
+              {{end}}
+            </select>
+            <button type="submit" class="text-xs px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 text-white">move</button>
+          </form>
+        </td>
+      </tr>
+      {{else}}
+      <tr><td colspan="8" class="px-4 py-8 text-center text-slate-500">No devices yet.</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+
+<script>
+(function () {
+  var all = document.getElementById('bulk-all');
+  var rows = document.querySelectorAll('.bulk-row');
+  var counter = document.getElementById('bulk-count');
+  function recount() {
+    var n = 0;
+    rows.forEach(function (cb) { if (cb.checked) n++; });
+    counter.textContent = n + ' selected';
+  }
+  if (all) {
+    all.addEventListener('change', function () {
+      rows.forEach(function (cb) { cb.checked = all.checked; });
+      recount();
+    });
+  }
+  rows.forEach(function (cb) { cb.addEventListener('change', recount); });
+  recount();
+})();
+
+// Toggle the target_tenant select visibility off the action choice. The
+// element is form-attached via form="bulk-form" so it's submitted whether
+// visible or not - hiding it is a UI affordance, not a security gate.
+(function () {
+  var act = document.getElementById('bulk-action');
+  var tgt = document.getElementById('bulk-target-tenant');
+  if (!act || !tgt) return;
+  function sync() { tgt.classList.toggle('hidden', act.value !== 'reassign'); }
+  act.addEventListener('change', sync);
+  sync();
+})();
+
+function confirmBulk(form) {
+  var checked = document.querySelectorAll('input.bulk-row:checked');
+  var n = checked.length;
+  if (n === 0) {
+    alert('No devices selected.');
+    return false;
+  }
+  var action = form.querySelector('select[name=action]').value;
+
+  if (action === 'reassign') {
+    var t = form.querySelector('select[name=target_tenant]').value;
+    return confirm('About to reassign to tenant "' + t + '" ' + n +
+      ' device(s). The on-device mqtt.topic_prefix must be updated out of band. Continue?');
+  }
+
+  if (action === 'delete') {
+    // Cross-tenant detection client-side. The server enforces the same
+    // gate independently via confirm_cross_tenant.
+    var tenants = {};
+    var deviceIDs = [];
+    checked.forEach(function (cb) {
+      tenants[cb.dataset.tenant] = true;
+      if (deviceIDs.length < 5) deviceIDs.push(cb.dataset.deviceId);
+    });
+    var tenantNames = Object.keys(tenants);
+    var sample = deviceIDs.join(', ') + (n > 5 ? ' (+' + (n - 5) + ' more)' : '');
+
+    if (tenantNames.length > 1) {
+      var crossOK = confirm(
+        'CROSS-TENANT DELETE\n\n' +
+        n + ' device(s) span ' + tenantNames.length + ' tenants: ' + tenantNames.join(', ') + '\n\n' +
+        'Sample: ' + sample + '\n\n' +
+        'This drops certs, dynsec clients, all telemetry / files / config / alerts ' +
+        'across multiple tenants. Re-pairing is the only way back.\n\n' +
+        'Confirm cross-tenant delete?'
+      );
+      if (!crossOK) return false;
+      document.getElementById('bulk-confirm-cross-tenant').value = 'true';
+    } else {
+      document.getElementById('bulk-confirm-cross-tenant').value = '';
+    }
+    var typed = window.prompt(
+      'DELETE ' + n + ' device(s) in tenant "' + tenantNames[0] + '" + ' + (tenantNames.length - 1) + ' other tenant(s)?\n\n' +
+      'Sample: ' + sample + '\n\n' +
+      'Type DELETE to confirm:'
+    );
+    if (typed !== 'DELETE') {
+      alert('Aborted.');
+      return false;
+    }
+    return true;
+  }
+
+  // OTA + any future no-arg action.
+  var label = action === 'ota' ? 'force an OTA check on' : ('apply ' + action + ' to');
+  return confirm('About to ' + label + ' ' + n + ' device(s). Continue?');
+}
+</script>
+{{end}}

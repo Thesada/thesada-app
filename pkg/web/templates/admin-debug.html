@@ -1,0 +1,57 @@
+{{define "title"}}Admin debug - thesada{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+  <h1 class="text-2xl font-semibold">Debug</h1>
+  <a href="/admin" class="text-sm text-slate-500 hover:underline">back to admin</a>
+</div>
+<div class="mb-6">
+  <p class="text-sm text-slate-500">
+    Build metadata, runtime stats, and a redacted dump of the live
+    config. Sensitive values (passwords, tokens, secrets) are replaced
+    with <code class="text-xs bg-slate-100 px-1 rounded">***</code>.
+  </p>
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <h2 class="text-lg font-semibold mb-3">Build</h2>
+    <table class="min-w-full text-sm">
+      <tbody class="divide-y divide-slate-100">
+        {{range .Build}}
+        <tr>
+          <td class="py-1.5 pr-4 text-slate-500 whitespace-nowrap">{{.Key}}</td>
+          <td class="py-1.5 font-mono text-xs break-all">{{.Value}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <h2 class="text-lg font-semibold mb-3">Process</h2>
+    <table class="min-w-full text-sm">
+      <tbody class="divide-y divide-slate-100">
+        {{range .Process}}
+        <tr>
+          <td class="py-1.5 pr-4 text-slate-500 whitespace-nowrap">{{.Key}}</td>
+          <td class="py-1.5 font-mono text-xs break-all">{{.Value}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="bg-white border border-slate-200 rounded-xl p-5">
+  <h2 class="text-lg font-semibold mb-3">Config</h2>
+  <table class="min-w-full text-sm">
+    <tbody class="divide-y divide-slate-100">
+      {{range .Config}}
+      <tr>
+        <td class="py-1.5 pr-4 text-slate-500 whitespace-nowrap font-mono text-xs">{{.Key}}</td>
+        <td class="py-1.5 font-mono text-xs break-all">{{.Value}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}

@@ -1,0 +1,47 @@
+{{define "title"}}Devices - thesada{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4"
+     hx-get="/devices" hx-trigger="thesada:event from:body throttle:2s" hx-select="#devices-live" hx-target="#devices-live" hx-swap="outerHTML">
+  <h1 class="text-2xl font-semibold">Devices</h1>
+  <span class="text-sm text-slate-500">{{len .Devices}} total</span>
+</div>
+<div id="devices-live">
+
+{{if .Devices}}
+<div class="bg-white border border-slate-200 rounded-xl overflow-x-auto">
+  <table class="min-w-full text-sm">
+    <thead class="bg-slate-100 text-slate-600 text-xs uppercase">
+      <tr>
+        <th class="text-left px-4 py-2">Device</th>
+        <th class="text-left px-4 py-2 hidden md:table-cell">Hardware</th>
+        <th class="text-left px-4 py-2 hidden md:table-cell">Firmware</th>
+        <th class="text-left px-4 py-2 hidden sm:table-cell">Uptime</th>
+        <th class="text-left px-4 py-2">Last seen</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-100">
+      {{range .Devices}}
+      <tr class="hover:bg-slate-50">
+        <td class="px-4 py-2">
+          <a href="/devices/{{.ID}}" class="font-medium text-slate-900 hover:underline">{{.DeviceID}}</a>
+          {{if .DisplayName}}<div class="text-xs text-slate-500">{{deref .DisplayName}}</div>{{end}}
+          <div class="text-xs text-slate-500 md:hidden">
+            {{derefOrDash .HardwareType}} - fw {{derefOrDash .FirmwareVersion}}
+          </div>
+        </td>
+        <td class="px-4 py-2 text-slate-600 hidden md:table-cell">{{derefOrDash .HardwareType}}</td>
+        <td class="px-4 py-2 text-slate-600 hidden md:table-cell">{{derefOrDash .FirmwareVersion}}</td>
+        <td class="px-4 py-2 text-slate-600 text-xs hidden sm:table-cell">{{uptimeLive .LastUptimeSeconds .LastUptimeAt}}</td>
+        <td class="px-4 py-2 text-slate-600 whitespace-nowrap">{{timeOrDash .LastSeenAt}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{else}}
+<div class="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500">
+  No devices yet. Pair a device to see it here.
+</div>
+{{end}}
+</div>
+{{end}}

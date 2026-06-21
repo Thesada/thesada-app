@@ -1,0 +1,15 @@
+#!/bin/sh
+# thesada-app pre-commit guard: doc-drift discipline.
+#
+# Thin wrapper around scripts/check-doc-drift.sh. Refuses the commit when
+# staged files touch application source without a docs/ update.
+#
+# Bypass:
+#     DOC_OK=1 git commit ...
+
+set -eu
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+git diff --cached --name-only --diff-filter=ACMR \
+  | "$repo_root/scripts/check-doc-drift.sh"

@@ -1,0 +1,220 @@
+{{define "title"}}Admin - MQTT shell - thesada{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-semibold">MQTT shell</h1>
+  <a href="/admin" class="text-sm text-slate-500 hover:underline">back to admin</a>
+</div>
+<p class="text-sm text-slate-500 mb-4">
+  Live subscribe + publish tool wired into the app's shared broker connection. Topic filter uses MQTT wildcards (<code class="text-xs">+</code> one level, <code class="text-xs">#</code> multi-level trailing). Publishes are limited to 20 per 10 s per socket and must target the configured topic root prefix.
+</p>
+
+<section class="mb-6 bg-white border border-slate-200 rounded-xl p-4">
+  <div class="flex items-end gap-2 flex-wrap">
+    <label class="text-sm flex-1 min-w-0 sm:min-w-[260px]">
+      <span class="block text-slate-700 font-medium mb-1">Subscribe pattern</span>
+      <input id="mqtt-pattern" type="text" value="{{.DefaultPattern}}"
+             class="w-full border border-slate-300 rounded px-3 py-2 font-mono text-xs">
+    </label>
+    <button id="mqtt-subscribe" type="button" class="px-3 py-2 rounded bg-slate-900 hover:bg-slate-800 text-white text-sm">Subscribe</button>
+    <button id="mqtt-unsubscribe" type="button" class="px-3 py-2 rounded bg-red-100 hover:bg-red-200 text-red-700 text-sm hidden">Unsubscribe</button>
+    <button id="mqtt-pause" type="button" class="px-3 py-2 rounded bg-slate-200 hover:bg-slate-300 text-slate-700 text-sm">Pause</button>
+    <button id="mqtt-clear" type="button" class="px-3 py-2 rounded bg-slate-200 hover:bg-slate-300 text-slate-700 text-sm">Clear</button>
+    <label class="flex items-center gap-1 text-xs text-slate-600 ml-1">
+      <input id="mqtt-format-json" type="checkbox"> Format JSON
+    </label>
+    <span id="mqtt-status" class="text-xs text-slate-500 ml-2">disconnected</span>
+  </div>
+  <div id="mqtt-feed" class="mt-3 h-72 sm:h-96 overflow-y-auto bg-slate-900 text-slate-100 font-mono text-xs rounded p-2 space-y-1"></div>
+</section>
+
+<section class="mb-6 bg-white border border-slate-200 rounded-xl p-4">
+  <h2 class="text-lg font-semibold mb-3">Publish</h2>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+    <label class="text-sm md:col-span-2">
+      <span class="block text-slate-700 font-medium mb-1">Topic</span>
+      <input id="mqtt-pub-topic" type="text" placeholder="thesada/tenant/device/cli/sensors"
+             class="w-full border border-slate-300 rounded px-3 py-2 font-mono text-xs">
+    </label>
+    <label class="text-sm md:col-span-2">
+      <span class="block text-slate-700 font-medium mb-1">Payload</span>
+      <textarea id="mqtt-pub-payload" rows="4"
+                class="w-full border border-slate-300 rounded px-3 py-2 font-mono text-xs"></textarea>
+    </label>
+    <label class="text-sm">
+      <span class="block text-slate-700 font-medium mb-1">QoS</span>
+      <select id="mqtt-pub-qos" class="border border-slate-300 rounded px-2 py-1 text-sm">
+        <option value="0" selected>0 - at most once</option>
+        <option value="1">1 - at least once</option>
+        <option value="2">2 - exactly once</option>
+      </select>
+    </label>
+    <label class="text-sm flex items-end gap-2">
+      <input id="mqtt-pub-retain" type="checkbox">
+      <span class="text-slate-700">Retain</span>
+    </label>
+    <div class="md:col-span-2">
+      <button id="mqtt-publish" type="button" class="px-4 py-2 rounded bg-slate-900 hover:bg-slate-800 text-white text-sm">Publish</button>
+    </div>
+  </div>
+</section>
+
+<script>
+(function () {
+  var feed = document.getElementById('mqtt-feed');
+  var status = document.getElementById('mqtt-status');
+  var patternInput = document.getElementById('mqtt-pattern');
+  var subscribeBtn = document.getElementById('mqtt-subscribe');
+  var pauseBtn = document.getElementById('mqtt-pause');
+  var clearBtn = document.getElementById('mqtt-clear');
+  var pubTopic = document.getElementById('mqtt-pub-topic');
+  var pubPayload = document.getElementById('mqtt-pub-payload');
+  var pubQoS = document.getElementById('mqtt-pub-qos');
+  var pubRetain = document.getElementById('mqtt-pub-retain');
+  var pubBtn = document.getElementById('mqtt-publish');
+  var unsubBtn = document.getElementById('mqtt-unsubscribe');
+  var formatJsonCb = document.getElementById('mqtt-format-json');
+
+  var ws = null;
+  var paused = false;
+  var subscribed = false;
+  var MAX_ROWS = 500;
+
+  function setStatus(text, tone) {
+    status.textContent = text;
+    status.className = 'text-xs ml-2 ' + (tone === 'ok' ? 'text-emerald-600' : tone === 'err' ? 'text-red-600' : 'text-slate-500');
+  }
+
+  function addRow(kind, data) {
+    if (paused && kind === 'message') return;
+    var row = document.createElement('div');
+    row.className = 'whitespace-pre-wrap break-all ' +
+      (kind === 'error' ? 'text-red-300' : kind === 'info' ? 'text-amber-300' : 'text-slate-100');
+    if (kind === 'message') {
+      var ts = new Date(data.ts).toISOString().split('T')[1].slice(0, 12);
+      var flags = [];
+      if (data.retained) flags.push('R');
+      if (typeof data.qos === 'number') flags.push('q' + data.qos);
+      var flagStr = flags.length ? ' [' + flags.join(' ') + ']' : '';
+      var payload = data.payload || '';
+      try {
+        var parsed = JSON.parse(payload);
+        payload = formatJsonCb.checked ? JSON.stringify(parsed, null, 2) : JSON.stringify(parsed, null, 0);
+      } catch (e) {}
+      if (payload.length > 2048) payload = payload.slice(0, 2048) + '...';
+      row.textContent = ts + '  ' + data.topic + flagStr + '  ' + payload;
+      if (data.dropped) {
+        var drop = document.createElement('div');
+        drop.className = 'text-amber-300';
+        drop.textContent = '[dropped ' + data.dropped + ' messages - back-pressure]';
+        feed.appendChild(drop);
+      }
+    } else if (kind === 'info') {
+      row.textContent = '[info] ' + (data.info || '');
+    } else if (kind === 'error') {
+      row.textContent = '[error] ' + (data.error || '');
+    }
+    feed.appendChild(row);
+    while (feed.children.length > MAX_ROWS) feed.removeChild(feed.firstChild);
+    feed.scrollTop = feed.scrollHeight;
+  }
+
+  function connect() {
+    if (ws && ws.readyState === WebSocket.OPEN) return;
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/admin/mqtt/ws');
+    setStatus('connecting...', '');
+    ws.onopen = function () {
+      setStatus('connected', 'ok');
+      ws.send(JSON.stringify({ type: 'subscribe', pattern: patternInput.value }));
+    };
+    ws.onmessage = function (ev) {
+      var m;
+      try { m = JSON.parse(ev.data); } catch (e) { return; }
+      addRow(m.type, m);
+    };
+    ws.onclose = function () {
+      setStatus('disconnected', 'err');
+      ws = null;
+    };
+    ws.onerror = function () {
+      setStatus('error', 'err');
+    };
+  }
+
+  function updateSubUI() {
+    unsubBtn.classList.toggle('hidden', !subscribed);
+  }
+
+  subscribeBtn.addEventListener('click', function () {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      connect();
+      return;
+    }
+    ws.send(JSON.stringify({ type: 'subscribe', pattern: patternInput.value }));
+    subscribed = true;
+    updateSubUI();
+  });
+
+  unsubBtn.addEventListener('click', function () {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.close();
+      ws = null;
+    }
+    subscribed = false;
+    updateSubUI();
+    setStatus('disconnected', '');
+    addRow('info', { info: 'unsubscribed' });
+  });
+
+  pauseBtn.addEventListener('click', function () {
+    paused = !paused;
+    pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+  });
+
+  // Toggling Format JSON only changes the renderer for new messages, so
+  // already-rendered rows stay in their old format and any retained
+  // payloads on the active subscription are not replayed. Bounce the WS
+  // when subscribed so the broker re-delivers retained messages with
+  // the new formatting and the feed shows a consistent view. 
+  formatJsonCb.addEventListener('change', function () {
+    if (!subscribed) return;
+    feed.innerHTML = '';
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.close();
+      ws = null;
+    }
+    addRow('info', { info: 'resubscribing for new format...' });
+    connect();
+  });
+
+  clearBtn.addEventListener('click', function () {
+    feed.innerHTML = '';
+  });
+
+  function doPublish() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      addRow('error', { error: 'not connected' });
+      return;
+    }
+    ws.send(JSON.stringify({
+      type: 'publish',
+      topic: pubTopic.value,
+      payload: pubPayload.value,
+      qos: parseInt(pubQoS.value, 10),
+      retain: pubRetain.checked
+    }));
+  }
+
+  pubBtn.addEventListener('click', doPublish);
+
+  pubTopic.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); doPublish(); }
+  });
+
+  // Auto-connect on page load.
+  connect();
+  subscribed = true;
+  updateSubUI();
+})();
+</script>
+{{end}}

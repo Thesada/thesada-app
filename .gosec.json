@@ -1,0 +1,15 @@
+{
+  "//": "gosec config + allowlist. Add exclusions ONLY with a justification comment in the entry. New entries require a code review nod from a second human; rotation review when the suppressed code changes.",
+  "global": {
+    "//": "Audit mode false because empty audit output looks identical to clean run; we want explicit pass."
+  },
+  "rules": {
+    "//": "Per-rule overrides go here. Format: \"Gxxx\": {\"enabled\": false, \"reason\": \"...\"}"
+  },
+  "exclude": [],
+  "exclude-dir": [
+    "tools",
+    "bin",
+    "pkg/web/static"
+  ]
+}

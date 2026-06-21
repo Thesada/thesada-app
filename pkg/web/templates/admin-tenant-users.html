@@ -1,0 +1,82 @@
+{{define "title"}}Admin - Users - {{.Tenant.ID}} - thesada{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <a href="/admin/tenants" class="text-xs text-slate-500 hover:underline">&larr; Tenants</a>
+    <h1 class="text-2xl font-semibold mt-1">{{.Tenant.DisplayName}}</h1>
+    <p class="text-sm text-slate-500 font-mono">{{.Tenant.ID}}</p>
+  </div>
+</div>
+
+{{if .CrossTenantRead}}
+<div class="bg-amber-50 border border-amber-300 text-amber-900 rounded-xl p-3 mb-4 text-sm">
+  <strong>Cross-tenant MQTT read enabled.</strong>
+  Paired devices in this tenant can subscribe to telemetry across every tenant
+  (<code class="font-mono text-xs">mqtt_cross_tenant_read=true</code>).
+  Flip via the <code class="font-mono text-xs">tenant_settings</code> table; an admin UI lands with
+  <code class="font-mono text-xs">/admin/settings</code> in v1.1.
+  Changing the value requires re-pair to recreate dynsec ACLs.
+</div>
+{{end}}
+
+{{if .Users}}
+<div class="bg-white border border-slate-200 rounded-xl overflow-x-auto mb-6">
+  <table class="min-w-full text-sm">
+    <thead class="bg-slate-50 text-slate-600 text-xs uppercase tracking-wide">
+      <tr>
+        <th class="text-left px-4 py-2">Email</th>
+        <th class="text-left px-4 py-2">Display name</th>
+        <th class="text-left px-4 py-2">Role</th>
+        <th class="text-left px-4 py-2">Last login</th>
+        <th class="text-right px-4 py-2">Actions</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-100">
+      {{range .Users}}
+      <tr>
+        <td class="px-4 py-2">{{.Email}}</td>
+        <td class="px-4 py-2">{{derefOrDash .DisplayName}}</td>
+        <td class="px-4 py-2">
+          {{if .IsSuperAdmin}}<span class="inline-block px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700">super</span>{{end}}
+          {{if .IsAdmin}}<span class="inline-block px-2 py-0.5 text-xs rounded bg-sky-100 text-sky-700">admin</span>{{end}}
+          {{if and (not .IsAdmin) (not .IsSuperAdmin)}}<span class="text-xs text-slate-500">user</span>{{end}}
+        </td>
+        <td class="px-4 py-2 text-slate-500 text-xs">{{timeOrDash .LastLoginAt}}</td>
+        <td class="px-4 py-2 text-right">
+          <a href="/admin/tenants/{{$.Tenant.ID}}/users/{{.ID}}/edit"
+             class="text-xs px-2 py-1 rounded bg-slate-200 hover:bg-slate-300 text-slate-700">edit</a>
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{else}}
+<p class="text-sm text-slate-500 mb-6">No users in this tenant.</p>
+{{end}}
+
+<div class="bg-white border border-slate-200 rounded-xl p-5">
+  <h2 class="text-lg font-semibold mb-3">Add user</h2>
+  <form method="POST" action="/admin/tenants/{{.Tenant.ID}}/users" class="flex flex-col gap-3 max-w-md">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <label class="text-sm">
+      <span class="block text-slate-700 font-medium mb-1">Email</span>
+      <input type="email" name="email" required class="w-full border border-slate-300 rounded px-3 py-2">
+    </label>
+    <label class="text-sm">
+      <span class="block text-slate-700 font-medium mb-1">Display name</span>
+      <input type="text" name="display_name" class="w-full border border-slate-300 rounded px-3 py-2">
+    </label>
+    <label class="text-sm flex items-center gap-2">
+      <input type="checkbox" name="is_admin">
+      <span class="text-slate-700">Tenant admin</span>
+    </label>
+    <div>
+      <button type="submit" class="px-4 py-2 rounded bg-slate-900 hover:bg-slate-800 text-white text-sm">Create user</button>
+    </div>
+  </form>
+  <p class="text-xs text-slate-500 mt-3">
+    Password is not set. The new user should use the password-reset flow from the login page, or the operator can ship them the one-shot reset link out of band.
+  </p>
+</div>
+{{end}}

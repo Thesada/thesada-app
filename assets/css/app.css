@@ -1,0 +1,5 @@
+@import "tailwindcss";
+
+/* Scan Go templates for class usage. v4 picks up referenced classes here. */
+@source "../../pkg/web/templates/**/*.html";
+@source "../../pkg/**/*.go";

@@ -1,0 +1,638 @@
+# thesada-app invariants
+
+The load-bearing rules this application relies on. Every PR that
+touches a listed area must keep these true. Violations require this
+file to be updated with a justification, not silent landing.
+
+Dated 2026-06-16 (CI lint guard for the pools.App tenancy contract,
+session token rotation, CA key encryption at rest, MQTT topic / cert
+pairing tenant gate, RLS ungated as the steady-state default). Bump the
+date on every edit.
+
+Entries marked **WIP** describe target state that is not yet enforced
+end-to-end. They live here so the audit surface is visible.
+
+---
+
+## Tenant isolation
+
+### Every read against `pools.App` is tenant-scoped through `db.WithTenant` or explicitly bypassed through `db.WithAdminAudit` **(enforced)**
+
+Shipped. RLS is the steady-state default: `0016_rls_policies.sql`
+applies RLS policies to every tenant-scoped table on every deploy. The
+`THESADA_APPLY_RLS_POLICIES` env gate was removed once the consumer code
+landed - `gatedMigrations` in `migrate.go` is now empty. The
+application-layer `WHERE tenant_id = $1` filters remain as the first
+line; RLS is the second line of defence.
+
+The refactor wraps every tenant-scoped read in `db.WithTenant`, which
+opens a pgx transaction with `SET LOCAL app.tenant_id = $1`. Postgres
+RLS policies on every tenant-scoped table then scope rows
+automatically. Cross-tenant admin reads (`GetByIDAny`,
+`ListAcrossTenants`) go through `db.WithAdminAudit` against
+`pools.Admin` (the `BYPASSRLS` role) which writes an audit log row.
+
+How enforced: `scripts/check-pools-app.sh` (wired into
+`.github/workflows/ci.yml` as the `pools-app-guard` job) fails any
+PR that introduces a new `pools.App.{Query,QueryRow,Exec,Begin,
+SendBatch,CopyFrom,BeginTx}` caller outside the grandfathered set in
+`scripts/pools-app-allowlist.txt`.
+
+Phase 2 is complete: every `pkg/service/*.go` file converted to
+`db.WithTenant` / `db.WithAdminAudit`. Every `pkg/service` file is now
+converted: the last grandfathered entry (`config_snapshot.go`, dead
+code) was deleted in phase 3 (migration `0021`), so the allowlist
+holds only the structural `pkg/db/` prefix - the helpers themselves wrap
+the pool. Phase 3 fixed two bugs in `0016` (the `magic_link_tokens`
+policy referenced a non-existent `tenant_id` column; the
+`deleted_device_tombstones` table had no policy at all) and added the
+acceptance test.
+
+How verified: `pkg/db/rls_integration_test.go` (build tag
+`integration`) seeds two tenants and asserts the App and MQTT pools
+see only their own rows while the Admin pool sees all. It is not in
+the default `make test` lane - run it against a disposable
+TimescaleDB with `THESADA_TEST_DATABASE_URL` set; see the file header.
+
+Service-layer tenant scoping is additionally covered by
+`pkg/service/*_integration_test.go` (e.g. `DeviceService` cross-tenant
+`GetByID` / `ListByTenant` / tombstone isolation), which spin a throwaway
+TimescaleDB via `pkg/service/servicetest` and run under `make
+test-integration`.
+
+The acceptance test passes and the `THESADA_APPLY_RLS_POLICIES` gate was
+removed; `0016` now applies on every deploy (`gatedMigrations` is empty),
+making RLS the steady-state default.
+
+Source: `pkg/db/tenant.go` (helpers), `pkg/db/pools.go`,
+`migrations/0001_init.sql`, `scripts/check-pools-app.sh`,
+`scripts/pools-app-allowlist.txt`, `pkg/db/rls_integration_test.go`.
+
+### Cross-tenant getters are named `*Any` and live behind `RequireSuperAdmin`
+
+Naming convention: every service method that reads outside the
+caller's tenant ends in `Any` (e.g. `GetByIDAny`, `ListDevicesAny`).
+Every call site is wrapped in `RequireSuperAdmin` middleware. The
+naming makes audit-by-grep practical; the middleware enforces.
+
+How enforced: reviewers grep for new `*Any` methods at PR time, check
+call site is wrapped. Comments on the service method state the
+super-admin requirement.
+
+How verified: `pkg/authmw/authmw_test.go` proves the gate redirects
+anonymous callers and 404s non-super users; `pkg/web/routes_test.go`
+audits that every gated route (`RequireAuth` + `RequireSuperAdmin`)
+actually rejects an anonymous request, catching a handler registered
+without its wrapper. The JSON `/api/v1` gates
+(`RequireAuthJSON` / `RequireSuperAdminJSON`) return 401/403 instead of a
+redirect/404 and are covered by `pkg/authmw/apiauth_test.go`.
+
+Source: `pkg/authmw/` middleware, service files.
+
+### MQTT cross-tenant read default OFF for new tenants
+
+Setting `mqtt_cross_tenant_read` is ON only for the `default` tenant
+(homelab legacy layout). Every other tenant defaults OFF - paired
+devices get `thesada/<tenant>/#` subscribe scope, never `thesada/#`.
+
+When the admin UI for this setting ships, it must require a second
+confirmation, write an audit log entry, and re-pair every device in
+the tenant (revoke + reissue dynsec roles) on toggle. Today the
+setting is only flippable via direct DB write; the runtime effect is
+real on every pair operation.
+
+Source: `pkg/web/admin_pair.go::dynsecSettingCrossTenantRead`,
+`pkg/web/admin_pair.go::dynsecDeviceACLs`.
+
+### MQTT topic tenant must match the device's active pairing tenant
+
+Every inbound MQTT message goes through a cross-tenant pairing gate
+in `Client.onMessage` before any handler runs: if the
+firmware-claimed `device_id` already has a paired (non-revoked)
+certificate under a different tenant, the message is dropped without
+side effects. Broker ACL drift therefore cannot trick the app into
+auto-creating a duplicate device row in the wrong tenant.
+
+A device with no active pairing (never paired, or its last pairing
+was revoked) falls through; the topic tenant is treated as
+authoritative until a pairing locks the device into a specific
+tenant. Re-pairing into a different tenant goes through the admin
+"Reassign tenant" flow which revokes the old cert before issuing
+the new one, so the check switches over atomically.
+
+How verified: `pkg/service/certificate_integration_test.go` -
+`FindActivePairingTenant` discovers the paired tenant cross-tenant for a
+device with an active cert, and falls open (`"", false`) once the cert is
+revoked, which is exactly the gate `onMessage` relies on.
+
+Source: `pkg/mqtt/mqtt.go::Client.onMessage`,
+`pkg/service/certificate.go::FindActivePairingTenant`.
+
+---
+
+## Authentication and sessions
+
+### Session tokens are stored as SHA256, never plaintext
+
+Raw session token returned to the browser in a cookie; only the
+sha256 hash is persisted. Lookup is by hash, never by string compare
+on the raw token, so a leaked DB does not expose live sessions and
+timing on the lookup leaks nothing usable.
+
+Source: `pkg/service/auth.go::CreateSession`, `ValidateSession`.
+
+### API bearer tokens are stored as SHA256, never plaintext
+
+The JSON `/api/v1` surface accepts a bearer token
+(`Authorization: Bearer`) alongside the session cookie. Like session
+tokens, the raw token is returned once at issue time and only its
+sha256 hash is persisted in `api_tokens`; lookup is by hash. A token is
+user-bound (no scopes); a revoked (`revoked_at` set) or expired token is
+rejected. `APIMiddleware` resolves a bearer token first, then falls back
+to the session cookie, and stores the same `*service.Session` in the
+request context so the gates and `EffectiveTenantID` work unchanged.
+`api_tokens` carries the same transitive RLS policy as `user_sessions`
+(`user_id -> users.tenant_id`).
+
+How verified: `pkg/service/api_token_integration_test.go` - issue then
+validate returns the owning user, revoke and expire are rejected, and a
+cross-tenant `ListTokens` returns nothing (RLS).
+
+Source: `pkg/service/api_token.go`,
+`pkg/authmw/apiauth.go::APIMiddleware`,
+`migrations/0001_init.sql`.
+
+### The JSON `/api/v1/auth` endpoints do not enumerate users
+
+`POST /auth/login` matches an email across all tenants
+(`VerifyPasswordAnyTenant`) and returns the same 401 for an unknown email
+as for a wrong password; only on success does it set the session cookie
+and mint the bearer token. `POST /auth/signup` always answers 200 whether
+or not the email is already on the waitlist. Neither response reveals
+whether an account exists - the same posture as the web login/signup.
+
+How verified: `pkg/api/v1/auth_integration_test.go` - an unknown email and
+a wrong password both return 401 (indistinguishable), and signup returns
+200 + lands a waitlist row.
+
+Source: `pkg/api/v1/auth.go::handleAuthLogin`, `handleAuthSignup`.
+
+### `/api/v1` reads are tenant-scoped and redact device secrets
+
+Every `/api/v1/devices*` read resolves the tenant via
+`authmw.EffectiveTenantID` and goes through the tenant-scoped service
+methods (`GetByID`, `ListByTenant`, telemetry/alerts by device pk), so a
+caller only sees their own tenant's rows - a foreign device id returns
+404, never 403, so existence does not leak. The device JSON shape
+(`deviceResponse`) omits the pairing key, owner id, and mqtt topic prefix.
+
+How verified: `pkg/api/v1/devices_integration_test.go` - a device in
+another tenant 404s under the caller's bearer token, and the list
+response carries no `pairing_key`.
+
+Source: `pkg/api/v1/devices.go`.
+
+### `/api/v1` alert-subscription writes are scoped to the calling user
+
+`POST /alert-subscriptions` ties the row to the authenticated user
+(`u.ID` + `u.TenantID`) and 404s a `device_pk` outside the user's tenant.
+`DELETE /alert-subscriptions/{id}` removes by id AND user_id, so a user
+cannot delete another user's subscription - a foreign id is a silent
+no-op. channel and min_severity are validated to the schema's allowed
+values (400), not left to surface as a DB constraint 500.
+
+How verified: `pkg/api/v1/alerts_integration_test.go` - bad channel and
+bad severity return 400, a foreign device_pk 404s, and the create -> list
+-> delete lifecycle round-trips.
+
+Source: `pkg/api/v1/alerts.go`.
+
+### Magic-link and password-reset consumption is atomic single-winner
+
+`consumeLinkToken` and `MarkResetConsumed` use `UPDATE ... RETURNING`
+with `WHERE consumed_at IS NULL`. Concurrent consumes of the same
+token have at most one winner; the loser gets `ErrNotFound`.
+
+How enforced: reviewers grep for new SELECT-then-UPDATE patterns on
+magic_link_tokens / password_reset_tokens. New token-consume paths
+follow the same pattern.
+
+How verified: `pkg/service/auth_integration_test.go` - login token
+consumed twice returns `ErrNotFound` on the second call, an 8-way
+concurrent consume of one token yields exactly one winner, and reset
+`MarkResetConsumed` is single-winner.
+
+Source: `pkg/service/auth.go::consumeLinkToken`, `MarkResetConsumed`.
+
+### Session tokens rotate every 4 hours of validation activity
+
+A session token value is valid for at most `sessionRotationInterval`
+(4 h) before `ValidateSession` mints a fresh 32-byte token, swaps
+`token_hash` atomically, parks the old hash in `previous_token_hash`
+for `sessionRotationGrace` (60 s), and pushes a new `Set-Cookie` via
+the auth middleware. A stolen cookie therefore has a bounded
+effective lifetime: at most one rotation interval after the next
+legitimate browser hit, the attacker's copy stops validating.
+
+Concurrency: the rotation `UPDATE` carries `WHERE token_hash = $old`
+so only one of N concurrent rotations lands; the losers continue
+with the old token and do not set a fresh cookie. The 60 s previous-
+hash grace window keeps a parallel in-flight request (XHRs racing
+the page load that triggered the rotation) from 401-ing on the
+already-replaced token.
+
+How verified: `pkg/service/auth_integration_test.go` - aging
+`rotated_at` past the interval makes the next `ValidateSession` mint a
+fresh token (`NewToken` set) while the previous hash still validates
+within the grace window.
+
+Source: `pkg/service/auth.go::ValidateSession`,
+`AuthService::rotateSession`, `pkg/authmw/authmw.go::Middleware`,
+`migrations/0001_init.sql`.
+
+### Super-admin rows cannot be deleted through the admin UI
+
+`AuthService.DeleteUser` reads `is_super_admin` and refuses a super-admin
+target with `ErrSuperAdminProtected` before issuing the `DELETE`, in the
+same tx so a concurrent promote cannot race the check. The guard lives at
+the service layer so every caller is covered, not just the admin handler
+(which separately blocks deleting your own account). Super rows are
+platform-critical.
+
+How verified: `pkg/service/auth_users_integration_test.go` -
+`DeleteUser_refuses_superadmin` promotes a user, asserts the delete returns
+`ErrSuperAdminProtected`, and confirms the row survives.
+
+Source: `pkg/service/auth_users.go::DeleteUser`, `pkg/web/admin.go`.
+
+---
+
+## Cryptographic material at rest
+
+### CA private key is encrypted on disk when `THESADA_CA_KEY_PASSPHRASE` is set
+
+The internal CA signs every per-device mTLS client certificate, so its
+private key is the foundation of multi-tenant device identity. With
+`THESADA_CA_KEY_PASSPHRASE` set, the on-disk `ca.key` is a
+`THESADA-CAKEY-V1` envelope: AES-256-GCM over a PKCS#8-marshaled
+private key, under a scrypt-derived KEK (N=32768, r=8, p=1, 16-byte
+salt). The passphrase itself is never persisted by the app - it is
+consumed at boot from env and held only in memory.
+
+Plaintext PEM on disk is still supported for back-compat with existing
+deployments. When loaded that way, `Bootstrap` returns a
+`*PlaintextKey` warning that surfaces as a `slog.Warn` at startup
+naming the exposed file path and pointing the operator at the
+`thesada-app ca-encrypt` migration subcommand.
+
+This defends against backup-leak / sidecar-volume / cold-disk-theft
+threat models. It does NOT defend against a live-process compromise -
+the decrypted key sits in memory after boot. The KMS path (server
+never sees the private key, signing happens at a remote authenticator)
+is the year-two follow-up scoped in `docs/security.md`.
+
+Source: `pkg/pki/ca.go::Bootstrap`, `pkg/pki/encrypt.go`,
+`pkg/pki/encrypt_test.go`, `cmd/thesada-app/main.go` (warning surface
++ `ca-encrypt` subcommand).
+
+### Passwords use bcrypt at default cost (10)
+
+`bcrypt.GenerateFromPassword(pw, bcrypt.DefaultCost)`. No
+SHA256-then-bcrypt, no length cap workaround, no custom KDF.
+
+Source: `pkg/service/auth.go::SetPassword`.
+
+---
+
+## CSRF
+
+### Every state-changing HTTP endpoint requires CSRF verification
+
+Double-submit cookie pattern: server sets a non-HttpOnly cookie
+`csrf_token`, client reflects via header `X-CSRF-Token` or hidden
+form field. Middleware compares constant-time. Applied to all
+methods in `{POST, PUT, PATCH, DELETE}`.
+
+How enforced: middleware `pkg/csrf` runs on every router group that
+isn't explicitly read-only. Reviewers check new mutating endpoints
+sit behind that middleware.
+
+Source: `pkg/csrf/csrf.go` (package has tests).
+
+---
+
+## OAuth
+
+### OAuth flow uses PKCE S256 + nonce + state, single-use state via DELETE-RETURNING
+
+Every authorize request generates a PKCE code verifier (S256
+challenge), a nonce, and a state value persisted to
+`oauth_auth_requests`. On callback, the row is deleted with
+`RETURNING` so reuse fails atomically. PKCE is required by Kanidm
+1.x for confidential clients - non-negotiable.
+
+Source: `pkg/service/oauth.go`, `pkg/web/oauth.go`.
+
+### Every OAuth redirect target passes through `IsSafeReturnTo`
+
+Open-redirect prevention. `return_to` query parameters and stored
+post-login redirects are checked for same-origin + path-only before
+issuing a 302. Centralised so any new redirect site picks up the
+check by default.
+
+How verified: `pkg/web/oauth_test.go::TestSafeReturn` - pass-through
+for vetted relative paths, fallback for absolute / scheme-relative
+(`//`) / non-slash input.
+
+Source: `pkg/oauth/oauth.go::IsSafeReturnTo`, wrapped by
+`pkg/web/oauth.go::safeReturn`.
+
+### OIDC callback loads the provider by stored id, never re-resolves by slug
+
+`/start` records the chosen provider's id in the auth request
+(`pending.ProviderID`). The callback MUST load that exact provider via
+`LoadProviderByID`, not `LoadProviderBySlug`. Re-resolving by slug with an
+empty tenant hint returns `ORDER BY id LIMIT 1` - the lowest-id tenant's
+provider - so any session on a different tenant gets a provider mismatch and a
+400. Loading by stored id keeps `/start` and `/callback` symmetric per tenant.
+
+Source: `pkg/web/oauth.go::handleOIDCCallback`, `pkg/service/oauth.go::LoadProviderByID`.
+
+### Email auto-link is scoped to the provider's tenant
+
+When the callback finds no existing (provider, subject) link but the id_token
+carries a verified email, it may auto-link to a local user - but
+`FindUserByEmail` matches only within the provider's own tenant. Email is
+unique per `(tenant_id, email)`, so an unscoped match could bind the session to
+the wrong tenant's user when the same address exists in several tenants. A
+global provider (`tenant_id` NULL) has no tenant to scope to and therefore never
+auto-links by email; those users link manually from settings. Successful
+auto-links log `oauth.identity.state_change` (trigger `email_match`).
+
+Source: `pkg/service/oauth.go::FindUserByEmail`, `pkg/web/oauth.go::handleOIDCCallback`.
+
+---
+
+## SQL and templating
+
+### All SQL is parameterized
+
+No `fmt.Sprintf` into a SQL string anywhere. pgx parameter binding
+only. Reviewers grep for `fmt.Sprintf` near `Query` / `Exec` /
+`QueryRow` at PR time.
+
+### HTML rendered via `html/template`, plain text via `text/template`
+
+`html/template` auto-escapes by default; `text/template` does not.
+The two are not interchangeable - using `text/template` for HTML
+output is an XSS vector. Email bodies are the only `text/template`
+consumers, and even there only for plain-text MIME parts (HTML mail
+templates use `html/template`).
+
+Source: `pkg/web/templates/`, `pkg/service/mailer.go`.
+
+### Migrations are forward-only and idempotent
+
+`migrations.Apply` runs every `*.sql` newer than the highest version in
+`schema_migrations`, each in its own transaction, recording the version
+on success. There are no down migrations - rollback is a new
+forward migration. Re-running `Apply` on an up-to-date database is a
+clean no-op; a migration that is not safely re-runnable (e.g. a `CREATE`
+missing `IF NOT EXISTS`) is the failure this guards against.
+
+How verified: `migrations/migrate_integration_test.go` (build tag
+`integration`) applies all migrations to a fresh TimescaleDB container,
+then applies again and asserts `schema_migrations` is unchanged.
+Run with `make test-integration`.
+
+Source: `migrations/migrate.go::Apply`.
+
+---
+
+## Cookies
+
+### Session + CSRF cookies: SameSite=Lax + Secure-when-HTTPS
+
+Session cookie set via `authmw.SetSessionCookie` (login in
+`pkg/web/web.go::startSession` and rotation in `pkg/authmw`); CSRF cookie in
+`pkg/csrf`. All decide the Secure flag through the one shared
+`httpsec.RequestIsSecure(r)` - true when `r.TLS != nil` OR the proxy set
+`X-Forwarded-Proto: https`. So the flag is correct behind HAProxy (TLS to
+the browser, plain HTTP to the app) and dev (plain HTTP) still works without
+config drift. The session cookie is HttpOnly; the CSRF cookie is not (below).
+
+### CSRF cookie: non-HttpOnly (intentional)
+
+The CSRF token cookie must be readable by JS to participate in the
+double-submit pattern; the session cookie stays HttpOnly. Same SameSite=Lax
++ the shared Secure decision above.
+
+Source: `pkg/csrf/csrf.go`, `pkg/web/web.go`, `pkg/authmw`, `pkg/httpsec`.
+
+---
+
+## WebSocket origin
+
+### Upgrades validate Origin against BaseURL
+
+Both the device-event hub (`pkg/ws`) and the admin MQTT shell
+(`pkg/web/admin_mqtt.go`) reject a cross-origin WebSocket upgrade: a present
+Origin header must match `cfg.BaseURL` on scheme + host exactly, not a
+substring. A missing Origin (non-browser client) is allowed. This closes
+cross-site WebSocket hijacking, where a hostile page would otherwise ride
+the browser's SameSite=Lax session cookie to open a socket. Rejections log
+`ws.origin_rejected`.
+
+Source: `pkg/httpsec.OriginAllowed`, `pkg/ws/ws.go`, `pkg/web/admin_mqtt.go`.
+
+---
+
+## PKI and mTLS
+
+### Device certs are ECDSA P-256 with PKCS#8 private key envelope
+
+P-256 keeps the cert + key small (cellular modem internal FS has a
+~4 kB ceiling per file). PKCS#8 (not the older OpenSSL "EC PRIVATE
+KEY" envelope) is required by SIM7080G firmware 1951B17; the
+provisioner uses PKCS#8.
+
+Source: `pkg/pki/ca.go`, `pkg/pki/sign.go`.
+
+### Internal CA private key: KMS migration **(WIP)**
+
+Mitigated by passphrase encryption (see the CA-private-key-encrypted-on-disk
+invariant above). Long-term: move signing to a KMS (AWS KMS / GCP KMS /
+Vault transit engine) so the server never sees the private key.
+
+Source: `pkg/pki/ca.go::generate`.
+
+### Device-CN topic-tenant cross-check on auto-create **(WIP)**
+
+Today device auto-creation from MQTT trusts the topic-claimed tenant.
+The FK constraint on `tenant_id` rejects non-existent tenants, but a
+misconfigured ACL plus an existing tenant can land a `devices` row
+in the wrong tenant. Target state: for paired devices, parse the
+cert CN and reject the upsert if the topic tenant disagrees.
+
+Source: `pkg/mqtt/mqtt.go::parseTopic`,
+`pkg/service/device.go::upsertCore`.
+
+---
+
+## MQTT broker integration
+
+### Devices authenticate via mTLS dynsec with cert-only clients (no password)
+
+Dynsec client per paired device with empty password; auth resolves
+to the cert CN on the mTLS broker listener (port 8884).
+Non-paired / non-mTLS clients use password auth on the legacy
+listener (port 8883). The split keeps mTLS optional during the
+multi-tenant rollout but mandatory for any device that has a cert.
+
+Source: `pkg/web/admin_pair.go`, `pkg/mqtt/dynsec.go`.
+
+### CLI requests serialize per device + correlate by req_id
+
+`CLIRequest` / `CLIRequestRaw` hold `cliLockFor(topicPrefix)` for the
+full publish-then-await cycle. Two concurrent callers targeting the
+same device queue on that mutex; the second goroutine does not
+register a tap or publish until the first has consumed its response
+or timed out. Without the mutex both taps fire on every cli/response
+message and the loser captures the winner's reply.
+
+Outgoing payloads (text path only) are wrapped as `{"req_id":<uuid>,
+"args":<original>}`. Firmware v1.4.5+ echoes req_id back on every
+cli/response; the receiver tap filters by req_id when present. Older
+firmware that ignores the envelope still works - the mutex alone
+makes the response unambiguous, and the tap accepts responses with
+no req_id field.
+
+Binary protocols (`fs.write`, `fs.append`, `cert.set` raw payloads)
+go through `CLIRequestRaw` which does not wrap - firmware binary
+handlers read raw bytes, not JSON. The mutex still serializes.
+
+Multi-page consumption: firmware v1.4.6+ splits oversized command
+output across multiple `cli/response` messages, each carrying a
+0-indexed `page` and a `more` flag (final page `more:false`). Both
+`CLIRequest` and `CLIRequestRaw` await the assembled result via
+`awaitPagedCLIResponse`, which keys page output by index (arrival
+order does not matter) and returns once the final page plus every
+lower-indexed page has arrived. The returned `CLIResponse` has
+`Page`/`More` cleared and `Output` holding the concatenation. The tap
+channel is buffered (cap 64) so the non-blocking sink send never
+drops an intermediate page. Pre-1.4.6 firmware omits `page`/`more`
+entirely - its single message is treated as the final page and
+returns immediately, so the path is mixed-fleet safe.
+
+How enforced: every CLI caller goes through `Client.CLIRequest` or
+`Client.CLIRequestRaw`. Reviewers reject direct `c.PublishRaw` calls
+to `*/cli/<cmd>` topics from outside `pkg/mqtt`.
+
+Source: `pkg/mqtt/mqtt.go::CLIRequest`, `CLIRequestRaw`,
+`awaitPagedCLIResponse`, `cliLockFor`. Pairs with the thesada-fw
+`docs/invariants.md` invariant "cli/response paginates oversized
+command output".
+
+### `/info` drift detection runs on every retained delivery
+
+The MQTT subscriber subscribes to `<root>/#` at QoS 1, so retained
+`<prefix>/info` payloads arrive on every reconnect. `handleInfo`
+compares the device-reported `config_hash` / `scripts_main_hash` /
+`scripts_rules_hash` against the latest stored snapshots; mismatch
+launches `pullAndSnapshot` via the new per-device-serialized CLI
+path. The pull writes a `source="drift"` row into device_files.
+
+Path is retained-replay safe: the broker delivers the latest /info
+on every subscribe, so app restarts re-trigger drift checks for any
+device with a content delta accumulated while the app was offline.
+
+Source: `pkg/mqtt/mqtt.go::handleInfo`, `pullAndSnapshot`.
+
+---
+
+## Rate limiting
+
+### Magic-link and reset endpoints are rate-limited per IP + per email
+
+Window-based limiter (`pkg/ratelimit`). When either bucket (per-email
+or per-IP) is full the request is dropped silently: the endpoint still
+renders the same "check your email" confirmation, leaking neither which
+addresses exist nor whether a request was throttled. This is deliberate
+anti-enumeration (see the `allowMagicLink` header) - there is no 429.
+Map sweep removes empty entries on the window cadence so the map does
+not grow unbounded over the lifetime of the systemd unit.
+
+Source: `pkg/ratelimit/ratelimit.go`, `pkg/web/web.go::allowMagicLink`
+(consumed by the magic-link login handler + `handleForgotSubmit`).
+
+---
+
+## Audit trail
+
+### Every cross-tenant admin read writes an audit log entry **(WIP)**
+
+Target state once `db.WithAdminAudit` wires the audit table.
+Currently the helper exists and writes a log line; the audit table
+schema is scaffolded but not consumed by any handler yet. Cross-
+tenant admin operations today rely on the `*Any` naming + the
+`RequireSuperAdmin` middleware as the only enforcement layer.
+
+Source: `pkg/db/tenant.go::WithAdminAudit`.
+
+### Security state transitions emit `<subsystem>.state_change`
+
+Auditable state edges log a structured transition (`from`/`to` + ids) so the
+trail is greppable. Wired so far:
+
+- `auth.session.state_change` - login (anonymous -> authenticated, with method)
+  and logout (authenticated -> anonymous). Source: `pkg/web/web.go::startSession`,
+  `handleLogout`.
+- `oauth.identity.state_change` - an external identity bound to a local user
+  (unlinked -> linked), `trigger` is `settings_link` or `email_match`. Sign-in
+  itself rides `auth.session.state_change` (method `oidc`).
+  Source: `pkg/web/oauth.go::handleOIDCCallback`.
+- `device.pair.state_change` - a device's pairing cert issued (unpaired ->
+  paired) or revoked (paired -> revoked) via pair issue, admin revoke, or single
+  / bulk device delete; `reason` names the trigger. Revoke/delete only log when
+  the device was actually paired. Source: `pkg/web/admin_pair.go::logPairStateChange`.
+- `alert.delivery.state_change` - an alert notification delivered (pending ->
+  delivered) once at least one channel (email/telegram) succeeds and the
+  device_alerts row is marked. Source: `pkg/alerts/alerts.go::Dispatch`.
+
+Device OTA is intentionally absent: the app fire-and-forgets a `cli/ota.check`
+command and the device owns the update lifecycle, so there is no app-side
+`state_change` to emit for it.
+
+---
+
+## Error handling
+
+### `recover()` only on goroutines fed by external input
+
+Standard handlers return appropriate HTTP codes for every error path; nil
+derefs are guarded at boundaries (request parse, DB scan, external service
+call), so most goroutines need no recover. The exception is a goroutine
+reachable by external input: `pkg/mqtt` dispatches every inbound broker
+message on its own paho goroutine, so `onMessage` recovers at entry
+(`mqtt.callback_panic`) - one malformed message must not crash the process.
+
+New code that adds a goroutine MUST guard its entry against panic if the
+goroutine can be triggered by user input. Reviewers grep for new `go func()`
+at PR time + check for `defer recover` only where the goroutine processes
+external input.
+
+---
+
+## What this list is not
+
+- Not a feature spec.
+- Not a coverage map.
+- Not a roadmap.
+
+It is the list of properties this app must keep true to remain
+defensible. Reviewers consult it on every PR that touches the named
+files. Update it before merging anything that violates an entry, or
+the entry is wrong.
+
+Related: [`../CODE-GUIDELINES.md`](../CODE-GUIDELINES.md),
+[`security.md`](security.md) (Go security scanner gating).
