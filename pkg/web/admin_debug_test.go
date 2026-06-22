@@ -31,7 +31,7 @@ func TestSanitizeConfig_MasksSensitiveKeys(t *testing.T) {
 		MQTT:       mqttBlock{Broker: "mqtt.thesada.app", Token: "should-be-masked-2"},
 		OAuth:      oauthBlock{KanidmClientID: "client-id-public", KanidmClientSecret: "should-be-masked-3"},
 		Hostname:   "host.example.com",
-		PublicURL:  "https://app.thesada.cloud",
+		PublicURL:  "https://app.thesada.io",
 	}
 	rows := sanitizeConfig(&f)
 
@@ -55,7 +55,7 @@ func TestSanitizeConfig_MasksSensitiveKeys(t *testing.T) {
 		"MQTT.Broker":          "mqtt.thesada.app",
 		"OAuth.KanidmClientID": "client-id-public",
 		"Hostname":             "host.example.com",
-		"PublicURL":            "https://app.thesada.cloud",
+		"PublicURL":            "https://app.thesada.io",
 	}
 	for k, want := range mustPlain {
 		if got[k] != want {

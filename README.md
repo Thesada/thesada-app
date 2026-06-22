@@ -2,6 +2,10 @@
 
 Self-hosted device management platform for rural and farm property monitoring. Single Go binary. HTMX + Tailwind dashboard, versioned JSON API, WebSocket live updates, MQTT bridge to nodes, Postgres for state.
 
+![Dashboard](assets/img/dashboard.png)
+
+Runs in production 24/7 against a live [thesada-fw](https://github.com/Thesada/thesada-fw) node.
+
 ## Architecture
 
 Dual frontend, single backend, one versioned API. Both frontends call into the same service layer.
@@ -35,7 +39,7 @@ pkg/alerts/            email + telegram alert fan-out
 pkg/mailer/            plain SMTP + STARTTLS wrapper
 pkg/authmw/            session cookie middleware + RequireAuth helper
 
-migrations/            plain SQL files, applied with psql
+migrations/            plain SQL files, embedded and applied via the migrate subcommand
 assets/css/app.css         Tailwind v4 source (CSS-first config)
 pkg/web/static/css/app.css Tailwind output, generated, gitignored
 tools/tailwindcss          standalone CLI binary, gitignored
@@ -139,3 +143,9 @@ login is magic-link only.
 ## License
 
 AGPL-3.0-only. The firmware (thesada-fw) is GPL-3.0-only; this companion app is AGPL-3.0 because it is intended to be run as a network service. AGPL section 13 obligates network operators to share modifications with users who interact with the running service.
+
+## Related
+
+- [thesada-fw](https://github.com/Thesada/thesada-fw) - device firmware (ESP32, GPL-3.0-only)
+- [thesada-doc](https://github.com/Thesada/thesada-doc) - documentation site source
+- [thesada.io](https://thesada.io) - project site and docs
