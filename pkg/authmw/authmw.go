@@ -142,16 +142,17 @@ func SetSessionCookie(w http.ResponseWriter, token string, expires time.Time, se
 	})
 }
 
-// ClearSessionCookie expires the session cookie immediately.
-// in: writer. out: none.
-func ClearSessionCookie(w http.ResponseWriter) {
+// ClearSessionCookie expires the session cookie immediately. Secure matches the
+// issuing cookie (httpsec.RequestIsSecure) so the deletion attribute-matches.
+// in: writer, secure flag. out: none.
+func ClearSessionCookie(w http.ResponseWriter, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     CookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
-

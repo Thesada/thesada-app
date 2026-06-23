@@ -121,7 +121,7 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 		if err := s.services.Auth.RevokeSession(c.Value); err != nil {
 			slog.Warn("api logout: session revoke failed", "err", err)
 		}
-		authmw.ClearSessionCookie(w)
+		authmw.ClearSessionCookie(w, httpsec.RequestIsSecure(r))
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

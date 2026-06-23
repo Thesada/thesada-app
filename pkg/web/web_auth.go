@@ -126,7 +126,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("session revoke failed", "err", err)
 		}
 	}
-	authmw.ClearSessionCookie(w)
+	authmw.ClearSessionCookie(w, httpsec.RequestIsSecure(r))
 	if u != nil {
 		slog.Info("auth.session.state_change",
 			"from", "authenticated", "to", "anonymous",
