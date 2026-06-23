@@ -70,14 +70,15 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := s.services.Auth.VerifyPasswordAnyTenant(email, req.Password, s.clientIP(r))
+	ip := s.clientIP(r)
+	u, err := s.services.Auth.VerifyPasswordAnyTenant(email, req.Password, ip)
 	if err != nil {
 		if errors.Is(err, service.ErrBadCredentials) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid email or password"})
 			return
 		}
 		if errors.Is(err, service.ErrLoginRateLimited) {
-			slog.Warn("auth.login.rate_limited", "email", email, "ip", s.clientIP(r), "surface", "api")
+			slog.Warn("auth.login.rate_limited", "ip", ip, "surface", "api")
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many attempts, try again later"})
 			return
 		}
@@ -86,7 +87,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookieTok, cookieExp, err := s.services.Auth.CreateSession(u.TenantID, u.ID, "password", r.UserAgent(), s.clientIP(r))
+	cookieTok, cookieExp, err := s.services.Auth.CreateSession(u.TenantID, u.ID, "password", r.UserAgent(), ip)
 	if err != nil {
 		slog.Error("api login: session create failed", "user_id", u.ID, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})

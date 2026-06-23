@@ -8,6 +8,7 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -35,6 +36,9 @@ const magicLinkMaxPerHour = 5
 
 // magicLinkWindow is the rolling window for the rate limiter above.
 const magicLinkWindow = time.Hour
+
+// passwordFloorMsg is the form-level too-short message, kept in sync with service.MinPasswordLen.
+var passwordFloorMsg = fmt.Sprintf("Password must be at least %d characters.", service.MinPasswordLen)
 
 //go:embed templates
 var templatesFS embed.FS

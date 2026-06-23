@@ -105,10 +105,10 @@ func parseTrustedProxies(s string) ([]*net.IPNet, error) {
 		return nil, nil
 	}
 	var nets []*net.IPNet
-	for _, part := range strings.Split(s, ",") {
+	for i, part := range strings.Split(s, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
-			continue
+			return nil, fmt.Errorf("THESADA_TRUSTED_PROXIES: empty entry at position %d", i+1)
 		}
 		if strings.Contains(part, "/") {
 			_, n, err := net.ParseCIDR(part)

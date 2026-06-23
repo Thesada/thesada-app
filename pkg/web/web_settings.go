@@ -110,7 +110,7 @@ func (s *Server) handleSettingsPassword(w http.ResponseWriter, r *http.Request) 
 	has, _ := s.services.Auth.HasPassword(u.TenantID, u.ID)
 	data := map[string]interface{}{"HasPassword": has}
 	if len(password) < service.MinPasswordLen {
-		data["Error"] = "Password must be at least 10 characters."
+		data["Error"] = passwordFloorMsg
 		s.render(w, r, "settings.html", data)
 		return
 	}

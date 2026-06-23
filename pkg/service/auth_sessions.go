@@ -168,29 +168,34 @@ func (s *AuthService) rotateSession(ctx context.Context, tx pgx.Tx, sessionID uu
 }
 
 // SetImpersonation points a session at another tenant for viewing. Crosses
-// tenant boundaries, so super-admin is enforced here (read is_super_admin +
-// write in one tx, so the check cannot race a demote), not just in the handler.
+// tenant boundaries, so super-admin is enforced here, not just in the handler:
+// a single guarded UPDATE gates the write on is_super_admin so the check cannot
+// race a demote. Zero rows affected means either no such session (ErrNotFound)
+// or a non-super one (ErrNotSuperAdmin), disambiguated by an existence probe.
 // in: session id, target tenant slug. out: ErrNotSuperAdmin / ErrNotFound / nil.
 func (s *AuthService) SetImpersonation(sessionID uuid.UUID, tenantID string) error {
 	ctx := context.Background()
 	return db.WithAdminAudit(ctx, s.pools.Admin, "auth.set_impersonation", func(tx pgx.Tx) error {
-		var isSuper bool
-		err := tx.QueryRow(ctx,
-			`SELECT u.is_super_admin FROM user_sessions s JOIN users u ON u.id = s.user_id WHERE s.id = $1`,
-			sessionID).Scan(&isSuper)
-		if errors.Is(err, pgx.ErrNoRows) {
+		tag, err := tx.Exec(ctx,
+			`UPDATE user_sessions s SET impersonated_tenant_id = $1
+			   FROM users u
+			  WHERE s.id = $2 AND u.id = s.user_id AND u.is_super_admin = true`,
+			tenantID, sessionID)
+		if err != nil {
+			return fmt.Errorf("auth: set impersonation for session %s: %w", sessionID, err)
+		}
+		if tag.RowsAffected() == 1 {
+			return nil
+		}
+		var exists bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM user_sessions WHERE id = $1)`, sessionID).Scan(&exists); err != nil {
+			return fmt.Errorf("auth: probe session %s: %w", sessionID, err)
+		}
+		if !exists {
 			return ErrNotFound
 		}
-		if err != nil {
-			return fmt.Errorf("auth: load session %s for impersonation: %w", sessionID, err)
-		}
-		if !isSuper {
-			return ErrNotSuperAdmin
-		}
-		_, err = tx.Exec(ctx,
-			`UPDATE user_sessions SET impersonated_tenant_id = $1 WHERE id = $2`,
-			tenantID, sessionID)
-		return err
+		return ErrNotSuperAdmin
 	})
 }
 

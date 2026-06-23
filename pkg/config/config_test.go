@@ -73,7 +73,7 @@ func TestParseTrustedProxies(t *testing.T) {
 	if !got[1].Contains(net.ParseIP("192.168.66.10")) || got[1].Contains(net.ParseIP("192.168.66.11")) {
 		t.Error("bare IP should parse to a single-host net")
 	}
-	for _, bad := range []string{"garbage", "10.0.0.0/99", "999.1.1.1"} {
+	for _, bad := range []string{"garbage", "10.0.0.0/99", "999.1.1.1", ",", "10.0.0.10,", "10.0.0.10,,10.0.0.11"} {
 		if _, err := parseTrustedProxies(bad); err == nil {
 			t.Errorf("parseTrustedProxies(%q) = nil error, want failure", bad)
 		}

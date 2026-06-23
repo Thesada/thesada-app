@@ -39,14 +39,15 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if password != "" {
-		u, err := s.services.Auth.VerifyPasswordAnyTenant(email, password, s.clientIP(r))
+		ip := s.clientIP(r)
+		u, err := s.services.Auth.VerifyPasswordAnyTenant(email, password, ip)
 		if err != nil {
 			if errors.Is(err, service.ErrBadCredentials) {
 				s.render(w, r, "login.html", map[string]interface{}{"Error": "Invalid email or password."})
 				return
 			}
 			if errors.Is(err, service.ErrLoginRateLimited) {
-				slog.Warn("auth.login.rate_limited", "email", email, "ip", s.clientIP(r))
+				slog.Warn("auth.login.rate_limited", "ip", ip)
 				w.WriteHeader(http.StatusTooManyRequests)
 				s.render(w, r, "login.html", map[string]interface{}{"Error": "Too many attempts. Wait a few minutes and try again."})
 				return
@@ -309,7 +310,7 @@ func (s *Server) handleResetSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(password) < service.MinPasswordLen {
-		s.render(w, r, "reset.html", map[string]interface{}{"Token": token, "Error": "Password must be at least 10 characters."})
+		s.render(w, r, "reset.html", map[string]interface{}{"Token": token, "Error": passwordFloorMsg})
 		return
 	}
 	if password != confirm {

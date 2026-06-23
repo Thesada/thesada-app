@@ -288,13 +288,14 @@ Source: `pkg/service/auth_users.go::DeleteUser`, `pkg/web/admin.go`.
 ### Tenant impersonation requires super-admin, enforced at the service layer
 
 `SetImpersonation` crosses tenant boundaries (it points a session's queries
-at another tenant), so it reads the session owner's `is_super_admin` and
-writes the impersonation flag in one tx - refusing a non-super session with
-`ErrNotSuperAdmin` and an unknown session with `ErrNotFound`. The
-`RequireSuperAdmin` middleware on `/admin/impersonate` is the first gate;
-this service guard is the backstop so a future route that forgets the
-wrapper cannot grant cross-tenant view. Same single-tx read-then-write
-shape as `DeleteUser` so the check cannot race a concurrent demote.
+at another tenant), so a single guarded `UPDATE ... FROM users WHERE
+is_super_admin` gates the write on the session owner being a super-admin -
+no separate check, so nothing can race a concurrent demote. Zero rows
+affected means no such session (`ErrNotFound`) or a non-super one
+(`ErrNotSuperAdmin`), disambiguated by an existence probe in the same tx.
+The `RequireSuperAdmin` middleware on `/admin/impersonate` is the first
+gate; this service guard is the backstop so a future route that forgets the
+wrapper cannot grant cross-tenant view.
 
 How verified: `pkg/service/auth_sessions_integration_test.go` -
 `impersonation_refused_for_non_superadmin` asserts `ErrNotSuperAdmin` and

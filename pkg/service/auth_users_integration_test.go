@@ -133,8 +133,8 @@ func TestAuthUsers(t *testing.T) {
 		if _, err := auth.VerifyPasswordAnyTenant("shortpw@a.test", short, ""); !errors.Is(err, service.ErrBadCredentials) {
 			t.Errorf("login after rejected SetPassword = %v, want ErrBadCredentials", err)
 		}
-		if err := auth.SetPassword(tA, u.ID, "exactly-ten"); err != nil {
-			t.Errorf("SetPassword(>=floor) = %v, want nil", err)
+		if err := auth.SetPassword(tA, u.ID, "exactlyten"); err != nil { // exactly MinPasswordLen (10)
+			t.Errorf("SetPassword(==floor) = %v, want nil", err)
 		}
 	})
 
