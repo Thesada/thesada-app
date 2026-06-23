@@ -423,7 +423,7 @@ func (s *AuthService) SetPassword(tenantID string, userID uuid.UUID, password st
 		tag, err := tx.Exec(ctx,
 			`UPDATE users SET password_hash = $1 WHERE id = $2`, string(hash), userID)
 		if err != nil {
-			return err
+			return fmt.Errorf("auth: set password for user %s: %w", userID, err)
 		}
 		if tag.RowsAffected() == 0 {
 			return ErrNotFound
