@@ -56,12 +56,14 @@ func OriginAllowed(r *http.Request, baseURL string) bool {
 // in: request, trusted proxy networks. out: client IP ("" if unparseable).
 func ClientIP(r *http.Request, trusted []*net.IPNet) string {
 	peer := hostOnly(r.RemoteAddr)
-	if len(trusted) == 0 || !ipInAny(peer, trusted) {
+	if len(trusted) == 0 || !ipInAny(net.ParseIP(peer), trusted) {
 		return peer
 	}
+	// Return only a parsed, re-serialised IP - never a raw header token - so an
+	// X-Forwarded-For value can't carry junk into a rate-limit key, log, or email.
 	for _, part := range reverseSplit(r.Header.Get("X-Forwarded-For")) {
-		if ip := strings.TrimSpace(part); ip != "" && !ipInAny(ip, trusted) {
-			return ip
+		if ip := net.ParseIP(strings.TrimSpace(part)); ip != nil && !ipInAny(ip, trusted) {
+			return ip.String()
 		}
 	}
 	return peer
@@ -76,9 +78,8 @@ func hostOnly(addr string) string {
 	return addr
 }
 
-// ipInAny reports whether ipStr parses and falls inside any of nets.
-func ipInAny(ipStr string, nets []*net.IPNet) bool {
-	ip := net.ParseIP(ipStr)
+// ipInAny reports whether ip is non-nil and falls inside any of nets.
+func ipInAny(ip net.IP, nets []*net.IPNet) bool {
 	if ip == nil {
 		return false
 	}

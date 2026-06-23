@@ -112,6 +112,9 @@ func TestClientIP(t *testing.T) {
 		{"trusted_peer_returns_client", "10.0.0.1:1", "203.0.113.5", trusted, "203.0.113.5"},
 		{"spoofed_prefix_ignored", "10.0.0.1:1", "9.9.9.9, 203.0.113.5", trusted, "203.0.113.5"},
 		{"multi_trusted_hop_skipped", "10.0.0.2:1", "203.0.113.5, 10.0.0.9", trusted, "203.0.113.5"},
+		{"garbage_token_skipped", "10.0.0.1:1", "not-an-ip, 203.0.113.5", trusted, "203.0.113.5"},
+		{"all_garbage_falls_to_peer", "10.0.0.1:1", "junk, also junk", trusted, "10.0.0.1"},
+		{"xff_ipv6_normalised", "10.0.0.1:1", "2001:DB8::1", trusted, "2001:db8::1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
