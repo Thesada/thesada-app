@@ -25,16 +25,14 @@ type Services struct {
 	ApiTokens    *ApiTokenService
 }
 
-// New constructs all services bound to the shared cfg + role-scoped pools.
-// Sub-services pick the right pool field per call site (App for tenant
-// reads, Admin for BYPASSRLS, MQTT for ingest); see db.Pools docs.
+// New constructs all services on shared cfg + role-scoped pools (App=tenant reads, Admin=BYPASSRLS, MQTT=ingest).
 // in: cfg, db.Pools bundle. out: ready *Services bundle.
 func New(cfg *config.Config, pools db.Pools) *Services {
 	return &Services{
 		Devices:      &DeviceService{cfg: cfg, pools: pools},
 		Telemetry:    &TelemetryService{cfg: cfg, pools: pools},
 		Alerts:       &AlertService{cfg: cfg, pools: pools},
-		Auth:         &AuthService{cfg: cfg, pools: pools},
+		Auth:         NewAuthService(cfg, pools),
 		Tenants:      &TenantService{cfg: cfg, pools: pools},
 		Settings:     &SettingsService{cfg: cfg, pools: pools, cache: make(map[string]json.RawMessage)},
 		DeviceFiles:  &DeviceFilesService{cfg: cfg, pools: pools},

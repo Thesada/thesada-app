@@ -4,7 +4,10 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-06-16 (CI lint guard for the pools.App tenancy contract,
+Dated 2026-06-22 (auth-layer hardening: password-login rate limiting,
+constant-time login, super-admin guard on impersonation, service-layer
+password floor, signed-double-submit CSRF, cookie-secret length hard-fail).
+Previously 2026-06-16 (CI lint guard for the pools.App tenancy contract,
 session token rotation, CA key encryption at rest, MQTT topic / cert
 pairing tenant gate, RLS ungated as the steady-state default). Bump the
 date on every edit.
@@ -177,6 +180,23 @@ a wrong password both return 401 (indistinguishable), and signup returns
 
 Source: `pkg/api/v1/auth.go::handleAuthLogin`, `handleAuthSignup`.
 
+### Password verification is constant-time across account existence
+
+`VerifyPassword` and `VerifyPasswordAnyTenant` run a bcrypt comparison even
+when no user (or no stored hash) is found, against a fixed decoy hash
+(`dummyPasswordHash`, generated once at `DefaultCost`). Without it the
+no-user path returns before any bcrypt call and the timing gap enumerates
+valid emails despite the identical 401/error. The any-tenant lookup also
+bounds work: it orders candidates by `created_at` and checks at most
+`maxLoginCandidates` rows, so a reused email is deterministic (oldest
+account wins) and cannot turn one login into an unbounded bcrypt run.
+
+How enforced: reviewers reject a new early `return ErrBadCredentials` on a
+no-user/no-hash branch that skips the bcrypt step.
+
+Source: `pkg/service/auth_users.go::VerifyPassword`,
+`VerifyPasswordAnyTenant`, `equaliseLoginTiming`, `dummyPasswordHash`.
+
 ### `/api/v1` reads are tenant-scoped and redact device secrets
 
 Every `/api/v1/devices*` read resolves the tenant via
@@ -265,6 +285,25 @@ How verified: `pkg/service/auth_users_integration_test.go` -
 
 Source: `pkg/service/auth_users.go::DeleteUser`, `pkg/web/admin.go`.
 
+### Tenant impersonation requires super-admin, enforced at the service layer
+
+`SetImpersonation` crosses tenant boundaries (it points a session's queries
+at another tenant), so it reads the session owner's `is_super_admin` and
+writes the impersonation flag in one tx - refusing a non-super session with
+`ErrNotSuperAdmin` and an unknown session with `ErrNotFound`. The
+`RequireSuperAdmin` middleware on `/admin/impersonate` is the first gate;
+this service guard is the backstop so a future route that forgets the
+wrapper cannot grant cross-tenant view. Same single-tx read-then-write
+shape as `DeleteUser` so the check cannot race a concurrent demote.
+
+How verified: `pkg/service/auth_sessions_integration_test.go` -
+`impersonation_refused_for_non_superadmin` asserts `ErrNotSuperAdmin` and
+that the session's tenant view is unchanged;
+`impersonation_unknown_session_not_found` asserts `ErrNotFound`.
+
+Source: `pkg/service/auth_sessions.go::SetImpersonation`,
+`pkg/web/admin.go::handleAdminImpersonate`.
+
 ---
 
 ## Cryptographic material at rest
@@ -302,22 +341,53 @@ SHA256-then-bcrypt, no length cap workaround, no custom KDF.
 
 Source: `pkg/service/auth.go::SetPassword`.
 
+### The password floor lives in `SetPassword`, not just the handlers
+
+`SetPassword` rejects anything under `MinPasswordLen` (10) with
+`ErrPasswordTooShort` before hashing, so the floor holds for any caller -
+the settings form, the reset flow, and any future path. The two handlers
+keep a friendlier inline message but reuse the same `service.MinPasswordLen`
+constant rather than a literal, so the floor has one source of truth.
+
+How verified: `pkg/service/auth_users_integration_test.go` -
+`SetPassword_rejects_below_floor` asserts a 9-char password returns
+`ErrPasswordTooShort`, nothing is stored, and a 10-char password is accepted.
+
+Source: `pkg/service/auth_users.go::SetPassword`,
+`pkg/service/auth.go::MinPasswordLen`, `pkg/web/web_settings.go`,
+`pkg/web/web_auth.go`.
+
 ---
 
 ## CSRF
 
 ### Every state-changing HTTP endpoint requires CSRF verification
 
-Double-submit cookie pattern: server sets a non-HttpOnly cookie
-`csrf_token`, client reflects via header `X-CSRF-Token` or hidden
-form field. Middleware compares constant-time. Applied to all
-methods in `{POST, PUT, PATCH, DELETE}`.
+Signed double-submit cookie pattern: server sets a non-HttpOnly cookie
+`thesada_csrf` whose value is a random token plus an HMAC-SHA256 signature
+under the app's cookie secret (`<body>.<sig>`); the client reflects the
+exact value via header `X-CSRF-Token` or hidden form field. Middleware
+verifies unsafe methods (`{POST, PUT, PATCH, DELETE}`) echo the cookie,
+constant-time. The signature is what lifts this above plain double-submit:
+a sibling subdomain (or anything that can plant a cookie but does not hold
+the secret) cannot forge a value that passes the signature check, so
+`ensureCookie` discards the planted cookie and mints a fresh one - the
+attacker's submitted value then no longer matches and the request 403s.
 
 How enforced: middleware `pkg/csrf` runs on every router group that
-isn't explicitly read-only. Reviewers check new mutating endpoints
-sit behind that middleware.
+isn't explicitly read-only (wired with `cfg.CookieSecret` in
+`pkg/web/web.go`). Reviewers check new mutating endpoints sit behind it.
 
-Source: `pkg/csrf/csrf.go` (package has tests).
+Deploy note: an old unsigned cookie fails the signature check, so a form
+loaded before this shipped and submitted after will 403 once; `ensureCookie`
+replaces the cookie on that same response and a refresh recovers.
+
+How verified: `pkg/csrf/csrf_test.go` -
+`TestMiddleware_RejectsPlantedCookie` (an unsigned planted cookie is
+refused), `TestValidToken_AcceptsMintedRejectsForged` (only secret-signed
+values validate), plus the missing/mismatched-token 403 paths.
+
+Source: `pkg/csrf/csrf.go`, `pkg/web/web.go`.
 
 ---
 
@@ -428,6 +498,21 @@ double-submit pattern; the session cookie stays HttpOnly. Same SameSite=Lax
 + the shared Secure decision above.
 
 Source: `pkg/csrf/csrf.go`, `pkg/web/web.go`, `pkg/authmw`, `pkg/httpsec`.
+
+### The cookie secret must be >= 32 bytes; short secrets hard-fail at boot
+
+`THESADA_COOKIE_SECRET` signs both the session cookies and (now) the CSRF
+tokens, so a weak secret undermines both. `config.validate` aborts startup
+when it is under `minCookieSecretLen` (32) unless `THESADA_ALLOW_WEAK_SECRET`
+is set truthy - safe by default, with an explicit, logged escape hatch for
+an existing sub-32-byte deployment to boot across a restart while it rotates.
+The error names the override so an operator hitting it knows the way out.
+
+How verified: `pkg/config/config_test.go::TestValidate_CookieSecretFloor`
+(empty/weak/weak+override/strong matrix) and
+`TestValidate_WeakSecretErrorIsActionable`.
+
+Source: `pkg/config/config.go::validate`, `minCookieSecretLen`, `envBool`.
 
 ---
 
@@ -564,6 +649,39 @@ not grow unbounded over the lifetime of the systemd unit.
 
 Source: `pkg/ratelimit/ratelimit.go`, `pkg/web/web.go::allowMagicLink`
 (consumed by the magic-link login handler + `handleForgotSubmit`).
+
+### Password login is rate-limited per email + per IP and answers 429
+
+The same window limiter brakes online password guessing, but here at the
+service layer (`AuthService.allowLogin`, checked inside
+`VerifyPasswordAnyTenant`) so the web form and `/api/v1/auth/login` are
+covered by one gate rather than each handler. Per-email and per-IP buckets
+(`loginMaxPerEmail` / `loginMaxPerIP` over `loginWindow`); over the cap
+returns `ErrLoginRateLimited`, which the handlers surface as **429** (web
+re-renders "too many attempts", API returns a 429 JSON body).
+
+Unlike magic-link, login answers 429 rather than silent-dropping: login
+already has a visible failure mode (wrong password), and the limiter keys
+on (email, IP) independently of whether the account exists, so a throttle
+response leaks no user enumeration - it only confirms the caller has been
+hammering, which the caller already knows.
+
+The per-IP key is the real client IP via `httpsec.ClientIP`, which honours
+`X-Forwarded-For` only from a peer in `THESADA_TRUSTED_PROXIES` (walked
+right-to-left, so a client-spoofed prefix is ignored). Without that env the
+key is `RemoteAddr`; behind the TLS proxy every request shares the proxy IP,
+so the proxy MUST be in the trusted set for the per-IP cap to be per-client
+rather than a global bucket.
+
+How verified: `pkg/service/auth_throttle_test.go` (per-email cap, per-IP
+cap, empty-IP isolation, case-insensitive email key) and
+`pkg/service/auth_users_integration_test.go::VerifyPasswordAnyTenant_rate_limited_per_email`
+(the gate trips end-to-end and refuses even the correct password while full).
+
+Source: `pkg/service/auth.go::allowLogin`,
+`pkg/service/auth_users.go::VerifyPasswordAnyTenant`,
+`pkg/web/web_auth.go::handleLoginSubmit`,
+`pkg/api/v1/auth.go::handleAuthLogin`.
 
 ---
 

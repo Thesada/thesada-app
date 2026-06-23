@@ -4,7 +4,7 @@ How to write code in this repo. Reference material for PR review.
 Sibling to [docs/invariants.md](docs/invariants.md) (the load-bearing
 rules).
 
-Dated 2026-05-12. Bump on every edit.
+Dated 2026-06-22. Bump on every edit.
 
 ---
 
@@ -38,16 +38,20 @@ payload := "{}"
 
 ### Function header comments
 
-Every exported function (and large unexported functions) gets a
-multi-line header: what it does, inputs, outputs.
+Every exported function (and large unexported functions) gets a short
+header: a one-line what, then `in:` / `out:`. Keep it to 1-3 lines.
 
 ```go
-// CreateSession generates a session token, stores its sha256 hash, and
-// returns the raw token for the cookie. The hash is what gets compared
-// at validation time so a leaked DB does not expose live sessions.
-// in: user id, auth method. out: raw token string + db row id, error.
+// CreateSession stores a session token's sha256 hash and returns the raw
+// token for the cookie (hash-only storage so a leaked DB exposes no live sessions).
+// in: user id, auth method. out: raw token, db row id, error.
 func (s *AuthService) CreateSession(userID uuid.UUID, method AuthMethod) (string, uuid.UUID, error) {
 ```
+
+Headers are not the place for essays. One subtle WHY clause is fine; full
+rationale (alternatives considered, history, tuning math) goes in the commit
+body or a session doc, never the header. If a header runs past ~3 lines, the
+extra lines are rationale that belongs elsewhere.
 
 Big functions get split into helpers. Three similar lines is better
 than a premature abstraction; thirty lines of nested branching is not.

@@ -39,10 +39,16 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if password != "" {
-		u, err := s.services.Auth.VerifyPasswordAnyTenant(email, password)
+		u, err := s.services.Auth.VerifyPasswordAnyTenant(email, password, s.clientIP(r))
 		if err != nil {
 			if errors.Is(err, service.ErrBadCredentials) {
 				s.render(w, r, "login.html", map[string]interface{}{"Error": "Invalid email or password."})
+				return
+			}
+			if errors.Is(err, service.ErrLoginRateLimited) {
+				slog.Warn("auth.login.rate_limited", "email", email, "ip", s.clientIP(r))
+				w.WriteHeader(http.StatusTooManyRequests)
+				s.render(w, r, "login.html", map[string]interface{}{"Error": "Too many attempts. Wait a few minutes and try again."})
 				return
 			}
 			slog.Error("password verify failed", "email", email, "err", err)
@@ -54,7 +60,7 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.allowMagicLink(email, clientIP(r)) {
+	if !s.allowMagicLink(email, s.clientIP(r)) {
 		s.render(w, r, "login.html", map[string]interface{}{"Sent": true, "Email": email})
 		return
 	}
@@ -132,7 +138,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // in: writer, request, user, auth method. out: none.
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *service.User, method string) {
 	ua := r.UserAgent()
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	token, expires, err := s.services.Auth.CreateSession(u.TenantID, u.ID, method, ua, ip)
 	if err != nil {
 		slog.Error("session create failed", "user_id", u.ID, "err", err)
@@ -144,14 +150,11 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *service
 		"user_id", u.ID, "tenant", u.TenantID, "method", method)
 }
 
-// clientIP returns the best-guess remote address for the request, stripping the port.
+// clientIP resolves the request's client IP, honouring X-Forwarded-For from a
+// configured trusted proxy.
 // in: request. out: ip string or "".
-func clientIP(r *http.Request) string {
-	addr := r.RemoteAddr
-	if i := strings.LastIndex(addr, ":"); i >= 0 {
-		return addr[:i]
-	}
-	return addr
+func (s *Server) clientIP(r *http.Request) string {
+	return httpsec.ClientIP(r, s.cfg.TrustedProxies)
 }
 
 // handleSignupForm renders the email-only waitlist form.
@@ -178,16 +181,11 @@ func (s *Server) handleSignupSubmit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "signup.html", map[string]interface{}{"Error": "Could not add to waitlist."})
 		return
 	}
-	//  phase 1: plain-text admin notification, deduped 24h per
-	// email so a user hammering signup doesn't spam the operator.
-	s.notifyAdminWaitlist(email, note, clientIP(r))
+	s.notifyAdminWaitlist(email, note, s.clientIP(r))
 	s.render(w, r, "signup.html", map[string]interface{}{"Joined": true, "Email": email})
 }
 
-// notifyAdminWaitlist emails THESADA_ADMIN_EMAIL when a new signup lands,
-// deduped 24h per lowercase email via waitlistNotify. Email send runs in a
-// goroutine so the form response is never blocked on SMTP. No-op if admin
-// email is unset (test / dev).
+// notifyAdminWaitlist emails THESADA_ADMIN_EMAIL on new signup; deduped 24h per email, goroutine so SMTP never blocks the form.
 // in: waitlist email, optional note, client IP. out: none.
 func (s *Server) notifyAdminWaitlist(email, note, ip string) {
 	if s.cfg.AdminEmail == "" {
@@ -213,10 +211,7 @@ func (s *Server) notifyAdminWaitlist(email, note, ip string) {
 	}()
 }
 
-// allowMagicLink consults the per-email and per-IP sliding-window limiters
-// and returns false when either bucket is full. Callers treat a false result
-// as a silent drop: the user still sees "check your email" so the endpoint
-// does not leak which addresses are known or rate-limited.
+// allowMagicLink checks per-email and per-IP rate limiters; false = silent drop so the endpoint leaks no address info.
 // in: email, client ip. out: true if both limiters have headroom.
 func (s *Server) allowMagicLink(email, ip string) bool {
 	if !s.emailLimits.Allow("email:" + strings.ToLower(email)) {
@@ -236,10 +231,7 @@ func (s *Server) handleForgotForm(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "forgot.html", nil)
 }
 
-// handleForgotSubmit issues a password reset token and emails the link.
-// Always renders the same "check your email" confirmation regardless of
-// whether the address exists, so the form cannot be used to enumerate users.
-// Rate-limited by email and source IP.
+// handleForgotSubmit issues a password-reset link and emails it; always shows "check your email" to prevent user enumeration.
 // in: writer, POST form (email). out: HTML confirmation page.
 func (s *Server) handleForgotSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -252,7 +244,7 @@ func (s *Server) handleForgotSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	confirm := map[string]interface{}{"Sent": true, "Email": email}
-	if !s.allowMagicLink(email, clientIP(r)) {
+	if !s.allowMagicLink(email, s.clientIP(r)) {
 		s.render(w, r, "forgot.html", confirm)
 		return
 	}
@@ -282,9 +274,7 @@ func (s *Server) handleForgotSubmit(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "forgot.html", confirm)
 }
 
-// handleResetForm renders the "set a new password" form after validating the
-// reset token. The token is not consumed here so the user can still submit
-// the form; consumption happens in handleResetSubmit on success.
+// handleResetForm validates the reset token and renders the new-password form; token not consumed until handleResetSubmit succeeds.
 // in: writer, request with ?token=. out: HTML form or error page.
 func (s *Server) handleResetForm(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
@@ -299,9 +289,7 @@ func (s *Server) handleResetForm(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "reset.html", map[string]interface{}{"Token": token})
 }
 
-// handleResetSubmit revalidates the token, stores the new bcrypt password
-// hash, and marks the token consumed. On success the user is redirected to
-// /login so they can sign in with the new password.
+// handleResetSubmit revalidates the token, stores the new bcrypt hash, marks the token consumed, then redirects to /login.
 // in: writer, POST form (token, password, confirm). out: redirect or error.
 func (s *Server) handleResetSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -320,7 +308,7 @@ func (s *Server) handleResetSubmit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "reset.html", map[string]interface{}{"Error": resetErrMessage(err)})
 		return
 	}
-	if len(password) < 10 {
+	if len(password) < service.MinPasswordLen {
 		s.render(w, r, "reset.html", map[string]interface{}{"Token": token, "Error": "Password must be at least 10 characters."})
 		return
 	}

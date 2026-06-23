@@ -114,12 +114,69 @@ func TestAuthUsers(t *testing.T) {
 		if err := auth.SetPassword(tA, u.ID, "any-tenant-pw"); err != nil {
 			t.Fatalf("SetPassword: %v", err)
 		}
-		got, err := auth.VerifyPasswordAnyTenant("pwany@a.test", "any-tenant-pw")
+		got, err := auth.VerifyPasswordAnyTenant("pwany@a.test", "any-tenant-pw", "")
 		if err != nil || got.ID != u.ID {
 			t.Errorf("VerifyPasswordAnyTenant correct = %v err %v", got, err)
 		}
-		if _, err := auth.VerifyPasswordAnyTenant("pwany@a.test", "wrong"); !errors.Is(err, service.ErrBadCredentials) {
+		if _, err := auth.VerifyPasswordAnyTenant("pwany@a.test", "wrong", ""); !errors.Is(err, service.ErrBadCredentials) {
 			t.Errorf("VerifyPasswordAnyTenant wrong = %v, want ErrBadCredentials", err)
+		}
+	})
+
+	t.Run("SetPassword_rejects_below_floor", func(t *testing.T) {
+		u := mustCreateUser(t, auth, tA, "shortpw@a.test")
+		short := "123456789" // 9 chars, one under MinPasswordLen
+		if err := auth.SetPassword(tA, u.ID, short); !errors.Is(err, service.ErrPasswordTooShort) {
+			t.Errorf("SetPassword(<floor) = %v, want ErrPasswordTooShort", err)
+		}
+		// Nothing was stored, so a login with the rejected password fails.
+		if _, err := auth.VerifyPasswordAnyTenant("shortpw@a.test", short, ""); !errors.Is(err, service.ErrBadCredentials) {
+			t.Errorf("login after rejected SetPassword = %v, want ErrBadCredentials", err)
+		}
+		if err := auth.SetPassword(tA, u.ID, "exactly-ten"); err != nil {
+			t.Errorf("SetPassword(>=floor) = %v, want nil", err)
+		}
+	})
+
+	t.Run("VerifyPasswordAnyTenant_oldest_tenant_wins", func(t *testing.T) {
+		// Same email + password in two tenants; the older account must win
+		// deterministically rather than depending on DB row order.
+		older := mustCreateUser(t, auth, tA, "dup@x.test")
+		newer := mustCreateUser(t, auth, tB, "dup@x.test")
+		for _, u := range []*service.User{older, newer} {
+			if err := auth.SetPassword(u.TenantID, u.ID, "shared-password"); err != nil {
+				t.Fatalf("SetPassword(%s): %v", u.TenantID, err)
+			}
+		}
+		got, err := auth.VerifyPasswordAnyTenant("dup@x.test", "shared-password", "")
+		if err != nil {
+			t.Fatalf("VerifyPasswordAnyTenant: %v", err)
+		}
+		if got.ID != older.ID || got.TenantID != tA {
+			t.Errorf("winner = %s in %s, want oldest %s in %s", got.ID, got.TenantID, older.ID, tA)
+		}
+	})
+
+	t.Run("VerifyPasswordAnyTenant_rate_limited_per_email", func(t *testing.T) {
+		u := mustCreateUser(t, auth, tA, "rl@a.test")
+		if err := auth.SetPassword(tA, u.ID, "correct-password"); err != nil {
+			t.Fatalf("SetPassword: %v", err)
+		}
+		// Empty ip isolates this from the per-IP bucket; wrong guesses exhaust
+		// the per-email cap. The exact cap is an unexported const, so loop to a
+		// safe ceiling and assert it trips.
+		tripped := false
+		var lastErr error
+		for i := 0; i < 50 && !tripped; i++ {
+			_, lastErr = auth.VerifyPasswordAnyTenant("rl@a.test", "wrong", "")
+			tripped = errors.Is(lastErr, service.ErrLoginRateLimited)
+		}
+		if !tripped {
+			t.Fatalf("never rate-limited after 50 attempts, last err %v", lastErr)
+		}
+		// The correct password is refused too while the bucket is full.
+		if _, err := auth.VerifyPasswordAnyTenant("rl@a.test", "correct-password", ""); !errors.Is(err, service.ErrLoginRateLimited) {
+			t.Errorf("correct password while throttled = %v, want ErrLoginRateLimited", err)
 		}
 	})
 

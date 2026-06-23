@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/service"
 )
 
 // handleSettingsForm renders the account settings page with a set/change password form.
@@ -108,7 +109,7 @@ func (s *Server) handleSettingsPassword(w http.ResponseWriter, r *http.Request) 
 	confirm := r.PostFormValue("confirm")
 	has, _ := s.services.Auth.HasPassword(u.TenantID, u.ID)
 	data := map[string]interface{}{"HasPassword": has}
-	if len(password) < 10 {
+	if len(password) < service.MinPasswordLen {
 		data["Error"] = "Password must be at least 10 characters."
 		s.render(w, r, "settings.html", data)
 		return

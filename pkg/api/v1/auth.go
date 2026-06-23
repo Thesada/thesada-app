@@ -1,6 +1,5 @@
-// JSON auth handlers for /api/v1/auth/*: password login, logout, waitlist
-// signup. magic-link stays a stub in api.go until a shared mailer/notify
-// component exists (the email templates + rate-limiters live in pkg/web).
+// JSON auth handlers for /api/v1/auth/*: password login, logout, waitlist signup.
+// Magic-link is a stub until email templates + rate-limiters move out of pkg/web.
 package v1
 
 import (
@@ -38,9 +37,7 @@ type userResponse struct {
 	IsSuperAdmin bool      `json:"is_super_admin"`
 }
 
-// loginResponse is the POST /auth/login success body. Token is the bearer
-// credential the client sends back as `Authorization: Bearer` on later calls;
-// the same login also sets the session cookie for web-origin consumers.
+// loginResponse is the POST /auth/login success body; Token is the bearer credential, cookie serves web-origin consumers.
 type loginResponse struct {
 	Token     string       `json:"token"`
 	ExpiresAt time.Time    `json:"expires_at"`
@@ -60,10 +57,7 @@ func toUserResponse(u *service.User) userResponse {
 	}
 }
 
-// handleAuthLogin verifies an email + password, starts a session (sets the
-// cookie) and issues a bearer API token, returning the token + redacted user.
-// Bad credentials are 401; the email is matched across all tenants, same as
-// the web login.
+// handleAuthLogin verifies email + password, sets a session cookie, and issues a bearer token.
 // in: writer, POST /auth/login {email,password}. out: 200 loginResponse / 400 / 401.
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
@@ -76,10 +70,15 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := s.services.Auth.VerifyPasswordAnyTenant(email, req.Password)
+	u, err := s.services.Auth.VerifyPasswordAnyTenant(email, req.Password, s.clientIP(r))
 	if err != nil {
 		if errors.Is(err, service.ErrBadCredentials) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid email or password"})
+			return
+		}
+		if errors.Is(err, service.ErrLoginRateLimited) {
+			slog.Warn("auth.login.rate_limited", "email", email, "ip", s.clientIP(r), "surface", "api")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many attempts, try again later"})
 			return
 		}
 		slog.Error("api login: verify failed", "email", email, "err", err)
@@ -87,8 +86,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Session cookie (web-origin consumers of the API).
-	cookieTok, cookieExp, err := s.services.Auth.CreateSession(u.TenantID, u.ID, "password", r.UserAgent(), clientIP(r))
+	cookieTok, cookieExp, err := s.services.Auth.CreateSession(u.TenantID, u.ID, "password", r.UserAgent(), s.clientIP(r))
 	if err != nil {
 		slog.Error("api login: session create failed", "user_id", u.ID, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
@@ -96,7 +94,6 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	authmw.SetSessionCookie(w, cookieTok, cookieExp, httpsec.RequestIsSecure(r))
 
-	// Bearer token (the API client's credential).
 	token, expires, err := s.services.ApiTokens.IssueToken(u.TenantID, u.ID, "api login")
 	if err != nil {
 		slog.Error("api login: token issue failed", "user_id", u.ID, "err", err)
@@ -111,9 +108,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, loginResponse{Token: token, ExpiresAt: expires, User: toUserResponse(u)})
 }
 
-// handleAuthLogout revokes whichever credential the caller presented - the
-// bearer token and/or the session cookie - and clears the cookie. Idempotent
-// and safe to call unauthenticated.
+// handleAuthLogout revokes the bearer token and/or session cookie; idempotent, safe unauthenticated.
 // in: writer, POST /auth/logout. out: 200 {"status":"ok"}.
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	if tok := authmw.BearerToken(r); tok != "" {
@@ -136,9 +131,7 @@ type signupRequest struct {
 	Note  string `json:"note"`
 }
 
-// handleAuthSignup adds an email to the bootstrap-tenant waitlist. Always
-// answers 200 so the endpoint does not reveal whether an email is already
-// known (no user enumeration), matching the web signup.
+// handleAuthSignup adds email to the waitlist; always 200 to avoid user enumeration.
 // in: writer, POST /auth/signup {email,note?}. out: 200 {"status":"ok"} / 400.
 func (s *Server) handleAuthSignup(w http.ResponseWriter, r *http.Request) {
 	var req signupRequest

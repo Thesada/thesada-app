@@ -98,6 +98,24 @@ func TestAuthHandlers(t *testing.T) {
 		t.Errorf("missing password: got %d, want 400", rec.Code)
 	}
 
+	// --- login: rate limited -> 429 ----------------------------------------
+	// Dedicated account so earlier subtests' attempts do not perturb the count.
+	rl, err := env.Services.Auth.CreateUser(tenant, "ratelimit@example.com", "RL", false)
+	if err != nil {
+		t.Fatalf("seed rate-limit user: %v", err)
+	}
+	if err := env.Services.Auth.SetPassword(tenant, rl.ID, "correct horse staple"); err != nil {
+		t.Fatalf("set rate-limit password: %v", err)
+	}
+	got429 := false
+	for i := 0; i < 25 && !got429; i++ {
+		r := post(srv, "/auth/login", `{"email":"ratelimit@example.com","password":"wrong"}`, nil)
+		got429 = r.Code == http.StatusTooManyRequests
+	}
+	if !got429 {
+		t.Error("login never returned 429 after exceeding the per-email cap")
+	}
+
 	// --- logout with the bearer revokes it ----------------------------------
 	if rec := post(srv, "/auth/logout", ``, map[string]string{"Authorization": "Bearer " + lr.Token}); rec.Code != http.StatusOK {
 		t.Errorf("logout: got %d, want 200", rec.Code)

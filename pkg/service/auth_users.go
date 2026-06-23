@@ -1,11 +1,9 @@
 // AuthService - users table: lookup, create, update, password.
 // See auth.go for the service struct and shared types.
 //
-// RLS: the users table has a direct tenant_id policy. Tenant-scoped
-// methods take a tenantID and run under db.WithTenant. Cross-tenant paths
-// (any-tenant login lookups, boot-time promotion) run under db.WithAdminAudit
-// on the BYPASSRLS pool. user_id-keyed methods take an explicit tenantID so
-// a wrong-tenant primary key simply matches zero rows once RLS is enabled.
+// RLS: tenant-scoped methods run under db.WithTenant; cross-tenant paths
+// (login lookup, boot promotion) run under db.WithAdminAudit on BYPASSRLS.
+// user_id-keyed methods take an explicit tenantID so cross-tenant PKs match zero rows.
 package service
 
 import (
@@ -19,6 +17,23 @@ import (
 
 	"thesada.app/app/pkg/db"
 )
+
+// dummyPasswordHash equalises timing for no-user logins so email enumeration is not possible.
+// DefaultCost keeps it aligned with real hashes.
+var dummyPasswordHash = mustDummyHash()
+
+func mustDummyHash() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("decoy-for-timing-equalisation"), bcrypt.DefaultCost)
+	if err != nil {
+		panic("service: dummy bcrypt hash generation failed: " + err.Error())
+	}
+	return h
+}
+
+// equaliseLoginTiming spends one decoy bcrypt compare; result discarded.
+func equaliseLoginTiming(password string) {
+	_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(password))
+}
 
 // GetUserByEmail finds a user by tenant + email (case-insensitive via citext).
 // in: tenant_id, email. out: *User or ErrNotFound.
@@ -41,11 +56,8 @@ func (s *AuthService) GetUserByEmail(tenantID, email string) (*User, error) {
 	return &u, nil
 }
 
-// GetUserByEmailAnyTenant finds a user by email across all tenants.
-// Returns the first match (ordered by created_at).
-//
-// Cross-tenant BY DESIGN - the login flow has no tenant in hand yet, the
-// email lookup is what resolves it. Runs under WithAdminAudit.
+// GetUserByEmailAnyTenant finds a user by email across all tenants (oldest match wins).
+// Cross-tenant by design: login has no tenant yet; runs under WithAdminAudit.
 // in: email. out: *User or ErrNotFound.
 func (s *AuthService) GetUserByEmailAnyTenant(email string) (*User, error) {
 	const query = `
@@ -66,8 +78,7 @@ func (s *AuthService) GetUserByEmailAnyTenant(email string) (*User, error) {
 	return &u, nil
 }
 
-// EnsureAdminUser creates an admin user with no password if none exists for the given email.
-// Used at startup to bootstrap the first login from THESADA_ADMIN_EMAIL.
+// EnsureAdminUser creates an admin user (no password) if one does not exist for the email.
 // in: tenant_id, email. out: created or existing *User, error.
 func (s *AuthService) EnsureAdminUser(tenantID, email string) (*User, error) {
 	u, err := s.GetUserByEmail(tenantID, email)
@@ -77,9 +88,8 @@ func (s *AuthService) EnsureAdminUser(tenantID, email string) (*User, error) {
 	if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
-	// Bootstrap admin is always a super-admin: single-tenant deploys need a
-	// cross-tenant escape hatch, and multi-tenant deploys need someone who can
-	// create tenants before the first real tenant-scoped admin exists.
+	// Always super-admin: both single- and multi-tenant deploys need an escape hatch before
+	// any tenant-scoped admin exists.
 	const insert = `
 		INSERT INTO users (tenant_id, email, is_admin, is_super_admin)
 		VALUES ($1, $2, true, true)
@@ -96,8 +106,9 @@ func (s *AuthService) EnsureAdminUser(tenantID, email string) (*User, error) {
 	return &out, nil
 }
 
-// VerifyPassword looks up a user by tenant + email and bcrypt-verifies the password.
-// in: tenant_id, email, plain password. out: *User on success, ErrBadCredentials otherwise.
+// VerifyPassword bcrypt-verifies a password for one tenant+email.
+// NOT rate-limited - any attacker-reachable caller must gate attempts itself.
+// in: tenant_id, email, plain password. out: *User or ErrBadCredentials.
 func (s *AuthService) VerifyPassword(tenantID, email, password string) (*User, error) {
 	const query = `
 		SELECT id, tenant_id, email, display_name, telegram_chat_id, is_admin, is_super_admin, created_at, last_login_at, password_hash
@@ -110,12 +121,14 @@ func (s *AuthService) VerifyPassword(tenantID, email, password string) (*User, e
 			&u.ID, &u.TenantID, &u.Email, &u.DisplayName, &u.TelegramChatID, &u.IsAdmin, &u.IsSuperAdmin, &u.CreatedAt, &u.LastLoginAt, &hash)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
+		equaliseLoginTiming(password)
 		return nil, ErrBadCredentials
 	}
 	if err != nil {
 		return nil, err
 	}
 	if hash == nil || *hash == "" {
+		equaliseLoginTiming(password)
 		return nil, ErrBadCredentials
 	}
 	if bcrypt.CompareHashAndPassword([]byte(*hash), []byte(password)) != nil {
@@ -125,24 +138,28 @@ func (s *AuthService) VerifyPassword(tenantID, email, password string) (*User, e
 	return &u, nil
 }
 
-// VerifyPasswordAnyTenant looks up a user by email across all tenants and
-// bcrypt-verifies the password. If multiple tenants have the same email, the
-// first match with a valid password wins.
-//
-// Cross-tenant BY DESIGN - login has no tenant yet. Runs under WithAdminAudit.
-// in: email, plain password. out: *User on success, ErrBadCredentials otherwise.
-func (s *AuthService) VerifyPasswordAnyTenant(email, password string) (*User, error) {
+// VerifyPasswordAnyTenant bcrypt-verifies a password across all tenants (oldest account wins,
+// at most maxLoginCandidates). Rate-limited per email+IP; no-candidate result still spends
+// one decoy bcrypt so timing cannot enumerate. Cross-tenant by design; runs under WithAdminAudit.
+// in: email, plain password, source ip. out: *User, ErrLoginRateLimited, or ErrBadCredentials.
+func (s *AuthService) VerifyPasswordAnyTenant(email, password, ip string) (*User, error) {
+	if !s.allowLogin(email, ip) {
+		return nil, ErrLoginRateLimited
+	}
 	const query = `
 		SELECT id, tenant_id, email, display_name, telegram_chat_id, is_admin, is_super_admin, created_at, last_login_at, password_hash
-		FROM users WHERE email = $1 AND password_hash IS NOT NULL`
+		FROM users WHERE email = $1 AND password_hash IS NOT NULL
+		ORDER BY created_at, tenant_id
+		LIMIT $2`
 	ctx := context.Background()
 	var matched *User
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "auth.verify_password_any_tenant", func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, query, email)
+		rows, err := tx.Query(ctx, query, email, maxLoginCandidates)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
+		compared := 0
 		for rows.Next() {
 			var u User
 			var hash *string
@@ -152,12 +169,21 @@ func (s *AuthService) VerifyPasswordAnyTenant(email, password string) (*User, er
 			if hash == nil || *hash == "" {
 				continue
 			}
+			compared++
 			if bcrypt.CompareHashAndPassword([]byte(*hash), []byte(password)) == nil {
 				matched = &u
 				return nil
 			}
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		// Pad with decoys so a failed login always costs maxLoginCandidates
+		// bcrypts - timing then leaks neither existence nor tenant count.
+		for i := compared; i < maxLoginCandidates; i++ {
+			equaliseLoginTiming(password)
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -170,11 +196,7 @@ func (s *AuthService) VerifyPasswordAnyTenant(email, password string) (*User, er
 }
 
 // PromoteSuperAdmin marks a user as is_super_admin=true. Idempotent.
-// Used by bootstrapAdmin to flip an existing (pre-0004) admin row into the
-// super-admin role on the first boot after the migration lands.
-//
-// Cross-tenant BY DESIGN - runs at boot before any tenant context exists,
-// keyed on a user PK. Runs under WithAdminAudit.
+// Cross-tenant by design: runs at boot before any tenant context exists; runs under WithAdminAudit.
 // in: user_id. out: error.
 func (s *AuthService) PromoteSuperAdmin(userID uuid.UUID) error {
 	ctx := context.Background()
@@ -184,8 +206,7 @@ func (s *AuthService) PromoteSuperAdmin(userID uuid.UUID) error {
 	})
 }
 
-// ListUsersByTenant returns every user row in a single tenant, ordered by
-// email. Used by the /admin tenant user management UI.
+// ListUsersByTenant returns all users in a tenant ordered by email.
 // in: tenant_id. out: []User, error.
 func (s *AuthService) ListUsersByTenant(tenantID string) ([]User, error) {
 	const query = `
@@ -214,10 +235,8 @@ func (s *AuthService) ListUsersByTenant(tenantID string) ([]User, error) {
 	return out, nil
 }
 
-// CreateUser inserts a new user row with the given tenant + email, optional
-// display name, and admin flag. Password is left null; the user is expected
-// to set it via the reset-link flow (admin can ship that link out-of-band).
-// in: tenant, email, display_name (may be ""), is_admin. out: *User, error.
+// CreateUser inserts a new user (no password; set via reset-link flow).
+// in: tenant_id, email, display_name (may be ""), is_admin. out: *User, error.
 func (s *AuthService) CreateUser(tenantID, email, displayName string, isAdmin bool) (*User, error) {
 	var dn interface{}
 	if displayName != "" {
@@ -239,8 +258,7 @@ func (s *AuthService) CreateUser(tenantID, email, displayName string, isAdmin bo
 	return &u, nil
 }
 
-// GetUserByID returns a single user row by primary key, scoped to a tenant
-// so a valid UUID from another tenant matches zero rows once RLS is on.
+// GetUserByID returns a user by primary key, tenant-scoped (cross-tenant UUID matches zero rows).
 // in: tenant_id, user_id. out: *User, error (ErrNotFound if missing).
 func (s *AuthService) GetUserByID(tenantID string, userID uuid.UUID) (*User, error) {
 	const query = `
@@ -262,10 +280,8 @@ func (s *AuthService) GetUserByID(tenantID string, userID uuid.UUID) (*User, err
 }
 
 // GetUserByIDAny returns a user by primary key with no tenant scoping.
-// Only for callers that genuinely have no tenant in hand - notably the
-// OAuth callback resolving a pending link's LinkingUserID, where the user
-// PK is exactly what resolves the tenant. Runs under WithAdminAudit on the
-// BYPASSRLS pool. Tenant-scoped callers must use GetUserByID.
+// For callers without a tenant (e.g. OAuth callback resolving LinkingUserID); runs under WithAdminAudit.
+// Tenant-scoped callers must use GetUserByID.
 // in: user_id. out: *User, error (ErrNotFound if missing).
 func (s *AuthService) GetUserByIDAny(userID uuid.UUID) (*User, error) {
 	const query = `
@@ -330,8 +346,7 @@ func (s *AuthService) UpdateUser(tenantID string, userID uuid.UUID, displayName 
 	})
 }
 
-// ToggleAdmin flips the tenant-scoped is_admin flag on a user. Super-admin
-// status is untouched - that's a separate global role.
+// ToggleAdmin flips is_admin for a tenant-scoped user (super-admin untouched).
 // in: tenant_id, user_id. out: new is_admin value, error.
 func (s *AuthService) ToggleAdmin(tenantID string, userID uuid.UUID) (bool, error) {
 	const query = `
@@ -345,16 +360,13 @@ func (s *AuthService) ToggleAdmin(tenantID string, userID uuid.UUID) (bool, erro
 	return v, err
 }
 
-// ErrSuperAdminProtected is returned by DeleteUser when the target is a
-// super-admin. Super rows are platform-critical, so the invariant is enforced
-// here (every caller) rather than only in the admin handler.
+// ErrSuperAdminProtected is returned by DeleteUser on a super-admin target.
+// Enforced here (not only in the handler) because super rows are platform-critical.
 var ErrSuperAdminProtected = errors.New("cannot delete a super-admin")
 
-// DeleteUser removes a user row and cascades through sessions, magic links,
-// alert subscriptions. Refuses a super-admin target with ErrSuperAdminProtected
-// (defence in depth - super rows are platform-critical), ErrNotFound if the
-// user does not exist. Read and delete share one tx so the check cannot race
-// a concurrent promote.
+// DeleteUser removes a user and cascades (sessions, magic links, subscriptions).
+// Returns ErrSuperAdminProtected for super-admin targets; read+delete share one tx to prevent
+// a concurrent promote from racing the check.
 // in: tenant_id, user_id. out: error.
 func (s *AuthService) DeleteUser(tenantID string, userID uuid.UUID) error {
 	ctx := context.Background()
@@ -393,8 +405,13 @@ func (s *AuthService) HasPassword(tenantID string, userID uuid.UUID) (bool, erro
 }
 
 // SetPassword bcrypt-hashes the plain password and stores it on the user row.
+// Rejects anything under MinPasswordLen with ErrPasswordTooShort so the floor
+// holds even for a caller that skips the form-level check.
 // in: tenant_id, user_id, plain password. out: error.
 func (s *AuthService) SetPassword(tenantID string, userID uuid.UUID, password string) error {
+	if len(password) < MinPasswordLen {
+		return ErrPasswordTooShort
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return err

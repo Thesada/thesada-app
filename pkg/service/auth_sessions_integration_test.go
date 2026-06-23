@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"thesada.app/app/pkg/service"
 	"thesada.app/app/pkg/service/servicetest"
 )
@@ -111,7 +113,16 @@ func TestAuthSessions(t *testing.T) {
 	})
 
 	t.Run("impersonation_set_and_clear", func(t *testing.T) {
-		token, _, err := auth.CreateSession(tA, user.ID, "password", "", "")
+		// Impersonation is super-admin-only, enforced at the service layer, so
+		// the happy path needs a super-admin session.
+		super, err := auth.CreateUser(tA, "super@a.test", "Super", true)
+		if err != nil {
+			t.Fatalf("seed super-admin: %v", err)
+		}
+		if err := auth.PromoteSuperAdmin(super.ID); err != nil {
+			t.Fatalf("PromoteSuperAdmin: %v", err)
+		}
+		token, _, err := auth.CreateSession(tA, super.ID, "password", "", "")
 		if err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
@@ -140,6 +151,37 @@ func TestAuthSessions(t *testing.T) {
 		}
 		if got.ImpersonatedTenantID != nil {
 			t.Errorf("impersonation after clear = %v, want nil", *got.ImpersonatedTenantID)
+		}
+	})
+
+	t.Run("impersonation_refused_for_non_superadmin", func(t *testing.T) {
+		// `user` is a plain (non-super) account; the service guard must refuse
+		// to set impersonation on its session even though the handler middleware
+		// would normally block the route first.
+		token, _, err := auth.CreateSession(tA, user.ID, "password", "", "")
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		sess, err := auth.ValidateSession(token)
+		if err != nil {
+			t.Fatalf("ValidateSession: %v", err)
+		}
+		if err := auth.SetImpersonation(sess.ID, tB); !errors.Is(err, service.ErrNotSuperAdmin) {
+			t.Errorf("SetImpersonation(non-super) = %v, want ErrNotSuperAdmin", err)
+		}
+		// Refused, not silently applied: the session still views its own tenant.
+		got, err := auth.ValidateSession(token)
+		if err != nil {
+			t.Fatalf("ValidateSession after refused set: %v", err)
+		}
+		if got.ImpersonatedTenantID != nil {
+			t.Errorf("impersonation set despite refusal = %v, want nil", *got.ImpersonatedTenantID)
+		}
+	})
+
+	t.Run("impersonation_unknown_session_not_found", func(t *testing.T) {
+		if err := auth.SetImpersonation(uuid.New(), tB); !errors.Is(err, service.ErrNotFound) {
+			t.Errorf("SetImpersonation(unknown session) = %v, want ErrNotFound", err)
 		}
 	})
 
