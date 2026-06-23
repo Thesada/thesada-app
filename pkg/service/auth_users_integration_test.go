@@ -136,6 +136,10 @@ func TestAuthUsers(t *testing.T) {
 		if err := auth.SetPassword(tA, u.ID, "exactlyten"); err != nil { // exactly MinPasswordLen (10)
 			t.Errorf("SetPassword(==floor) = %v, want nil", err)
 		}
+		// A no-op UPDATE must fail loudly, not report success.
+		if err := auth.SetPassword(tA, uuid.New(), "longenoughpw"); !errors.Is(err, service.ErrNotFound) {
+			t.Errorf("SetPassword(unknown user) = %v, want ErrNotFound", err)
+		}
 	})
 
 	t.Run("VerifyPasswordAnyTenant_oldest_tenant_wins", func(t *testing.T) {
@@ -262,6 +266,10 @@ func TestAuthUsers(t *testing.T) {
 		// FK cascade: the user's session is gone too.
 		if _, err := auth.ValidateSession(token); !errors.Is(err, service.ErrNotFound) {
 			t.Errorf("session after user delete = %v, want ErrNotFound (cascade)", err)
+		}
+		// Deleting a non-existent user fails loudly.
+		if err := auth.DeleteUser(tA, uuid.New()); !errors.Is(err, service.ErrNotFound) {
+			t.Errorf("DeleteUser(unknown) = %v, want ErrNotFound", err)
 		}
 	})
 

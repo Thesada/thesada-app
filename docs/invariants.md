@@ -272,10 +272,11 @@ Source: `pkg/service/auth.go::ValidateSession`,
 
 ### Super-admin rows cannot be deleted through the admin UI
 
-`AuthService.DeleteUser` reads `is_super_admin` and refuses a super-admin
-target with `ErrSuperAdminProtected` before issuing the `DELETE`, in the
-same tx so a concurrent promote cannot race the check. The guard lives at
-the service layer so every caller is covered, not just the admin handler
+`AuthService.DeleteUser` issues a single predicated `DELETE ... WHERE NOT
+is_super_admin`, so a super-admin target is refused atomically with no
+separate check a concurrent promote could race; zero rows affected
+disambiguates `ErrNotFound` from `ErrSuperAdminProtected`. The guard lives
+at the service layer so every caller is covered, not just the admin handler
 (which separately blocks deleting your own account). Super rows are
 platform-critical.
 

@@ -365,27 +365,29 @@ func (s *AuthService) ToggleAdmin(tenantID string, userID uuid.UUID) (bool, erro
 var ErrSuperAdminProtected = errors.New("cannot delete a super-admin")
 
 // DeleteUser removes a user and cascades (sessions, magic links, subscriptions).
-// Returns ErrSuperAdminProtected for super-admin targets; read+delete share one tx to prevent
-// a concurrent promote from racing the check.
+// A single predicated DELETE refuses super-admin rows atomically, so a concurrent
+// promote cannot race the check. Zero rows affected means no such user
+// (ErrNotFound) or a protected super-admin (ErrSuperAdminProtected).
 // in: tenant_id, user_id. out: error.
 func (s *AuthService) DeleteUser(tenantID string, userID uuid.UUID) error {
 	ctx := context.Background()
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1 AND NOT is_super_admin`, userID)
+		if err != nil {
+			return fmt.Errorf("auth: delete user %s: %w", userID, err)
+		}
+		if tag.RowsAffected() == 1 {
+			return nil
+		}
 		var isSuper bool
-		err := tx.QueryRow(ctx, `SELECT is_super_admin FROM users WHERE id = $1`, userID).Scan(&isSuper)
+		err = tx.QueryRow(ctx, `SELECT is_super_admin FROM users WHERE id = $1`, userID).Scan(&isSuper)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
 		if err != nil {
-			return fmt.Errorf("auth: load user %s for delete: %w", userID, err)
+			return fmt.Errorf("auth: probe user %s for delete: %w", userID, err)
 		}
-		if isSuper {
-			return ErrSuperAdminProtected
-		}
-		if _, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID); err != nil {
-			return fmt.Errorf("auth: delete user %s: %w", userID, err)
-		}
-		return nil
+		return ErrSuperAdminProtected
 	})
 }
 
@@ -418,9 +420,15 @@ func (s *AuthService) SetPassword(tenantID string, userID uuid.UUID, password st
 	}
 	ctx := context.Background()
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+		tag, err := tx.Exec(ctx,
 			`UPDATE users SET password_hash = $1 WHERE id = $2`, string(hash), userID)
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
 	})
 }
 
