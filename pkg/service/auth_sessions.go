@@ -1,20 +1,15 @@
 // AuthService - user_sessions: create, validate, rotate, impersonate.
 // See auth.go for the service struct and shared types.
 //
-// RLS: user_sessions has a transitive policy via user_id ->
-// users.tenant_id. CreateSession runs at login time with the user's tenant
-// in hand, so it uses db.WithTenant. The validate/rotate/revoke/impersonate
-// paths resolve a session by token or session-id BEFORE any tenant context
-// exists - they are auth infrastructure, not tenant-scoped data access - so
-// they run under db.WithAdminAudit on the BYPASSRLS pool. Each leaves an
-// audit-log line; on the ValidateSession path that is one line per
-// authenticated request, by design.
+// validate/rotate/revoke paths run under WithAdminAudit (BYPASSRLS pool):
+// the token IS what resolves the user, so no tenant context exists yet.
 package service
 
 import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,28 +24,17 @@ const sessionCookieLifetimePassword = 30 * 24 * time.Hour
 // sessionCookieLifetimeMagicLink is how long a magic-link-authed session lives (shorter).
 const sessionCookieLifetimeMagicLink = 24 * time.Hour
 
-// sessionRotationInterval bounds how long any single session token value
-// stays valid before ValidateSession rotates it. A stolen cookie therefore
-// has at most this much grace plus sessionRotationGrace before the next
-// real validation by the legitimate browser invalidates it. Picked at 4h
-// so password-life sessions (30d) rotate ~180 times and magic-link sessions
-// (24h) still rotate several times across normal use.
+// sessionRotationInterval is the stolen-cookie bound: a thief has at most
+// this long before the next legitimate validation invalidates the old token.
 const sessionRotationInterval = 4 * time.Hour
 
-// sessionRotationGrace is how long the previous token hash continues to
-// validate after a rotation. Wide enough for concurrent in-flight requests
-// (page load with parallel XHRs) to not 401 when one of them is the one
-// that triggered the rotation. 60s is comfortable for HTML + asset fetches
-// + XHR fan-out; long enough that a clock-skewed mobile client won't lose
-// its session mid-page-load.
+// sessionRotationGrace keeps the previous token hash valid after rotation
+// so concurrent in-flight requests (parallel XHRs) don't 401.
 const sessionRotationGrace = 60 * time.Second
 
-// CreateSession generates a session token, stores its sha256 hash, and returns
-// the raw token the caller must set as a cookie value. Tenant-scoped through
-// WithTenant: the user_sessions INSERT is validated by the transitive RLS
-// policy (user_id -> users.tenant_id), so the GUC must hold the user's tenant.
-// in: tenant_id, user_id, auth method ("password" or "magic_link"), user agent, ip.
-// out: raw session token, cookie expiry, error.
+// CreateSession stores a session token's sha256 hash and returns the raw token for the cookie.
+// Uses WithTenant: RLS policy is transitive (user_id -> users.tenant_id), so GUC must hold the tenant.
+// in: tenant_id, user_id, auth method, user agent, ip. out: raw token, cookie expiry, error.
 func (s *AuthService) CreateSession(tenantID string, userID uuid.UUID, authMethod, userAgent, ip string) (string, time.Time, error) {
 	token, err := randomToken(32)
 	if err != nil {
@@ -80,13 +64,8 @@ func (s *AuthService) CreateSession(tenantID string, userID uuid.UUID, authMetho
 	return token, expires, nil
 }
 
-// Session is the resolved shape of a user_sessions row used by the auth
-// middleware. It carries the owning user plus the optional impersonated
-// tenant id that a super-admin may have set via /admin/impersonate.
-//
-// When ValidateSession rotates the underlying token, NewToken + NewExpires
-// are populated and the middleware writes a fresh cookie on the response.
-// Both are zero values when no rotation happened on this request.
+// Session is the resolved shape of a user_sessions row used by the auth middleware.
+// NewToken + NewExpires are populated on rotation; zero values mean no rotation this request.
 type Session struct {
 	ID                   uuid.UUID
 	User                 *User
@@ -96,27 +75,10 @@ type Session struct {
 	NewExpires time.Time
 }
 
-// ValidateSession resolves a raw session token to a Session, refreshing
-// last_seen_at as a side effect, and rotates the underlying token if it
-// has been in use longer than sessionRotationInterval. Callers use
-// session.User + optional session.ImpersonatedTenantID via
-// authmw.EffectiveTenantID to scope queries.
-//
-// Runs under WithAdminAudit on the BYPASSRLS pool: a session token is
-// presented before any tenant context exists, so RLS scoping cannot apply
-// yet - the token IS what resolves the user and tenant. The whole body
-// (lookup + optional rotation + last_seen_at touch) runs in one tx so the
-// path emits exactly one audit-log line per request.
-//
-// Rotation: when the validated token matches the row's current token_hash
-// AND rotated_at is older than the interval, a fresh 32-byte token is
-// minted and atomically swapped in. The previous hash stays valid for
-// sessionRotationGrace so concurrent in-flight requests on the old cookie
-// do not 401. The CAS-style WHERE on the rotation UPDATE means only one
-// concurrent rotation wins; the loser silently falls back to the old
-// token and continues without setting a new cookie.
-//
-// in: raw session token string. out: *Session on success, ErrNotFound or ErrExpired.
+// ValidateSession resolves a raw token to a Session, updating last_seen_at, rotating when due.
+// Runs under WithAdminAudit (BYPASSRLS): the token resolves user+tenant, no prior tenant context exists.
+// Rotation is CAS (WHERE token_hash = current): only one concurrent winner; the loser skips rotation.
+// in: raw session token. out: *Session, ErrNotFound, or ErrExpired.
 func (s *AuthService) ValidateSession(token string) (*Session, error) {
 	hash := sha256.Sum256([]byte(token))
 	const query = `
@@ -178,14 +140,9 @@ func (s *AuthService) ValidateSession(token string) (*Session, error) {
 	return sess, nil
 }
 
-// rotateSession swaps token_hash to a freshly minted value, parking the
-// previous hash in previous_token_hash for sessionRotationGrace. The WHERE
-// on token_hash is the single-winner gate: if a concurrent request already
-// rotated, this UPDATE matches zero rows and ok=false comes back, letting
-// the caller fall through to the no-rotation path. Runs inside the caller's
-// ValidateSession transaction.
-// in: ctx, tx, session id, the current token hash just validated.
-// out: new raw token (32 bytes hex), true if the rotation landed, error from db.
+// rotateSession atomically swaps token_hash; the old hash moves to previous_token_hash for grace-window
+// coverage of in-flight requests. WHERE token_hash = current is the single-winner gate (ok=false if lost).
+// in: ctx, tx, session id, current hash. out: new raw token, landed bool, error.
 func (s *AuthService) rotateSession(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, currentHash []byte) (string, bool, error) {
 	newToken, err := randomToken(32)
 	if err != nil {
@@ -210,20 +167,35 @@ func (s *AuthService) rotateSession(ctx context.Context, tx pgx.Tx, sessionID uu
 	return newToken, true, nil
 }
 
-// SetImpersonation marks the given session as viewing a different tenant.
-// The caller layer (handler) is responsible for verifying that the session's
-// user is a super-admin before invoking this; the service layer only enforces
-// that the target tenant exists (via FK constraint). Runs under
-// WithAdminAudit: keyed on a session id, and the target tenant is by
-// definition not the session owner's own tenant.
-// in: session id, target tenant slug. out: error.
+// SetImpersonation points a session at another tenant for viewing. Crosses
+// tenant boundaries, so super-admin is enforced here, not just in the handler:
+// a single guarded UPDATE gates the write on is_super_admin so the check cannot
+// race a demote. Zero rows affected means either no such session (ErrNotFound)
+// or a non-super one (ErrNotSuperAdmin), disambiguated by an existence probe.
+// in: session id, target tenant slug. out: ErrNotSuperAdmin / ErrNotFound / nil.
 func (s *AuthService) SetImpersonation(sessionID uuid.UUID, tenantID string) error {
 	ctx := context.Background()
 	return db.WithAdminAudit(ctx, s.pools.Admin, "auth.set_impersonation", func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
-			`UPDATE user_sessions SET impersonated_tenant_id = $1 WHERE id = $2`,
+		tag, err := tx.Exec(ctx,
+			`UPDATE user_sessions s SET impersonated_tenant_id = $1
+			   FROM users u
+			  WHERE s.id = $2 AND u.id = s.user_id AND u.is_super_admin = true`,
 			tenantID, sessionID)
-		return err
+		if err != nil {
+			return fmt.Errorf("auth: set impersonation for session %s: %w", sessionID, err)
+		}
+		if tag.RowsAffected() == 1 {
+			return nil
+		}
+		var exists bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM user_sessions WHERE id = $1)`, sessionID).Scan(&exists); err != nil {
+			return fmt.Errorf("auth: probe session %s: %w", sessionID, err)
+		}
+		if !exists {
+			return ErrNotFound
+		}
+		return ErrNotSuperAdmin
 	})
 }
 

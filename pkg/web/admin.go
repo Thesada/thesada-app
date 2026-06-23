@@ -1,6 +1,4 @@
-// Super-admin handlers for the /admin route tree. All handlers here assume
-// they are wrapped in authmw.RequireSuperAdmin - they do not re-check the
-// super-admin flag on every call.
+// Super-admin handlers for /admin. All handlers assume RequireSuperAdmin middleware wraps the route.
 package web
 
 import (
@@ -26,9 +24,7 @@ type adminTenantRow struct {
 	CrossTenantRead bool // mqtt_cross_tenant_read on this tenant - paired devices subscribe across all tenants
 }
 
-// handleAdminIndex renders the super-admin dashboard: tenant count, user
-// count, device count, pending-waitlist count, and a link list into the
-// subpages.
+// handleAdminIndex renders the super-admin dashboard with tenant/user/device/waitlist counts.
 // in: writer, request. out: HTML page.
 func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 	tenants, err := s.services.Tenants.List()
@@ -57,8 +53,7 @@ func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleAdminTenants renders the tenant list with per-tenant user + device
-// counts and inline create/delete/impersonate actions.
+// handleAdminTenants renders the tenant list with per-tenant user/device counts and inline actions.
 // in: writer, request. out: HTML page.
 func (s *Server) handleAdminTenants(w http.ResponseWriter, r *http.Request) {
 	tenants, err := s.services.Tenants.List()
@@ -86,11 +81,8 @@ func (s *Server) handleAdminTenants(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleAdminTenantCreate processes the create-tenant form. App-side slug
-// validation mirrors the db CHECK so the friendly error lands on the form
-// page rather than a 500 from the db.
-// in: writer, POST form (slug, display_name). out: 302 to /admin/tenants or
-// /admin/tenants with inline error.
+// handleAdminTenantCreate processes the create-tenant form; app-side slug validation mirrors the db CHECK for a friendly error.
+// in: writer, POST form (slug, display_name). out: 302 to /admin/tenants or inline error.
 func (s *Server) handleAdminTenantCreate(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
@@ -114,9 +106,7 @@ func (s *Server) handleAdminTenantCreate(w http.ResponseWriter, r *http.Request)
 	http.Redirect(w, r, "/admin/tenants", http.StatusFound)
 }
 
-// handleAdminTenantDelete processes a tenant delete action. Guards against
-// removing the default tenant and against a super-admin deleting the tenant
-// they are currently impersonating (which would strand their view).
+// handleAdminTenantDelete deletes a tenant; guards default tenant and the super-admin's active impersonation target.
 // in: writer, POST to /admin/tenants/{slug}/delete. out: 302 to /admin/tenants.
 func (s *Server) handleAdminTenantDelete(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
@@ -133,10 +123,7 @@ func (s *Server) handleAdminTenantDelete(w http.ResponseWriter, r *http.Request)
 	http.Redirect(w, r, "/admin/tenants", http.StatusFound)
 }
 
-// handleAdminImpersonate sets the impersonated tenant on the caller's
-// session so subsequent page loads scope every query through the target
-// tenant. Anyone who reaches this handler is already a super-admin by
-// middleware contract.
+// handleAdminImpersonate scopes the session to the target tenant; caller is super-admin by middleware contract.
 // in: writer, POST to /admin/impersonate/{slug}. out: 302 to /devices.
 func (s *Server) handleAdminImpersonate(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
@@ -150,6 +137,17 @@ func (s *Server) handleAdminImpersonate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.services.Auth.SetImpersonation(sess.ID, slug); err != nil {
+		// RequireSuperAdmin should make these unreachable; the service guard is
+		// the backstop if a future route forgets the wrapper.
+		if errors.Is(err, service.ErrNotSuperAdmin) {
+			slog.Warn("auth.impersonation.denied", "session", sess.ID, "slug", slug)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if errors.Is(err, service.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
 		slog.Error("set impersonation failed", "session", sess.ID, "slug", slug, "err", err)
 		http.Error(w, "impersonate failed", http.StatusInternalServerError)
 		return
@@ -174,10 +172,7 @@ func (s *Server) handleAdminImpersonateClear(w http.ResponseWriter, r *http.Requ
 	http.Redirect(w, r, "/admin", http.StatusFound)
 }
 
-// renderAdminTenantsWithError re-runs the list query and renders the tenant
-// list page with an inline error banner. Used by the create and delete
-// handlers when a soft validation error should keep the user on the same
-// page instead of 500ing.
+// renderAdminTenantsWithError re-renders the tenant list with an inline error banner instead of a 500.
 // in: writer, request, error message. out: HTML page.
 func (s *Server) renderAdminTenantsWithError(w http.ResponseWriter, r *http.Request, msg string) {
 	tenants, err := s.services.Tenants.List()
@@ -218,9 +213,7 @@ type adminWaitlistRow struct {
 	Tenants []service.Tenant
 }
 
-// handleAdminWaitlist lists pending waitlist rows grouped by tenant and
-// renders each with a target-tenant picker, optional "tenant admin"
-// checkbox, and a convert button.
+// handleAdminWaitlist renders pending waitlist entries with a target-tenant picker and convert button.
 // in: writer, request. out: HTML page.
 func (s *Server) handleAdminWaitlist(w http.ResponseWriter, r *http.Request) {
 	pending, err := s.services.Auth.ListPendingWaitlist()
@@ -271,9 +264,7 @@ func (s *Server) handleAdminWaitlistConvert(w http.ResponseWriter, r *http.Reque
 		http.Redirect(w, r, "/admin/waitlist?error=convert+failed", http.StatusFound)
 		return
 	}
-	// Fire a password-reset link email so the new user can set their
-	// initial password. Best-effort: log and keep going if SMTP fails -
-	// the admin can re-send from /admin later.
+	// Best-effort reset email; admin can re-send from /admin if SMTP fails.
 	token, _, err := s.services.Auth.CreateResetLink(u.ID)
 	if err != nil {
 		slog.Warn("admin waitlist reset link create failed", "user_id", u.ID, "err", err)
@@ -311,9 +302,7 @@ func (s *Server) handleAdminWaitlistDelete(w http.ResponseWriter, r *http.Reques
 	http.Redirect(w, r, "/admin/waitlist?ok=deleted", http.StatusFound)
 }
 
-// countTenantUsersDevices returns the user count and device count for a
-// single tenant. Best-effort; errors are logged and counted as zero so the
-// admin dashboard still renders when one sub-query fails.
+// countTenantUsersDevices returns user/device counts for a tenant; best-effort, errors logged as zero so the dashboard still renders.
 // in: tenant slug. out: user_count, device_count.
 func (s *Server) countTenantUsersDevices(tenantID string) (int, int) {
 	users, devices, err := s.services.Tenants.CountMembers(tenantID)

@@ -5,6 +5,7 @@
 package httpsec
 
 import (
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -45,4 +46,56 @@ func OriginAllowed(r *http.Request, baseURL string) bool {
 		return false
 	}
 	return strings.EqualFold(o.Scheme, b.Scheme) && strings.EqualFold(o.Host, b.Host)
+}
+
+// ClientIP resolves the originating client address for logging and per-IP rate
+// limiting. When the immediate peer is one of the trusted proxy networks it
+// walks X-Forwarded-For right-to-left and returns the first non-trusted hop -
+// the real client, ignoring any client-spoofed prefix. With no trusted proxies,
+// or a direct/untrusted peer, it returns the peer address.
+// in: request, trusted proxy networks. out: client IP ("" if unparseable).
+func ClientIP(r *http.Request, trusted []*net.IPNet) string {
+	peer := hostOnly(r.RemoteAddr)
+	if len(trusted) == 0 || !ipInAny(net.ParseIP(peer), trusted) {
+		return peer
+	}
+	// Return only a parsed, re-serialised IP - never a raw header token - so an
+	// X-Forwarded-For value can't carry junk into a rate-limit key, log, or email.
+	for _, part := range reverseSplit(r.Header.Get("X-Forwarded-For")) {
+		if ip := net.ParseIP(strings.TrimSpace(part)); ip != nil && !ipInAny(ip, trusted) {
+			return ip.String()
+		}
+	}
+	return peer
+}
+
+// hostOnly strips the port from a host:port address, handling IPv6 brackets.
+// in: addr. out: host portion (addr unchanged if it carries no port).
+func hostOnly(addr string) string {
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		return h
+	}
+	return addr
+}
+
+// ipInAny reports whether ip is non-nil and falls inside any of nets.
+func ipInAny(ip net.IP, nets []*net.IPNet) bool {
+	if ip == nil {
+		return false
+	}
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// reverseSplit splits a comma list and returns the parts right-to-left.
+func reverseSplit(s string) []string {
+	parts := strings.Split(s, ",")
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return parts
 }

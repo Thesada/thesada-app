@@ -10,13 +10,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/config"
+	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/pki"
 	"thesada.app/app/pkg/service"
 )
@@ -170,13 +170,9 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-// clientIP returns the request's remote address with the port stripped.
-// Mirrors pkg/web.clientIP (that one is unexported in its package).
+// clientIP resolves the request's client IP, honouring X-Forwarded-For from a
+// configured trusted proxy.
 // in: request. out: ip string or "".
-func clientIP(r *http.Request) string {
-	addr := r.RemoteAddr
-	if i := strings.LastIndex(addr, ":"); i >= 0 {
-		return addr[:i]
-	}
-	return addr
+func (s *Server) clientIP(r *http.Request) string {
+	return httpsec.ClientIP(r, s.cfg.TrustedProxies)
 }

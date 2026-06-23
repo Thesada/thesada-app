@@ -4,9 +4,12 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,11 +19,8 @@ type Config struct {
 	HTTPAddr    string
 	DatabaseURL string
 
-	// Phase 0 of the RLS rollout. Each role maps to its own pool:
-	//   DatabaseURLAdmin - thesada_app_admin role (BYPASSRLS)
-	//   DatabaseURLMQTT  - thesada_app_mqtt role (NOBYPASSRLS, ingest only)
-	// Defaults to DatabaseURL for back-compat so a single-role deployment
-	// still works through phase 0 without infra changes.
+	// DatabaseURLAdmin (BYPASSRLS) and DatabaseURLMQTT (NOBYPASSRLS, ingest only)
+	// default to DatabaseURL so a single-role deployment still works.
 	DatabaseURLAdmin string
 	DatabaseURLMQTT  string
 
@@ -42,21 +42,19 @@ type Config struct {
 	CookieSecret string // signs session cookies, must be >= 32 bytes
 	AdminEmail   string // if set, bootstraps this user as admin on startup
 
+	// TrustedProxies are peer networks whose X-Forwarded-For is honoured for
+	// client-IP resolution (logging, per-IP rate limit). Empty = use RemoteAddr.
+	TrustedProxies []*net.IPNet
+
 	ConfigSnapshotRetention int    // max snapshots per device+path, default 100
 	CADir                   string // directory for CA keypair, default /etc/thesada-app/ca
 
-	// CAKeyPassphrase encrypts the on-disk CA private key. When empty,
-	// the key file is plaintext PEM and Bootstrap emits a startup warning.
-	// When non-empty, the key file is a THESADA-CAKEY-V1 encrypted
-	// envelope (AES-256-GCM under scrypt-derived KEK). The passphrase
-	// itself is consumed at boot and never persisted by the app; source
-	// it from systemd Credential / k8s Secret / sealed env at deploy.
+	// CAKeyPassphrase encrypts the on-disk CA key (AES-256-GCM/scrypt envelope).
+	// Empty = plaintext PEM + startup warning. Source from systemd Credential or sealed env.
 	CAKeyPassphrase string
 
-	// CLIRequestTimeout bounds the goroutine that waits for a device's
-	// MQTT CLI response. Generous enough to cover a SIM7080 cellular
-	// fallback mid-backoff (10s -> 20s -> 40s) plus broker RTT. Frontend
-	// polls until this budget plus a small grace expires. Default 120s.
+	// CLIRequestTimeout bounds the MQTT CLI response goroutine; generous to cover
+	// SIM7080 cellular backoff (up to 40 s) plus broker RTT. Default 120s.
 	CLIRequestTimeout time.Duration
 }
 
@@ -64,33 +62,73 @@ type Config struct {
 // in: none (reads os.Environ). out: *Config or error if a required var is missing.
 func Load() (*Config, error) {
 	c := &Config{
-		HTTPAddr:         envOr("THESADA_HTTP_ADDR", ":8080"),
-		DatabaseURL:      os.Getenv("THESADA_DATABASE_URL"),
-		DatabaseURLAdmin: envOr("THESADA_DATABASE_URL_ADMIN", os.Getenv("THESADA_DATABASE_URL")),
-		DatabaseURLMQTT:  envOr("THESADA_DATABASE_URL_MQTT", os.Getenv("THESADA_DATABASE_URL")),
-		MQTTBrokerURL:    os.Getenv("THESADA_MQTT_URL"),
-		MQTTUsername:     os.Getenv("THESADA_MQTT_USER"),
-		MQTTPassword:     os.Getenv("THESADA_MQTT_PASS"),
-		MQTTClientID:     envOr("THESADA_MQTT_CLIENT_ID", "thesada-app"),
-		MQTTTopicRoot:    envOr("THESADA_MQTT_TOPIC_ROOT", "thesada"),
-		SMTPHost:         os.Getenv("THESADA_SMTP_HOST"),
-		SMTPPort:         envOr("THESADA_SMTP_PORT", "587"),
-		SMTPUsername:     os.Getenv("THESADA_SMTP_USER"),
-		SMTPPassword:     os.Getenv("THESADA_SMTP_PASS"),
-		SMTPFrom:         os.Getenv("THESADA_SMTP_FROM"),
-		TelegramBotToken: os.Getenv("THESADA_TELEGRAM_BOT_TOKEN"),
-		BaseURL:          envOr("THESADA_BASE_URL", "http://localhost:8080"),
-		CookieSecret:     os.Getenv("THESADA_COOKIE_SECRET"),
-		AdminEmail:               os.Getenv("THESADA_ADMIN_EMAIL"),
+		HTTPAddr:                envOr("THESADA_HTTP_ADDR", ":8080"),
+		DatabaseURL:             os.Getenv("THESADA_DATABASE_URL"),
+		DatabaseURLAdmin:        envOr("THESADA_DATABASE_URL_ADMIN", os.Getenv("THESADA_DATABASE_URL")),
+		DatabaseURLMQTT:         envOr("THESADA_DATABASE_URL_MQTT", os.Getenv("THESADA_DATABASE_URL")),
+		MQTTBrokerURL:           os.Getenv("THESADA_MQTT_URL"),
+		MQTTUsername:            os.Getenv("THESADA_MQTT_USER"),
+		MQTTPassword:            os.Getenv("THESADA_MQTT_PASS"),
+		MQTTClientID:            envOr("THESADA_MQTT_CLIENT_ID", "thesada-app"),
+		MQTTTopicRoot:           envOr("THESADA_MQTT_TOPIC_ROOT", "thesada"),
+		SMTPHost:                os.Getenv("THESADA_SMTP_HOST"),
+		SMTPPort:                envOr("THESADA_SMTP_PORT", "587"),
+		SMTPUsername:            os.Getenv("THESADA_SMTP_USER"),
+		SMTPPassword:            os.Getenv("THESADA_SMTP_PASS"),
+		SMTPFrom:                os.Getenv("THESADA_SMTP_FROM"),
+		TelegramBotToken:        os.Getenv("THESADA_TELEGRAM_BOT_TOKEN"),
+		BaseURL:                 envOr("THESADA_BASE_URL", "http://localhost:8080"),
+		CookieSecret:            os.Getenv("THESADA_COOKIE_SECRET"),
+		AdminEmail:              os.Getenv("THESADA_ADMIN_EMAIL"),
 		ConfigSnapshotRetention: envOrInt("THESADA_CONFIG_SNAPSHOT_RETENTION", 100),
 		CADir:                   envOr("THESADA_CA_DIR", "/opt/thesada-app/ca"),
 		CAKeyPassphrase:         os.Getenv("THESADA_CA_KEY_PASSPHRASE"),
 		CLIRequestTimeout:       envOrDuration("THESADA_CLI_REQUEST_TIMEOUT", 120*time.Second),
 	}
+	tp, err := parseTrustedProxies(os.Getenv("THESADA_TRUSTED_PROXIES"))
+	if err != nil {
+		return nil, err
+	}
+	c.TrustedProxies = tp
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// parseTrustedProxies parses a comma-separated list of IPs and CIDRs into
+// networks; a bare IP becomes a single-host net. Loud failure on a bad entry.
+// in: env value. out: networks (nil when empty), error.
+func parseTrustedProxies(s string) ([]*net.IPNet, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	var nets []*net.IPNet
+	for i, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("THESADA_TRUSTED_PROXIES: empty entry at position %d", i+1)
+		}
+		if strings.Contains(part, "/") {
+			_, n, err := net.ParseCIDR(part)
+			if err != nil {
+				return nil, fmt.Errorf("THESADA_TRUSTED_PROXIES: invalid CIDR %q: %w", part, err)
+			}
+			nets = append(nets, n)
+			continue
+		}
+		ip := net.ParseIP(part)
+		if ip == nil {
+			return nil, fmt.Errorf("THESADA_TRUSTED_PROXIES: invalid IP %q", part)
+		}
+		bits := 32
+		if ip.To4() == nil {
+			bits = 128
+		}
+		nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+	}
+	return nets, nil
 }
 
 // validate checks that all required fields are populated.
@@ -103,16 +141,18 @@ func (c *Config) validate() error {
 		return errors.New("THESADA_COOKIE_SECRET is required")
 	}
 	if l := len(c.CookieSecret); l < minCookieSecretLen {
-		// Warn, don't fail: tightening this to a hard error could brick an
-		// existing deployment on restart. Revisit once deploys are confirmed
-		// compliant. See README / struct doc - 32 bytes is the documented floor.
-		slog.Warn("config.weak_cookie_secret", "len", l, "want_min", minCookieSecretLen)
+		// Safe by default: abort unless an operator explicitly opts a known-weak
+		// secret back in (e.g. to boot an old deployment while rotating).
+		if !envBool("THESADA_ALLOW_WEAK_SECRET") {
+			return fmt.Errorf("THESADA_COOKIE_SECRET is %d bytes, want >= %d; rotate it or set THESADA_ALLOW_WEAK_SECRET=1 to override", l, minCookieSecretLen)
+		}
+		slog.Warn("config.weak_cookie_secret", "len", l, "want_min", minCookieSecretLen, "override", "THESADA_ALLOW_WEAK_SECRET")
 	}
 	return nil
 }
 
-// minCookieSecretLen is the documented minimum byte length for the session
-// signing secret. Shorter values warn at boot but do not block startup.
+// minCookieSecretLen is the minimum byte length for the session signing secret;
+// shorter aborts startup unless THESADA_ALLOW_WEAK_SECRET is set.
 const minCookieSecretLen = 32
 
 // envOr returns the env var if set and non-empty, otherwise the fallback.
@@ -122,6 +162,15 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envBool reports whether the env var is set truthy (1/true/yes/on, case-insensitive).
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // envOrInt returns the env var parsed as int, or the fallback on missing/bad value.

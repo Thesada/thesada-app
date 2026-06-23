@@ -62,6 +62,7 @@ func TestSafeReturn(t *testing.T) {
 		{"/devices/abc?tab=x", "/devices/abc?tab=x"},
 		{"", fallback},
 		{"//evil.example.com", fallback},
+		{"/\\evil.example.com", fallback},
 		{"http://evil.example.com", fallback},
 		{"relative-no-slash", fallback},
 	}

@@ -128,6 +128,10 @@ func TestAuthService(t *testing.T) {
 
 	t.Run("Session_impersonation_set_clear", func(t *testing.T) {
 		u := mustCreateUser(t, auth, tA, "sess-imp@a.test")
+		// Impersonation is super-admin-only at the service layer.
+		if err := auth.PromoteSuperAdmin(u.ID); err != nil {
+			t.Fatalf("PromoteSuperAdmin: %v", err)
+		}
 		token, _, _ := auth.CreateSession(tA, u.ID, "password", "go-test", "")
 		sess, _ := auth.ValidateSession(token)
 
@@ -269,12 +273,12 @@ func TestAuthService(t *testing.T) {
 
 	t.Run("Password_verify_is_tenant_scoped", func(t *testing.T) {
 		u := mustCreateUser(t, auth, tA, "pw-iso@a.test")
-		if err := auth.SetPassword(tA, u.ID, "secret-pw"); err != nil {
+		if err := auth.SetPassword(tA, u.ID, "secret-password"); err != nil {
 			t.Fatalf("SetPassword: %v", err)
 		}
 		// Correct password but wrong tenant -> the user isn't visible, so it
 		// must fail closed (RLS + WHERE tenant scope), never authenticate.
-		if _, err := auth.VerifyPassword(tB, "pw-iso@a.test", "secret-pw"); !errors.Is(err, service.ErrBadCredentials) {
+		if _, err := auth.VerifyPassword(tB, "pw-iso@a.test", "secret-password"); !errors.Is(err, service.ErrBadCredentials) {
 			t.Errorf("cross-tenant verify = %v, want ErrBadCredentials", err)
 		}
 	})

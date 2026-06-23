@@ -8,6 +8,7 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -35,6 +36,9 @@ const magicLinkMaxPerHour = 5
 
 // magicLinkWindow is the rolling window for the rate limiter above.
 const magicLinkWindow = time.Hour
+
+// passwordFloorMsg is the form-level too-short message, kept in sync with service.MinPasswordLen.
+var passwordFloorMsg = fmt.Sprintf("Password must be at least %d characters.", service.MinPasswordLen)
 
 //go:embed templates
 var templatesFS embed.FS
@@ -79,14 +83,10 @@ func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mq
 	}
 	s.parseTemplates()
 	s.routes()
-	s.handler = csrf.Middleware()(authmw.Middleware(services.Auth)(s.mux))
+	s.handler = csrf.Middleware([]byte(cfg.CookieSecret))(authmw.Middleware(services.Auth)(s.mux))
 
-	// Periodic sweep so the rate-limiter maps do not accreted empty entries
-	// over the lifetime of the systemd unit. Each fresh IP / email leaves a
-	// residual key after Allow() trims its window; without a sweep the maps
-	// grow unbounded (slow KB/year leak). Tied to context.Background since
-	// the sweepers should live exactly as long as the process - they exit
-	// when main returns..
+	// Sweep residual keys left by expired windows; without this the maps grow
+	// unbounded. context.Background: sweepers live for the process lifetime.
 	s.emailLimits.StartSweeper(context.Background())
 	s.ipLimits.StartSweeper(context.Background())
 	s.waitlistNotify.StartSweeper(context.Background())
@@ -223,9 +223,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /admin/debug", authmw.RequireSuperAdmin(s.handleAdminDebug))
 }
 
-// render executes a parsed page template by name and writes the result.
-// It also injects the current user (if any) into the template data so layouts
-// can render a logout link when authenticated.
+// render executes a parsed page template, injecting auth context into data.
 // in: writer, request, page filename, template data. out: HTML response.
 func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, data map[string]interface{}) {
 	t, ok := s.templates[page]

@@ -132,7 +132,7 @@ func (p *Provider) Start(ctx context.Context, db *pgxpool.Pool, opts StartOpts) 
 	challenge := pkceChallenge(verifier)
 
 	returnTo := opts.ReturnTo
-	if returnTo == "" || !strings.HasPrefix(returnTo, "/") {
+	if !IsSafeReturnTo(returnTo) {
 		returnTo = "/"
 	}
 
@@ -266,7 +266,9 @@ func pkceChallenge(verifier string) string {
 // before trusting the stored ReturnTo after callback.
 // in: path. out: bool.
 func IsSafeReturnTo(path string) bool {
-	if path == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+	// Reject "//host" and "/\host": browsers may read the second char as the
+	// authority separator and leave the origin.
+	if path == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.HasPrefix(path, "/\\") {
 		return false
 	}
 	if _, err := url.Parse(path); err != nil {

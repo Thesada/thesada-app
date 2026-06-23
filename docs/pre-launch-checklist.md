@@ -84,6 +84,9 @@ Walk through the new surface manually. Minimum actions for an HTTP endpoint:
 - Send a request with a super-admin-only resource as a regular authed user - expect 403
 - Replay a consumed token (magic-link, reset, OAuth state) - expect `ErrNotFound`
 - Send a CSRF-bypass attempt (missing header / cookie) on any mutating endpoint - expect 403
+- Plant an unsigned `thesada_csrf` cookie and submit it as the form token - expect 403 (signed double-submit rejects it)
+- Hammer `/login` (and `/api/v1/auth/login`) past the per-email cap - expect 429, not an endless 401 stream
+- Boot with a sub-32-byte `THESADA_COOKIE_SECRET` and no override - expect startup to abort; confirm `THESADA_ALLOW_WEAK_SECRET=1` lets it boot with a warning
 - Fuzz payload size and field types
 
 For MQTT:
