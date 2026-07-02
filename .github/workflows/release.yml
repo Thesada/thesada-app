@@ -1,5 +1,5 @@
-# Release on a vX.Y.Z tag: push the container image to ghcr and attach the
-# linux/amd64 binary to the GitHub Release. Both deploy paths come from here.
+# Release on a vX.Y.Z tag: push the multi-arch (amd64+arm64) image to ghcr and
+# attach both binaries to the GitHub Release. Both deploy paths come from here.
 name: release
 
 on:
@@ -38,6 +38,7 @@ jobs:
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
@@ -46,6 +47,9 @@ jobs:
 
   binary:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v5
 
@@ -54,14 +58,14 @@ jobs:
           go-version: "1.25.11"
 
       # make build chains make css, so the embedded assets are populated.
-      - run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make build
+      - run: CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} make build
         env:
           VERSION: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
 
-      - run: mv bin/thesada-app bin/thesada-app-linux-amd64
+      - run: mv bin/thesada-app bin/thesada-app-linux-${{ matrix.arch }}
 
       - uses: softprops/action-gh-release@v3
         with:
-          files: bin/thesada-app-linux-amd64
+          files: bin/thesada-app-linux-${{ matrix.arch }}
           generate_release_notes: true

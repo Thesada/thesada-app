@@ -9,7 +9,10 @@ ARG GO_VERSION=1.25.11
 # ---- build -----------------------------------------------------------------
 # -bookworm (buildpack-deps based) ships curl + ca-certificates, which `make
 # css` needs to fetch the pinned tailwind standalone CLI (no node).
-FROM golang:${GO_VERSION}-bookworm AS build
+# --platform=$BUILDPLATFORM keeps the builder native (no QEMU); the Go build
+# cross-compiles to TARGETARCH below, and the final stage just copies the
+# static binary, so multi-arch images build without emulating the toolchain.
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
 
 # Module download cached on go.mod/go.sum alone.
@@ -26,7 +29,12 @@ COPY . .
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+# TARGETOS/TARGETARCH are set automatically by buildx per --platform (default
+# linux/amd64 for a plain build), so the same Dockerfile cross-builds arm64.
+# CGO_ENABLED=0 keeps the binary static for distroless on either arch.
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     make build VERSION="${VERSION}" COMMIT="${COMMIT}" BUILD_TIME="${BUILD_TIME}"
 
 # ---- runtime ---------------------------------------------------------------
