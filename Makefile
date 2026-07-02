@@ -12,7 +12,7 @@ TAILWIND_ARCH_RAW := $(shell uname -m)
 TAILWIND_ARCH := $(if $(filter x86_64,$(TAILWIND_ARCH_RAW)),x64,$(if $(filter aarch64 arm64,$(TAILWIND_ARCH_RAW)),arm64,$(TAILWIND_ARCH_RAW)))
 TAILWIND_URL := https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/tailwindcss-$(TAILWIND_OS)-$(TAILWIND_ARCH)
 
-.PHONY: build run css css-watch tailwind-cli tidy clean test test-integration sec sec-vuln sec-static sec-tools lint lint-tools
+.PHONY: build run css css-watch tailwind-cli tidy clean test test-integration cover sec sec-vuln sec-static sec-tools lint lint-tools
 
 # Security scanner versions. Pinned so a transient upstream change cannot
 # fail a CI run silently (e.g. gosec moved a default rule, govulncheck
@@ -71,6 +71,13 @@ test:
 # Off the default lane behind the `integration` build tag.
 test-integration:
 	$(GO) test -tags integration -timeout 600s ./...
+
+# Per-package coverage for the security packages, enforced at 80%+ in CI
+# (ci.yml coverage job) via scripts/check-coverage.sh. Runs the integration
+# lane so oauth's DB-backed Start/LookupState count - real Postgres via
+# testcontainers, needs Docker. pkg/service (auth.go) is not gated here.
+cover:
+	$(GO) test -tags integration -cover -timeout 300s ./pkg/csrf/... ./pkg/oauth/... ./pkg/pki/... ./pkg/authmw/...
 
 # Remove build artifacts.
 clean:

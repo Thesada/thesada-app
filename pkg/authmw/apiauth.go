@@ -28,7 +28,14 @@ import (
 // web path. Bearer-authed tokens carry no impersonation (API tokens are
 // user-bound), so EffectiveTenantID resolves to the token owner's tenant.
 // in: AuthService, ApiTokenService. out: http.Handler wrapper.
-func APIMiddleware(auth *service.AuthService, tokens *service.ApiTokenService) func(http.Handler) http.Handler {
+// TokenValidator resolves a raw bearer token into the owning *service.User.
+// *service.ApiTokenService satisfies it; the interface keeps APIMiddleware
+// unit-testable without a database.
+type TokenValidator interface {
+	ValidateToken(token string) (*service.User, error)
+}
+
+func APIMiddleware(auth SessionValidator, tokens TokenValidator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if tok := BearerToken(r); tok != "" {

@@ -24,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -38,6 +40,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - name: Guard pools.App direct callers
         run: bash scripts/check-pools-app.sh
 
@@ -47,16 +51,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Run unit tests
         run: make test
 
+  # 80%+ coverage floor on the security packages (csrf, oauth, pki, authmw).
+  # Runs -tags integration; testcontainers uses ubuntu-latest's Docker daemon.
+  coverage:
+    runs-on: ubuntu-latest
+    # testcontainers spins Docker; bound the job so a daemon/pull/cleanup
+    # stall can't hold the runner to GitHub's 360-min default.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Security-package coverage gate (>= 80%)
+        run: bash scripts/check-coverage.sh
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -69,6 +94,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
