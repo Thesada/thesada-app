@@ -75,17 +75,28 @@ func Start(t *testing.T) *Env {
 
 	// Minimal config: enough for service.New + the bits service methods read.
 	// Extend per-test as specific methods demand more fields.
+	//
+	// DeviceConfigKEK is set so the harness models the feature-ON steady state
+	// (device-config secrets enabled): TenantService.Create then provisions a
+	// per-tenant DEK, and SecretService round-trips. It is a deterministic
+	// test-only base64 32-byte key, never a real deployment key.
 	cfg := &config.Config{
 		CookieSecret:      "servicetest-cookie-secret-32-bytes-min",
 		CLIRequestTimeout: 30 * time.Second,
 		CADir:             t.TempDir(),
+		DeviceConfigKEK:   "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+	}
+
+	services, err := service.New(cfg, pools)
+	if err != nil {
+		t.Fatalf("build services: %v", err)
 	}
 
 	return &Env{
 		BaseURL:  baseURL,
 		Super:    super,
 		Pools:    pools,
-		Services: service.New(cfg, pools),
+		Services: services,
 		Cfg:      cfg,
 	}
 }

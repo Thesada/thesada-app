@@ -112,6 +112,11 @@ func TestSensitiveKeyRE_MatchesEnding(t *testing.T) {
 		"BrokerURL":          false,
 		"PasswordHashEnable": false, // ends in Enable, not a sensitive suffix
 		"KeyID":              false,
+		// Device-config root-key fields: they end in "KEK", which "key$" does
+		// not match, so they must be caught by the "kek" token. Regression for
+		// the /admin/debug KEK-leak finding.
+		"DeviceConfigKEK":    true,
+		"DeviceConfigNewKEK": true,
 	}
 	for in, want := range cases {
 		got := sensitiveKeyRE.MatchString(in)

@@ -6,6 +6,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -209,6 +210,34 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// 3b. Provision device-config secrets into NVS (mirror of cert.set), while
+	// still in the device-NVS-write group and before the restart. Only when the
+	// feature is on: a KEK-off deployment keeps plaintext config and skips this
+	// entirely. Push-first-persist-last holds - a failed secret push aborts the
+	// pair with no paired_at flip, and a retry re-pushes (secret.set overwrites).
+	if s.services.Secrets.Enabled() {
+		// wifi.password is keyed per-SSID on the firmware; resolve the device's
+		// configured SSID from its stored config so we can push
+		// secret.set wifi.password:<ssid>.
+		ssid := s.deviceWifiSSID(r.Context(), device)
+		outcome := provisionDeviceSecrets(service.SecretFields, ssid,
+			func(field string) (string, bool, error) {
+				return s.services.Secrets.Reveal(r.Context(), device.TenantID, device.ID, field)
+			},
+			func(fwField, value string) (string, bool) {
+				return s.pushSecret(r.Context(), topicPrefix, fwField, value)
+			},
+		)
+		for _, f := range outcome.SkippedNoSSID {
+			slog.Warn("skip secret provisioning: no SSID for wifi.password", "device", device.ID, "field", f)
+		}
+		if outcome.AbortMsg != "" {
+			slog.Error("secret provisioning aborted pair", "device", device.ID, "err", outcome.AbortMsg)
+			http.Redirect(w, r, "/admin/devices/pair?error="+outcome.AbortMsg, http.StatusFound)
+			return
+		}
+	}
+
 	// Provision the dynsec role + client before persist. Role-first so the
 	// client create can attach it atomically. "already exists" is tolerated
 	// for retry safety: a prior pair attempt that succeeded here but failed
@@ -300,6 +329,97 @@ func (s *Server) runCLI(ctx context.Context, topicPrefix, command, payload strin
 		return "device+rejected+" + command, false
 	}
 	return "", true
+}
+
+// provisionOutcome is the result of the pure provisioning loop: which
+// firmware fields were pushed, which were skipped and why, and a non-empty
+// AbortMsg when the pair must be aborted (redirect error=AbortMsg).
+type provisionOutcome struct {
+	Pushed        []string
+	SkippedUnset  []string
+	SkippedNoSSID []string
+	AbortMsg      string
+}
+
+// provisionDeviceSecrets walks the secret fields, revealing each and pushing
+// the set ones to the device under their firmware key. Pure (I/O injected via
+// reveal + push) so the ordering + skip + abort logic is unit-testable without
+// MQTT or a DB. A reveal error or a push failure aborts immediately (returns
+// with AbortMsg set) so no half-provisioned device is later marked paired.
+// Unset fields and wifi.password-with-no-SSID are skipped, not fatal.
+// in: fields, device ssid, reveal fn, push fn. out: outcome.
+func provisionDeviceSecrets(fields []string, ssid string,
+	reveal func(field string) (string, bool, error),
+	push func(fwField, value string) (string, bool),
+) provisionOutcome {
+	var out provisionOutcome
+	for _, field := range fields {
+		value, found, err := reveal(field)
+		if err != nil {
+			out.AbortMsg = "secret+decrypt+failed"
+			return out
+		}
+		if !found {
+			out.SkippedUnset = append(out.SkippedUnset, field)
+			continue
+		}
+		fwField, ok := service.FirmwareSecretField(field, ssid)
+		if !ok {
+			out.SkippedNoSSID = append(out.SkippedNoSSID, field)
+			continue
+		}
+		if msg, ok := push(fwField, value); !ok {
+			out.AbortMsg = msg
+			return out
+		}
+		out.Pushed = append(out.Pushed, fwField)
+	}
+	return out
+}
+
+// pushSecret provisions one device-config secret into NVS via the firmware
+// secret.set command, mirroring pushCertPart: the binary payload is
+// "<field>\n<value>" (cli_payload.h splits on the first newline, so a value
+// with spaces or newlines is preserved). The value is NEVER logged.
+// in: ctx, topic prefix, firmware field key, plaintext value.
+// out: user-facing short message (if !ok), ok flag.
+func (s *Server) pushSecret(ctx context.Context, topicPrefix, fwField, value string) (string, bool) {
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	payload := make([]byte, 0, len(fwField)+1+len(value))
+	payload = append(payload, []byte(fwField)...)
+	payload = append(payload, '\n')
+	payload = append(payload, []byte(value)...)
+
+	resp, err := s.mqtt.CLIRequestRaw(cctx, topicPrefix, "secret.set", payload)
+	if err != nil {
+		return "push+secret+failed+(device+unreachable)", false
+	}
+	if !resp.OK {
+		return "device+rejected+secret", false
+	}
+	return "", true
+}
+
+// deviceWifiSSID reads the wifi.ssid leaf from the device's most recent
+// stored config.json so wifi.password can be provisioned as
+// secret.set wifi.password:<ssid>. The stored config is blanked (phase 4) but
+// ssid is not a secret, so it survives. Returns "" on any miss - the caller
+// then skips wifi.password rather than pushing a malformed field.
+// in: ctx, device. out: configured SSID, or "".
+func (s *Server) deviceWifiSSID(ctx context.Context, device *service.Device) string {
+	snap, err := s.services.DeviceFiles.Latest(ctx, device.TenantID, device.ID, "config.json")
+	if err != nil || snap == nil {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(snap.Content), &m) != nil {
+		return ""
+	}
+	wifi, _ := m["wifi"].(map[string]any)
+	ssid, _ := wifi["ssid"].(string)
+	return ssid
 }
 
 // handleAdminDevicePairRevoke marks the active cert as revoked in the db

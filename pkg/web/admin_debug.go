@@ -19,8 +19,10 @@ import (
 
 // sensitiveKeyRE matches struct field names / map keys that must be masked
 // before being rendered. Anchored to the end so "Username" is not masked
-// while "AuthToken" is.
-var sensitiveKeyRE = regexp.MustCompile(`(?i)(password|secret|token|key|passphrase|credential)$`)
+// while "AuthToken" is. "kek" is listed alongside "key" because the
+// device-config root key fields end in "KEK" (key-encryption-key), which
+// "key$" does not match; every such field name must end in a matched token.
+var sensitiveKeyRE = regexp.MustCompile(`(?i)(password|secret|token|key|kek|passphrase|credential)$`)
 
 // dsnRE strips the password segment of a Postgres-style URL. Matches
 // `://user:password@host` and replaces the password with `***`.

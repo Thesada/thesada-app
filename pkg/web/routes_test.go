@@ -68,6 +68,8 @@ var gatedRoutes = []struct {
 	{http.MethodPost, "/admin/devices/x/config/write"},
 	{http.MethodPost, "/admin/devices/x/config/snapshot"},
 	{http.MethodGet, "/admin/devices/x/config/history"},
+	{http.MethodGet, "/admin/devices/x/secrets"},
+	{http.MethodPost, "/admin/devices/x/secrets/set"},
 	{http.MethodPost, "/admin/impersonate/acme"},
 	{http.MethodPost, "/admin/impersonate"},
 	{http.MethodGet, "/admin/debug"},

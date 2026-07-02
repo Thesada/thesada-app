@@ -144,3 +144,78 @@ envelope path stays as the `local` provider.
 
 This work becomes mandatory before any deployment where the operator
 does not fully control the server's physical environment or backup access.
+
+## Device-config secret protection
+
+Device-config secrets (`wifi.password`, `mqtt.password`,
+`telegram.bot_token`, `web.password`, `wifi.ap_password`) are stored
+encrypted, never as plaintext columns. Envelope encryption
+(`pkg/secrets`, AES-256-GCM): a deployment root KEK
+(`THESADA_DEVICE_CONFIG_KEK`, base64 32 bytes, never in the DB) wraps a
+random per-tenant DEK (`tenant_dek`); the DEK encrypts each value in
+`device_config_secrets`. Every ciphertext is AAD-bound (DEK to its
+tenant, value to tenant/device/field) so a DB-write attacker cannot
+relocate one row's ciphertext onto another. The operator writes secrets
+and reads only set/unset status - there is no read-back path; the server
+decrypts only to provision a device or rotate keys.
+
+### Enabling
+
+Generate a root KEK and source it like the CA passphrase (systemd
+`LoadCredential=`, sealed secret - not the same disk):
+
+```
+openssl rand -base64 32     # -> THESADA_DEVICE_CONFIG_KEK
+```
+
+Empty `THESADA_DEVICE_CONFIG_KEK` = feature off (devices keep plaintext
+config). A non-empty but malformed key fails the boot loud, never
+silently off.
+
+### Migrating existing devices
+
+`thesada-app backfill-secrets` sweeps every device, moves any plaintext
+secret still in its stored config into the encrypted store, and re-blanks
+the config. Run it once, right after enabling the feature and before
+device configs re-ingest (config ingest blanks `config.json` from then
+on, so a re-ingested config has nothing left to migrate). It does not
+purge plaintext from older `device_file_history` rows.
+
+### Provisioning
+
+At pair time (`handleAdminDevicePairIssue`), each set secret is decrypted
+and pushed to the device NVS via `secret.set` (mirror of `cert.set`),
+before the device restart. Field keys match the firmware keymap (#442);
+`wifi.password` is provisioned per-SSID as `wifi.password:<ssid>`, using
+the device's configured SSID.
+
+### Rotating the root KEK
+
+Re-wrap every tenant DEK under a new root KEK without touching any value
+ciphertext (the DEK is unchanged, only its wrapping):
+
+```
+# keep the live key on the OLD value so the app still boots + still mints
+# new DEKs under it; run repeatedly until it reports rotated=0
+THESADA_DEVICE_CONFIG_KEK=<old> \
+THESADA_DEVICE_CONFIG_KEK_NEW=<new> \
+  thesada-app rotate-kek
+# then swap the live key to <new> and restart promptly
+```
+
+`rotate-kek` is idempotent and re-runnable: a DEK already under the new
+key is skipped (`already_new`), and a DEK minted under the old key after
+an earlier run (e.g. a tenant created mid-rotation) is picked up by the
+next run. Re-run until `rotated=0`, then swap the live key and restart
+without delay - a DEK created in the final gap between the last run and
+the restart would otherwise be orphaned under the old key (a loud
+`UnwrapDEK` failure, recoverable only by re-running with the old key
+still available). If a DEK unwraps under neither key the whole rotation
+rolls back untouched.
+
+Threat model covered: DB dump / backup leak (values are ciphertext,
+DEKs are wrapped, the root KEK is not in the DB), cross-row ciphertext
+relocation (AAD binding). Tenant delete crypto-shreds: the `tenant_dek`
+row cascades away, making that tenant's secrets permanently unrecoverable
+regardless of backups. Not covered: live-process memory compromise (the
+root KEK sits in memory after boot) - same KMS follow-up as the CA key.

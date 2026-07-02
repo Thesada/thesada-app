@@ -8,6 +8,7 @@
     <p class="text-xs text-slate-400 font-mono mt-1">{{.TopicPrefix}}</p>
   </div>
   <div class="flex gap-2">
+    <a href="/admin/devices/{{.Device.ID}}/secrets" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Secrets</a>
     <a href="/devices/{{.Device.ID}}" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Device page</a>
   </div>
 </div>

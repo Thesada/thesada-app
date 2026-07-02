@@ -23,21 +23,30 @@ type Services struct {
 	Certificates *CertificateService
 	OAuth        *OAuthService
 	ApiTokens    *ApiTokenService
+	Secrets      *SecretService
 }
 
 // New constructs all services on shared cfg + role-scoped pools (App=tenant reads, Admin=BYPASSRLS, MQTT=ingest).
-// in: cfg, db.Pools bundle. out: ready *Services bundle.
-func New(cfg *config.Config, pools db.Pools) *Services {
+// Returns an error only when a configured-but-malformed secret gate the boot
+// should reject (a bad THESADA_DEVICE_CONFIG_KEK); every other service is
+// infallible to build.
+// in: cfg, db.Pools bundle. out: ready *Services bundle, error.
+func New(cfg *config.Config, pools db.Pools) (*Services, error) {
+	secretsSvc, err := NewSecretService(cfg, pools)
+	if err != nil {
+		return nil, err
+	}
 	return &Services{
 		Devices:      &DeviceService{cfg: cfg, pools: pools},
 		Telemetry:    &TelemetryService{cfg: cfg, pools: pools},
 		Alerts:       &AlertService{cfg: cfg, pools: pools},
 		Auth:         NewAuthService(cfg, pools),
-		Tenants:      &TenantService{cfg: cfg, pools: pools},
+		Tenants:      &TenantService{cfg: cfg, pools: pools, secrets: secretsSvc},
 		Settings:     &SettingsService{cfg: cfg, pools: pools, cache: make(map[string]json.RawMessage)},
 		DeviceFiles:  &DeviceFilesService{cfg: cfg, pools: pools},
 		Certificates: &CertificateService{cfg: cfg, pools: pools},
 		OAuth:        NewOAuthService(cfg, pools),
 		ApiTokens:    &ApiTokenService{cfg: cfg, pools: pools},
-	}
+		Secrets:      secretsSvc,
+	}, nil
 }
