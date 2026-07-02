@@ -57,6 +57,9 @@ jobs:
   # Runs -tags integration; testcontainers uses ubuntu-latest's Docker daemon.
   coverage:
     runs-on: ubuntu-latest
+    # testcontainers spins Docker; bound the job so a daemon/pull/cleanup
+    # stall can't hold the runner to GitHub's 360-min default.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
