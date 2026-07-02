@@ -222,7 +222,13 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 		ssid := s.deviceWifiSSID(r.Context(), device)
 		outcome := provisionDeviceSecrets(service.SecretFields, ssid,
 			func(field string) (string, bool, error) {
-				return s.services.Secrets.Reveal(r.Context(), device.TenantID, device.ID, field)
+				v, found, err := s.services.Secrets.Reveal(r.Context(), device.TenantID, device.ID, field)
+				if err != nil {
+					// Log the real cause (DB / decrypt / corruption) before it
+					// collapses into the canned AbortMsg below - never the value.
+					slog.Error("reveal device secret failed", "device", device.ID, "field", field, "err", err)
+				}
+				return v, found, err
 			},
 			func(fwField, value string) (string, bool) {
 				return s.pushSecret(r.Context(), topicPrefix, fwField, value)

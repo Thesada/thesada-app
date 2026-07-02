@@ -20,6 +20,7 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -34,7 +35,9 @@ var sensitiveConfigKeyRE = regexp.MustCompile(`(?i)(password|secret|token|key|pa
 // the explicit SecretFields allowlist plus any leaf caught by the backstop
 // regex. Content that is not a JSON object, or that has nothing to blank, is
 // returned unchanged (byte-identical) so clean configs keep their exact form
-// and hash. Output for a blanked config is re-serialized (indented, sorted
+// and hash; object-shaped ("{...") content that fails to parse returns an
+// error (fail closed - never persist an unparseable secret-bearing blob).
+// Output for a blanked config is re-serialized (indented, sorted
 // keys) - deterministic, but the caller should not re-hash it: the stored
 // sha256 stays the device fingerprint.
 // in: raw config.json content. out: (possibly blanked) content, changed?, error.
@@ -45,9 +48,10 @@ func blankConfigSecrets(content string) (string, bool, error) {
 	}
 	var m map[string]any
 	if err := json.Unmarshal([]byte(trimmed), &m); err != nil {
-		// Shape validation is the caller's job (validSnapshotContent); an
-		// unparseable blob is left as-is rather than rejected here.
-		return content, false, nil
+		// Object-shaped ("{...") content that will not parse must fail closed:
+		// returning it verbatim would persist plaintext secrets through the
+		// Upsert chokepoint (AGENTS.md: reject silent fallbacks).
+		return "", false, fmt.Errorf("blank config secrets: parse config.json: %w", err)
 	}
 
 	changed := false

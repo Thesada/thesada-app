@@ -187,5 +187,18 @@ func TestDeviceFilesService(t *testing.T) {
 		if hist[0].SHA256 != deviceSHA {
 			t.Errorf("history sha = %q, want %q", hist[0].SHA256, deviceSHA)
 		}
+
+		// Leading-slash form (the canonical /config.json the device + UI use)
+		// must blank too - the exact-match gate must not be bypassable by a slash.
+		if err := df.Upsert(ctx, tA, pk, "/config.json", raw, deviceSHA, "drift", nil); err != nil {
+			t.Fatalf("Upsert /config.json: %v", err)
+		}
+		slashed, err := df.Latest(ctx, tA, pk, "/config.json")
+		if err != nil || slashed == nil {
+			t.Fatalf("Latest /config.json = %v err %v", slashed, err)
+		}
+		if strings.Contains(slashed.Content, "leak") {
+			t.Errorf("/config.json stored content still contains a plaintext secret:\n%s", slashed.Content)
+		}
 	})
 }

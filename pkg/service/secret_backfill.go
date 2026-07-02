@@ -70,7 +70,12 @@ func BackfillDeviceSecrets(ctx context.Context, secrets *SecretService, devices 
 		// strip. Guard on `changed` so already-clean configs are not rewritten.
 		// Re-storing via Upsert (same sha + non-"write" source) replaces the
 		// canonical content with the blanked form and appends no history row.
-		if _, changed, berr := blankConfigSecrets(snap.Content); berr == nil && changed {
+		if _, changed, berr := blankConfigSecrets(snap.Content); berr != nil {
+			// Fail loud: a blank failure here means plaintext may remain in
+			// device_files while the CLI reports success (AGENTS.md: reject
+			// silent fallbacks).
+			return res, fmt.Errorf("backfill: blank config %s/%s: %w", d.TenantID, d.DeviceID, berr)
+		} else if changed {
 			if err := files.Upsert(ctx, d.TenantID, d.ID, "config.json", snap.Content, snap.SHA256, "backfill", nil); err != nil {
 				return res, fmt.Errorf("backfill: reblank config %s/%s: %w", d.TenantID, d.DeviceID, err)
 			}

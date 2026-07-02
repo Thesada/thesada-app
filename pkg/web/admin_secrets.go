@@ -33,7 +33,13 @@ func (s *Server) handleAdminDeviceSecrets(w http.ResponseWriter, r *http.Request
 		return
 	}
 	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
-	if err != nil || device == nil {
+	if err != nil {
+		// A real backend error must not masquerade as 404 (AGENTS.md: fail loud).
+		slog.Error("device lookup failed", "device", id, "err", err)
+		http.Error(w, "device lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -73,7 +79,13 @@ func (s *Server) handleAdminDeviceSecretsSet(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
-	if err != nil || device == nil {
+	if err != nil {
+		// A real backend error must not masquerade as 404 (AGENTS.md: fail loud).
+		slog.Error("device lookup failed", "device", id, "err", err)
+		http.Error(w, "device lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
 		http.NotFound(w, r)
 		return
 	}

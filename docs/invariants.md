@@ -363,8 +363,10 @@ pair or rotate keys, but that method is server-side only and must never
 be wired to an operator-facing route - the whole contract depends on it
 staying off the request surface.
 
-Config hygiene: plaintext secrets never persist in `device_files` /
-`device_file_history`. `DeviceFilesService.Upsert` is the single
+Config hygiene: the write path never persists plaintext secrets in
+`device_files` / `device_file_history` (legacy pre-backfill
+`device_file_history` rows may still hold plaintext - see Residual).
+`DeviceFilesService.Upsert` is the single
 chokepoint every ingest + app-write path funnels through; for
 `config.json` it blanks the sensitive leaves (`blankConfigSecrets`:
 the `SecretFields` allowlist plus a `sensitiveConfigKeyRE` backstop)

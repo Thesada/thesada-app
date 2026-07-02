@@ -164,7 +164,7 @@ decrypts only to provision a device or rotate keys.
 Generate a root KEK and source it like the CA passphrase (systemd
 `LoadCredential=`, sealed secret - not the same disk):
 
-```
+```bash
 openssl rand -base64 32     # -> THESADA_DEVICE_CONFIG_KEK
 ```
 
@@ -194,7 +194,7 @@ the device's configured SSID.
 Re-wrap every tenant DEK under a new root KEK without touching any value
 ciphertext (the DEK is unchanged, only its wrapping):
 
-```
+```bash
 # keep the live key on the OLD value so the app still boots + still mints
 # new DEKs under it; run repeatedly until it reports rotated=0
 THESADA_DEVICE_CONFIG_KEK=<old> \
