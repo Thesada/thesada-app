@@ -111,6 +111,7 @@ func (s *Server) parseTemplates() {
 		"admin-devices.html",
 		"admin-mqtt.html", "admin-waitlist.html",
 		"admin-device-config.html",
+		"admin-device-secrets.html",
 		"admin-devices-pair.html",
 		"admin-debug.html",
 	}
@@ -218,6 +219,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/devices/{id}/config/write", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigWrite))
 	s.mux.HandleFunc("POST /admin/devices/{id}/config/snapshot", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigSnapshot))
 	s.mux.HandleFunc("GET /admin/devices/{id}/config/history", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigHistory))
+	s.mux.HandleFunc("GET /admin/devices/{id}/secrets", authmw.RequireSuperAdmin(s.handleAdminDeviceSecrets))
+	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/set", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsSet))
 	s.mux.HandleFunc("POST /admin/impersonate/{slug}", authmw.RequireSuperAdmin(s.handleAdminImpersonate))
 	s.mux.HandleFunc("POST /admin/impersonate", authmw.RequireSuperAdmin(s.handleAdminImpersonateClear))
 	s.mux.HandleFunc("GET /admin/debug", authmw.RequireSuperAdmin(s.handleAdminDebug))

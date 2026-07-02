@@ -22,6 +22,7 @@ import (
 	"thesada.app/app/pkg/mailer"
 	"thesada.app/app/pkg/mqtt"
 	"thesada.app/app/pkg/pki"
+	"thesada.app/app/pkg/secrets"
 	"thesada.app/app/pkg/service"
 	"thesada.app/app/pkg/web"
 	"thesada.app/app/pkg/ws"
@@ -84,7 +85,58 @@ func main() {
 		return
 	}
 
-	services := service.New(cfg, pools)
+	services, err := service.New(cfg, pools)
+	if err != nil {
+		slog.Error("service init failed", "err", err)
+		os.Exit(1)
+	}
+
+	// Service-backed one-shot subcommands. Placed after service.New (they need
+	// the service layer) but before the MQTT/HTTP wiring, and each returns
+	// without ever starting the server. Mirror the migrate/ca-encrypt shape:
+	// log on success, os.Exit(1) on error.
+	//
+	// `backfill-secrets` migrates existing app-managed devices into the
+	// encrypted secret store: read each device's stored config, move any
+	// plaintext secrets into device_config_secrets, and re-blank the config.
+	if len(os.Args) > 1 && os.Args[1] == "backfill-secrets" {
+		res, err := service.BackfillDeviceSecrets(rootCtx, services.Secrets, services.Devices, services.DeviceFiles)
+		if err != nil {
+			slog.Error("backfill-secrets failed", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("backfill-secrets done",
+			"devices_scanned", res.Devices, "devices_migrated", res.DevicesMigrated, "secrets_written", res.Secrets)
+		return
+	}
+
+	// `rotate-kek` re-wraps every tenant DEK from the live root KEK
+	// (THESADA_DEVICE_CONFIG_KEK) under a new one (THESADA_DEVICE_CONFIG_KEK_NEW).
+	// After it succeeds the operator swaps the live key to the new value and
+	// restarts. Device-config-secret ciphertext is untouched.
+	if len(os.Args) > 1 && os.Args[1] == "rotate-kek" {
+		if cfg.DeviceConfigNewKEK == "" {
+			slog.Error("rotate-kek requires THESADA_DEVICE_CONFIG_KEK_NEW to be set")
+			os.Exit(1)
+		}
+		newKeyring, err := secrets.NewKeyring(cfg.DeviceConfigNewKEK)
+		if err != nil {
+			slog.Error("rotate-kek: THESADA_DEVICE_CONFIG_KEK_NEW invalid", "err", err)
+			os.Exit(1)
+		}
+		res, err := services.Secrets.RotateRootKEK(rootCtx, newKeyring)
+		if err != nil {
+			slog.Error("rotate-kek failed", "err", err)
+			os.Exit(1)
+		}
+		next := "re-run rotate-kek until rotated=0, then set THESADA_DEVICE_CONFIG_KEK to the new key and restart"
+		if res.Rotated == 0 {
+			next = "all DEKs on the new key: set THESADA_DEVICE_CONFIG_KEK to the new key and restart promptly"
+		}
+		slog.Info("rotate-kek done", "rotated", res.Rotated, "already_new", res.AlreadyNew, "next", next)
+		return
+	}
+
 	// Warm the tenant slug and settings caches before routing starts.
 	// Fatal on first load so a mis-seeded db is caught at boot, not on first
 	// MQTT publish.

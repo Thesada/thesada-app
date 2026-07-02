@@ -11,6 +11,7 @@ package service_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"thesada.app/app/pkg/service/servicetest"
@@ -147,6 +148,57 @@ func TestDeviceFilesService(t *testing.T) {
 		}
 		if h, err := df.History(ctx, tB, pk, "/iso", 10); err != nil || len(h) != 0 {
 			t.Errorf("cross-tenant History = %v err %v, want empty", h, err)
+		}
+	})
+
+	// Phase 4: config.json secrets are blanked in the stored copy but the
+	// device-reported sha256 (drift key) is kept as-is.
+	t.Run("config_json_secrets_blanked_sha_preserved", func(t *testing.T) {
+		pk := mustUpsert(t, dev, tA, "df-blank", "", "", "", "")
+		const raw = `{"wifi":{"ssid":"home","password":"leak"},"ap_password":"leak2"}`
+		const deviceSHA = "device-fingerprint-abc"
+
+		if err := df.Upsert(ctx, tA, pk, "config.json", raw, deviceSHA, "drift", nil); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		latest, err := df.Latest(ctx, tA, pk, "config.json")
+		if err != nil || latest == nil {
+			t.Fatalf("Latest = %v err %v", latest, err)
+		}
+		// sha stays the device fingerprint - blanking must not read as drift.
+		if latest.SHA256 != deviceSHA {
+			t.Errorf("stored sha = %q, want device fingerprint %q", latest.SHA256, deviceSHA)
+		}
+		// Stored content has no plaintext secret.
+		if strings.Contains(latest.Content, "leak") {
+			t.Errorf("stored content still contains a plaintext secret:\n%s", latest.Content)
+		}
+		if !strings.Contains(latest.Content, `"ssid"`) {
+			t.Errorf("stored content dropped a non-secret field:\n%s", latest.Content)
+		}
+		// History row is blanked too.
+		hist, err := df.History(ctx, tA, pk, "config.json", 10)
+		if err != nil || len(hist) != 1 {
+			t.Fatalf("History = %d err %v, want 1", len(hist), err)
+		}
+		if strings.Contains(hist[0].Content, "leak") {
+			t.Errorf("history content still contains a plaintext secret:\n%s", hist[0].Content)
+		}
+		if hist[0].SHA256 != deviceSHA {
+			t.Errorf("history sha = %q, want %q", hist[0].SHA256, deviceSHA)
+		}
+
+		// Leading-slash form (the canonical /config.json the device + UI use)
+		// must blank too - the exact-match gate must not be bypassable by a slash.
+		if err := df.Upsert(ctx, tA, pk, "/config.json", raw, deviceSHA, "drift", nil); err != nil {
+			t.Fatalf("Upsert /config.json: %v", err)
+		}
+		slashed, err := df.Latest(ctx, tA, pk, "/config.json")
+		if err != nil || slashed == nil {
+			t.Fatalf("Latest /config.json = %v err %v", slashed, err)
+		}
+		if strings.Contains(slashed.Content, "leak") {
+			t.Errorf("/config.json stored content still contains a plaintext secret:\n%s", slashed.Content)
 		}
 	})
 }

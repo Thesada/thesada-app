@@ -4,7 +4,13 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-06-22 (auth-layer hardening: password-login rate limiting,
+Dated 2026-07-01 (device-config secrets complete: provision-at-pair via
+`secret.set`, write-only UI, root-KEK rotation, existing-device backfill,
+field keys aligned to the firmware keymap - #443 phases 5-7). Previously
+2026-06-30 (device-config secrets phases 2-4: per-tenant DEK envelope
+encryption, write-only contract, crypto-shred on tenant delete, RLS on
+the two new stores, malformed-KEK boot failure, config-field blanking).
+Previously 2026-06-22 (auth-layer hardening: password-login rate limiting,
 constant-time login, super-admin guard on impersonation, service-layer
 password floor, signed-double-submit CSRF, cookie-secret length hard-fail).
 Previously 2026-06-16 (CI lint guard for the pools.App tenancy contract,
@@ -335,6 +341,111 @@ is the year-two follow-up scoped in `docs/security.md`.
 Source: `pkg/pki/ca.go::Bootstrap`, `pkg/pki/encrypt.go`,
 `pkg/pki/encrypt_test.go`, `cmd/thesada-app/main.go` (warning surface
 + `ca-encrypt` subcommand).
+
+### Device-config secrets are envelope-encrypted under a per-tenant DEK; the operator never reads them back
+
+The 5 sensitive device-config fields (`wifi.password`, `mqtt.password`,
+`telegram.bot_token`, `web.password`, `wifi.ap_password`) are stored in a
+separate encrypted store (`device_config_secrets`), never in
+`device_files` and never as plaintext columns. Envelope encryption
+(`pkg/secrets`, AES-256-GCM throughout): the deployment root KEK
+(`THESADA_DEVICE_CONFIG_KEK`, 32 bytes, env-sourced, never in the DB)
+wraps a per-tenant random DEK (`tenant_dek`); the DEK encrypts each
+value. Every ciphertext is AAD-bound - the DEK to its `tenant_id`, each
+value to `tenant/device/field` - so a DB-write attacker cannot relocate
+one row's ciphertext onto another tenant, device, or field and have it
+decrypt.
+
+Write-only contract: `SetSecret` writes, `Status` returns set/unset
+booleans only, and there is no operator-facing read-back path. The
+server CAN decrypt (`SecretService.Reveal`) to provision a device at
+pair or rotate keys, but that method is server-side only and must never
+be wired to an operator-facing route - the whole contract depends on it
+staying off the request surface.
+
+Config hygiene: the write path never persists plaintext secrets in
+`device_files` / `device_file_history` (legacy pre-backfill
+`device_file_history` rows may still hold plaintext - see Residual).
+`DeviceFilesService.Upsert` is the single
+chokepoint every ingest + app-write path funnels through; for
+`config.json` it blanks the sensitive leaves (`blankConfigSecrets`:
+the `SecretFields` allowlist plus a `sensitiveConfigKeyRE` backstop)
+before the row is written. The device-reported `sha256` is kept as-is
+as the drift fingerprint - blanking changes only the stored content, so
+a sanitized snapshot never reads as drift against the device. Clean
+configs (already-blank, e.g. app-managed devices per #442) pass through
+byte-identical.
+
+Tenant delete crypto-shreds: the `tenant_dek` row cascades away on
+`tenants` delete, rendering that tenant's ciphertext permanently
+unrecoverable regardless of what backups still hold the `device_config_secrets`
+rows. Root-KEK rotation re-wraps DEKs (phase 7), never re-encrypts values.
+
+Both new tables are RLS `FORCE`d: `tenant_dek` scopes directly on
+`tenant_id = app_tenant_id()`; `device_config_secrets` scopes reads on
+its denormalized `tenant_id` and its write `WITH CHECK` additionally
+binds `device_pk` to the calling tenant (an `EXISTS` against `devices`),
+so a cross-tenant `device_pk` is rejected at write - the AAD binding is
+the second line, RLS the first.
+
+Feature gate: an empty `THESADA_DEVICE_CONFIG_KEK` leaves the feature
+off (devices keep plaintext config); a non-empty but malformed KEK is a
+hard boot failure (`NewSecretService` -> `service.New` error ->
+`os.Exit`), never a silent fallback to off. The root KEK must never be
+rendered: the `/admin/debug` redactor masks by trailing token, so KEK
+config fields are named to END in `KEK` and `sensitiveKeyRE` includes
+`kek` (a field named `...KEKNew` would print in cleartext - a bug caught
+in review). Rotation is idempotent + re-runnable (`RotateRootKEK` retries
+each DEK under the new key and skips already-rotated rows) so the operator
+can re-run until `rotated=0` and no swap-window DEK is orphaned.
+
+Provisioning + field keys: `SecretFields` are the firmware `secret.set`
+keys (#442 keymap) so a paired device is provisioned by
+`handleAdminDevicePairIssue` pushing `secret.set <field>\n<value>` to
+NVS (mirror of `cert.set`, before the restart, feature-gated). Four map
+1:1; `wifi.password` is per-SSID on the firmware, so it is provisioned as
+`wifi.password:<ssid>` (`FirmwareSecretField`), resolving the SSID from
+the device's stored config. Root-KEK rotation (`rotate-kek` /
+`RotateRootKEK`) re-wraps every DEK under a new KEK in one admin tx and
+never touches value ciphertext. Existing devices migrate via
+`backfill-secrets` (`BackfillDeviceSecrets`): extract plaintext from the
+stored config, `SetSecret`, re-blank. KEK-in-env is v1; KMS is the later
+follow-up. Residual: backfill does not purge plaintext from older
+`device_file_history` rows.
+
+How verified: `pkg/secrets/secrets_test.go` (crypto core: round-trip,
+tamper / wrong-key / wrong-AAD reject, nonce freshness),
+`pkg/service/secret_integration_test.go` (DB round-trip, overwrite,
+write-only Status, cross-tenant RLS isolation, feature-off gate,
+malformed-KEK boot failure), `pkg/service/tenant_integration_test.go`
+(`Create_provisions_tenant_DEK`, `Delete_crypto_shreds_secrets`),
+`pkg/service/config_secrets_blank_test.go` (allowlist + backstop + clean
+passthrough + extract inverse), `pkg/service/device_files_integration_test.go`
+(`config_json_secrets_blanked_sha_preserved`),
+`pkg/service/secret_phase7_integration_test.go` (rotation: old-key-fails /
+new-key-works / kek_version bump; backfill: extract -> encrypt -> re-blank,
+idempotent), `pkg/service/secret_fields_test.go` (`FirmwareSecretField`
+mapping), `pkg/web/provision_test.go` (pair-time provision loop:
+ordering, skip-unset, no-SSID skip, reveal-error + push-fail abort),
+`pkg/web/admin_secrets_integration_test.go` (write-only POST stores +
+round-trips, rejects empty/unknown), and the web auth-gate + bad-UUID
+audits for the two secrets routes (`routes_test.go`,
+`handler_input_test.go`). Residual: the thin handler-to-MQTT adapter in
+`handleAdminDevicePairIssue` (the closures wiring Reveal/pushSecret into
+the tested loop) has no end-to-end pairing test - it needs an MQTT device
+sim.
+
+Source: `pkg/secrets/secrets.go`, `pkg/service/secret.go`
+(`SecretFields`, `FirmwareSecretField`, `Reveal`, `RotateRootKEK`),
+`pkg/service/tenant.go` (`Create` DEK provisioning),
+`pkg/service/config_secrets_blank.go`, `pkg/service/secret_backfill.go`,
+`pkg/service/device_files.go` (`Upsert` blanking chokepoint),
+`pkg/web/admin_pair.go` (`pushSecret` provisioning),
+`pkg/web/admin_secrets.go` (write-only UI),
+`migrations/0023_device_config_secrets.sql`, `pkg/config/config.go`
+(`DeviceConfigKEK` + `_NEW`), `cmd/thesada-app/main.go`
+(`service.New` error surface, `backfill-secrets` + `rotate-kek`),
+`docs/security.md` (operator runbook).
 
 ### Passwords use bcrypt at default cost (10)
 

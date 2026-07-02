@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -33,8 +34,9 @@ import (
 // one place. CountMembers reads users + devices (which DO have RLS) across
 // the tenant boundary for the super-admin dashboard - same treatment.
 type TenantService struct {
-	cfg   *config.Config
-	pools db.Pools
+	cfg     *config.Config
+	pools   db.Pools
+	secrets *SecretService // provisions the per-tenant DEK at Create; nil-safe when the feature is off
 
 	mu    sync.RWMutex
 	slugs map[string]struct{}
@@ -188,8 +190,20 @@ func (s *TenantService) Create(slug, displayName string) (*Tenant, error) {
 	ctx := context.Background()
 	var t Tenant
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "tenant.create", func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, query, slug, displayName).Scan(
-			&t.ID, &t.DisplayName, &t.UUID, &t.CreatedAt)
+		if err := tx.QueryRow(ctx, query, slug, displayName).Scan(
+			&t.ID, &t.DisplayName, &t.UUID, &t.CreatedAt); err != nil {
+			return err
+		}
+		// Seal the per-tenant device-config-secrets DEK in the same tx so a
+		// tenant never exists without one while the feature is on. No-op when
+		// off. Runs on the admin (BYPASSRLS) pool, so the tenant_dek RLS policy
+		// is bypassed - correct, this is the row that policy will later gate.
+		if s.secrets != nil {
+			if err := s.secrets.ProvisionTenantDEKTx(ctx, tx, slug); err != nil {
+				return fmt.Errorf("provision tenant DEK: %w", err)
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		// pg unique_violation = 23505. Wrap as ErrSlugTaken for the handler.

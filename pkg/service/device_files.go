@@ -7,6 +7,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -35,6 +36,19 @@ type DeviceFilesService struct {
 // in:  ctx, tenantID, devicePk, path, content, sha256, source, createdBy (nil for system)
 // out: error if either table write failed
 func (s *DeviceFilesService) Upsert(ctx context.Context, tenantID string, devicePk uuid.UUID, path, content, sha256hex, source string, createdBy *uuid.UUID) error {
+	// Never persist plaintext device-config secrets. Blank the sensitive
+	// fields in config.json before it reaches device_files / history; every
+	// write + ingest path funnels through here, so this is the one chokepoint.
+	// sha256hex is left as the device fingerprint (drift key) - blanking the
+	// stored copy must not read as drift - and the real values live encrypted
+	// in device_config_secrets (#443).
+	if path == "config.json" || path == "/config.json" {
+		blanked, _, err := blankConfigSecrets(content)
+		if err != nil {
+			return fmt.Errorf("blank config secrets: %w", err)
+		}
+		content = blanked
+	}
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		// Read prior canonical sha (NULL if first insert).
 		var prev *string

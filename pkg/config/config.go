@@ -53,6 +53,22 @@ type Config struct {
 	// Empty = plaintext PEM + startup warning. Source from systemd Credential or sealed env.
 	CAKeyPassphrase string
 
+	// DeviceConfigKEK is the base64 32-byte root key that wraps per-tenant DEKs
+	// for device-config secrets (pkg/secrets). Empty = the secrets feature is
+	// off (devices keep plaintext config). Generate with `openssl rand -base64 32`
+	// and source from a systemd Credential or sealed env, like CAKeyPassphrase.
+	DeviceConfigKEK string
+
+	// DeviceConfigNewKEK is the incoming root KEK for a rotation. Only the
+	// `rotate-kek` one-shot reads it: it re-wraps every tenant DEK from
+	// DeviceConfigKEK (old, still the live key) under this new key. Empty on a
+	// normal boot; not validated (see the omission from validate()).
+	//
+	// Named "...NewKEK" not "...KEKNew" on purpose: the /admin/debug redactor
+	// masks by trailing token, so a secret config field must END in a matched
+	// token (here "KEK") or it prints in cleartext.
+	DeviceConfigNewKEK string
+
 	// CLIRequestTimeout bounds the MQTT CLI response goroutine; generous to cover
 	// SIM7080 cellular backoff (up to 40 s) plus broker RTT. Default 120s.
 	CLIRequestTimeout time.Duration
@@ -83,6 +99,8 @@ func Load() (*Config, error) {
 		ConfigSnapshotRetention: envOrInt("THESADA_CONFIG_SNAPSHOT_RETENTION", 100),
 		CADir:                   envOr("THESADA_CA_DIR", "/opt/thesada-app/ca"),
 		CAKeyPassphrase:         os.Getenv("THESADA_CA_KEY_PASSPHRASE"),
+		DeviceConfigKEK:         os.Getenv("THESADA_DEVICE_CONFIG_KEK"),
+		DeviceConfigNewKEK:      os.Getenv("THESADA_DEVICE_CONFIG_KEK_NEW"),
 		CLIRequestTimeout:       envOrDuration("THESADA_CLI_REQUEST_TIMEOUT", 120*time.Second),
 	}
 	tp, err := parseTrustedProxies(os.Getenv("THESADA_TRUSTED_PROXIES"))
