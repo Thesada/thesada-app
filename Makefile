@@ -12,7 +12,7 @@ TAILWIND_ARCH_RAW := $(shell uname -m)
 TAILWIND_ARCH := $(if $(filter x86_64,$(TAILWIND_ARCH_RAW)),x64,$(if $(filter aarch64 arm64,$(TAILWIND_ARCH_RAW)),arm64,$(TAILWIND_ARCH_RAW)))
 TAILWIND_URL := https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/tailwindcss-$(TAILWIND_OS)-$(TAILWIND_ARCH)
 
-.PHONY: build run css css-watch tailwind-cli tidy clean test test-integration sec sec-vuln sec-static sec-tools lint lint-tools
+.PHONY: build run css css-watch tailwind-cli tidy clean test test-integration cover sec sec-vuln sec-static sec-tools lint lint-tools
 
 # Security scanner versions. Pinned so a transient upstream change cannot
 # fail a CI run silently (e.g. gosec moved a default rule, govulncheck
@@ -71,6 +71,13 @@ test:
 # Off the default lane behind the `integration` build tag.
 test-integration:
 	$(GO) test -tags integration -timeout 600s ./...
+
+# Per-package coverage for the unit-tested security packages. The 80%+
+# target is enforced in CI (ci.yml, coverage lane); run this locally to
+# check before push. pkg/service (auth.go) is covered by the integration
+# lane, not this one.
+cover:
+	$(GO) test -cover ./pkg/csrf/... ./pkg/oauth/... ./pkg/pki/... ./pkg/authmw/...
 
 # Remove build artifacts.
 clean:

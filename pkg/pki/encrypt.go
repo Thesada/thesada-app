@@ -57,13 +57,13 @@ const (
 // caKeyEnvelope is the on-disk shape of the encrypted CA key. JSON for
 // human inspectability and forward-compatible field add.
 type caKeyEnvelope struct {
-	Magic     string `json:"magic"`
-	KDF       string `json:"kdf"`
-	ScryptN   int    `json:"scrypt_n"`
-	ScryptR   int    `json:"scrypt_r"`
-	ScryptP   int    `json:"scrypt_p"`
-	Salt      []byte `json:"salt"`
-	Nonce     []byte `json:"nonce"`
+	Magic      string `json:"magic"`
+	KDF        string `json:"kdf"`
+	ScryptN    int    `json:"scrypt_n"`
+	ScryptR    int    `json:"scrypt_r"`
+	ScryptP    int    `json:"scrypt_p"`
+	Salt       []byte `json:"salt"`
+	Nonce      []byte `json:"nonce"`
 	Ciphertext []byte `json:"ciphertext"`
 }
 

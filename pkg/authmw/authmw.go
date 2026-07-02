@@ -19,6 +19,13 @@ type ctxKey int
 
 const sessionKey ctxKey = 1
 
+// SessionValidator resolves a raw session token into a *service.Session.
+// *service.AuthService satisfies it; narrowing to the interface keeps the
+// middleware unit-testable without a database.
+type SessionValidator interface {
+	ValidateSession(token string) (*service.Session, error)
+}
+
 // Middleware resolves the session cookie and puts the *Session in the request
 // context. Missing or invalid cookies are silently dropped; handlers call
 // CurrentUser / CurrentSession / EffectiveTenantID to inspect.
@@ -30,7 +37,7 @@ const sessionKey ctxKey = 1
 // requests behind a TLS-terminating reverse proxy are detected by the
 // X-Forwarded-Proto header so the cookie keeps the Secure flag end-to-end.
 // in: AuthService. out: http.Handler wrapper.
-func Middleware(auth *service.AuthService) func(http.Handler) http.Handler {
+func Middleware(auth SessionValidator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			c, err := r.Cookie(CookieName)

@@ -186,8 +186,11 @@ If a function is part of the auth / CSRF / OAuth / pkg-pki / tenant-
 scoping path, the contract test exists. The test describes what must
 remain true. It runs in CI on every PR.
 
-Coverage gates target `pkg/csrf`, `pkg/oauth`, `pkg/service/auth.go`,
-`pkg/pki`, `pkg/authmw` at 80 %+.
+The `coverage` job in ci.yml enforces 80 %+ statement coverage on
+`pkg/csrf`, `pkg/oauth`, `pkg/pki`, and `pkg/authmw` via
+`scripts/check-coverage.sh` (run it locally with `make cover`).
+`pkg/service/auth.go` is exercised by the integration lane, not this
+gate.
 
 ---
 
@@ -341,8 +344,8 @@ it. Leaves the codebase cleaner than you found it.
 ### Stop letting test coverage drift on security paths
 
 New auth code without tests = doesn't merge. New tenant-scoping code
-without tests = doesn't merge. Hard rule, not aspiration. CI gates
-the 80 % threshold on the security packages.
+without tests = doesn't merge. Hard rule, not aspiration: the ci.yml
+`coverage` job blocks any security package that drops below 80 %.
 
 ### Stop writing prose where a checklist would do
 
