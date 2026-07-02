@@ -196,11 +196,19 @@ func TestTenantService(t *testing.T) {
 // (bypassing RLS) for delete-cascade assertions.
 func countRows(t *testing.T, env *servicetest.Env, ctx context.Context, table, tenantID string) int {
 	t.Helper()
+	// Map the closed set of known tables to fully-static query literals so no
+	// Go value is ever concatenated into SQL (pgx cannot bind an identifier).
+	var q string
+	switch table {
+	case "tenant_dek":
+		q = `SELECT count(*) FROM tenant_dek WHERE tenant_id = $1`
+	case "device_config_secrets":
+		q = `SELECT count(*) FROM device_config_secrets WHERE tenant_id = $1`
+	default:
+		t.Fatalf("countRows: unknown table %q", table)
+	}
 	var n int
-	// table is a test-controlled constant, not request input - pgx cannot bind
-	// an identifier, so concatenation is the only option and is safe here.
-	if err := env.Super.QueryRow(ctx,
-		`SELECT count(*) FROM `+table+` WHERE tenant_id = $1`, tenantID).Scan(&n); err != nil {
+	if err := env.Super.QueryRow(ctx, q, tenantID).Scan(&n); err != nil {
 		t.Fatalf("count %s: %v", table, err)
 	}
 	return n
