@@ -1,17 +1,13 @@
 package oauth
 
-// Contract tests for the OIDC client. Two harnesses keep this in the
-// default (Docker-free) test lane:
+// Contract tests for the OIDC client that run in the default (Docker-free)
+// lane: LoadProvider discovery, every Exchange branch, and the pure helpers,
+// all against an httptest OIDC provider (fakeIDP) that mints RS256 id_tokens.
+// The DB-backed Start / LookupState paths use a real Postgres and live in
+// oauth_integration_test.go (no mocked DB - AGENTS.md).
 //
-//	fakeIDP     - an httptest OIDC provider (discovery + token + JWKS +
-//	              userinfo) that mints RS256 id_tokens, exercising
-//	              LoadProvider discovery and every Exchange branch.
-//	fakeQuerier - a two-method stand-in for *pgxpool.Pool, exercising
-//	              Start (state/nonce/PKCE generation) and LookupState
-//	              (single-use + expiry) with no database.
-//
-// What must stay true is asserted directly; the inputs that must fail
-// (bad nonce, wrong aud/iss/key, expired/unknown state, open-redirect
+// What must stay true is asserted directly; the inputs that must fail (bad
+// nonce, wrong aud/iss/key, missing id_token/subject, open-redirect
 // return_to) each get their own case.
 
 import (
@@ -20,18 +16,14 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const testClientID = "test-client"
@@ -180,47 +172,6 @@ func loadTestProvider(t *testing.T, idp *fakeIDP) *Provider {
 	return p
 }
 
-// ── fakeQuerier ────────────────────────────────────────────────────────
-
-type execCall struct {
-	sql  string
-	args []any
-}
-
-type fakeQuerier struct {
-	execErr   error
-	execCalls []execCall
-	rowFn     func(dest ...any) error
-	querySQL  []string
-}
-
-func (f *fakeQuerier) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	f.execCalls = append(f.execCalls, execCall{sql: sql, args: args})
-	return pgconn.CommandTag{}, f.execErr
-}
-
-func (f *fakeQuerier) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
-	f.querySQL = append(f.querySQL, sql)
-	return fakeRow{fn: f.rowFn}
-}
-
-// insertArgs returns the args of the oauth_auth_requests INSERT (skipping
-// the best-effort sweep DELETE).
-func (f *fakeQuerier) insertArgs(t *testing.T) []any {
-	t.Helper()
-	for _, c := range f.execCalls {
-		if strings.Contains(c.sql, "INSERT INTO oauth_auth_requests") {
-			return c.args
-		}
-	}
-	t.Fatalf("no INSERT captured; calls=%d", len(f.execCalls))
-	return nil
-}
-
-type fakeRow struct{ fn func(dest ...any) error }
-
-func (r fakeRow) Scan(dest ...any) error { return r.fn(dest...) }
-
 // ── LoadProvider ───────────────────────────────────────────────────────
 
 func TestLoadProvider_RejectsNonOIDCKind(t *testing.T) {
@@ -234,132 +185,6 @@ func TestLoadProvider_Discovers(t *testing.T) {
 	idp := newFakeIDP(t)
 	if p := loadTestProvider(t, idp); p == nil {
 		t.Fatal("nil provider")
-	}
-}
-
-// ── Start: PKCE + state + open-redirect ────────────────────────────────
-
-func TestStart_PinsPKCEAndStateToPersistedRow(t *testing.T) {
-	idp := newFakeIDP(t)
-	p := loadTestProvider(t, idp)
-	q := &fakeQuerier{}
-
-	raw, err := p.Start(context.Background(), q, StartOpts{ReturnTo: "/dashboard"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse authorize URL: %v", err)
-	}
-	qp := u.Query()
-
-	if got := qp.Get("code_challenge_method"); got != "S256" {
-		t.Errorf("code_challenge_method = %q, want S256", got)
-	}
-	if qp.Get("code_challenge") == "" {
-		t.Error("code_challenge missing")
-	}
-	if qp.Get("state") == "" || qp.Get("nonce") == "" {
-		t.Error("state or nonce missing from authorize URL")
-	}
-	if got := qp.Get("redirect_uri"); got != "https://app.example.test/auth/oidc/kanidm/callback" {
-		t.Errorf("redirect_uri = %q, want derived callback", got)
-	}
-
-	// The persisted row must correspond to what the URL advertises.
-	args := q.insertArgs(t)
-	storedState, storedNonce, storedVerifier, storedReturn := args[0].(string), args[2].(string), args[3].(string), args[4].(string)
-	if storedState != qp.Get("state") {
-		t.Errorf("persisted state %q != URL state %q", storedState, qp.Get("state"))
-	}
-	if storedNonce != qp.Get("nonce") {
-		t.Errorf("persisted nonce %q != URL nonce %q", storedNonce, qp.Get("nonce"))
-	}
-	if pkceChallenge(storedVerifier) != qp.Get("code_challenge") {
-		t.Error("persisted pkce_verifier does not derive the URL code_challenge")
-	}
-	if storedReturn != "/dashboard" {
-		t.Errorf("persisted return_to = %q, want /dashboard", storedReturn)
-	}
-}
-
-func TestStart_UnsafeReturnToFallsBackToRoot(t *testing.T) {
-	idp := newFakeIDP(t)
-	p := loadTestProvider(t, idp)
-	for _, bad := range []string{"//evil.example.com", "https://evil.example.com", "", `/\evil`} {
-		q := &fakeQuerier{}
-		if _, err := p.Start(context.Background(), q, StartOpts{ReturnTo: bad}); err != nil {
-			t.Fatalf("Start(%q): %v", bad, err)
-		}
-		if got := q.insertArgs(t)[4].(string); got != "/" {
-			t.Errorf("return_to for %q = %q, want / (open-redirect guard)", bad, got)
-		}
-	}
-}
-
-func TestStart_PropagatesPersistError(t *testing.T) {
-	idp := newFakeIDP(t)
-	p := loadTestProvider(t, idp)
-	q := &fakeQuerier{execErr: errors.New("boom")}
-	if _, err := p.Start(context.Background(), q, StartOpts{}); err == nil || !strings.Contains(err.Error(), "persist state") {
-		t.Fatalf("err = %v, want 'persist state'", err)
-	}
-}
-
-// ── LookupState: single-use + expiry ───────────────────────────────────
-
-func TestLookupState_HitConsumesRow(t *testing.T) {
-	pid := uuid.New()
-	q := &fakeQuerier{rowFn: func(dest ...any) error {
-		*(dest[0].(*uuid.UUID)) = pid
-		*(dest[1].(*string)) = "the-nonce"
-		*(dest[2].(*string)) = "the-verifier"
-		*(dest[3].(*string)) = "/back"
-		*(dest[4].(**uuid.UUID)) = nil
-		*(dest[5].(*time.Time)) = time.Now().Add(time.Minute)
-		return nil
-	}}
-	pr, err := LookupState(context.Background(), q, "some-state")
-	if err != nil {
-		t.Fatalf("LookupState: %v", err)
-	}
-	if pr.ProviderID != pid || pr.Nonce != "the-nonce" || pr.PKCEVerifier != "the-verifier" || pr.ReturnTo != "/back" {
-		t.Errorf("resolved row = %+v", pr)
-	}
-	// Single-use: the read must be a deleting read.
-	if len(q.querySQL) != 1 || !strings.Contains(q.querySQL[0], "DELETE FROM oauth_auth_requests") {
-		t.Errorf("lookup query = %v, want a DELETE...RETURNING", q.querySQL)
-	}
-}
-
-func TestLookupState_UnknownReturnsSentinel(t *testing.T) {
-	q := &fakeQuerier{rowFn: func(_ ...any) error { return pgx.ErrNoRows }}
-	if _, err := LookupState(context.Background(), q, "nope"); !errors.Is(err, ErrUnknownState) {
-		t.Fatalf("err = %v, want ErrUnknownState", err)
-	}
-}
-
-func TestLookupState_ExpiredReturnsSentinel(t *testing.T) {
-	q := &fakeQuerier{rowFn: func(dest ...any) error {
-		*(dest[0].(*uuid.UUID)) = uuid.New()
-		*(dest[1].(*string)) = "n"
-		*(dest[2].(*string)) = "v"
-		*(dest[3].(*string)) = "/"
-		*(dest[4].(**uuid.UUID)) = nil
-		*(dest[5].(*time.Time)) = time.Now().Add(-time.Minute) // already expired
-		return nil
-	}}
-	if _, err := LookupState(context.Background(), q, "stale"); !errors.Is(err, ErrUnknownState) {
-		t.Fatalf("expired err = %v, want ErrUnknownState", err)
-	}
-}
-
-func TestLookupState_PropagatesOtherError(t *testing.T) {
-	q := &fakeQuerier{rowFn: func(_ ...any) error { return errors.New("db down") }}
-	_, err := LookupState(context.Background(), q, "x")
-	if err == nil || errors.Is(err, ErrUnknownState) || !strings.Contains(err.Error(), "db down") {
-		t.Fatalf("err = %v, want raw db error", err)
 	}
 }
 

@@ -6,8 +6,9 @@
 # security paths"): every package on the auth / CSRF / OAuth / pkg-pki
 # path stays at or above the threshold. Each package is measured against
 # its own statements via -coverpkg + -coverprofile; the run fails if any
-# falls below THRESHOLD. pkg/service (auth.go) is deliberately absent: it
-# is covered by the integration lane (testcontainers), not this lane.
+# falls below THRESHOLD. Runs with -tags integration so oauth's DB-backed
+# Start/LookupState count (real Postgres via testcontainers - needs Docker).
+# pkg/service (auth.go) is deliberately absent: large surface, gated separately.
 #
 # Usage:
 #   scripts/check-coverage.sh            # gate at the default threshold
@@ -26,7 +27,7 @@ profile="$(mktemp)"
 trap 'rm -f "$profile"' EXIT
 
 for p in "${PKGS[@]}"; do
-  go test -covermode=set \
+  go test -tags integration -covermode=set -timeout 300s \
     -coverpkg="./pkg/${p}/..." \
     -coverprofile="$profile" \
     "./pkg/${p}/..." >/dev/null

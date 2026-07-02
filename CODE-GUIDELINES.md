@@ -188,9 +188,10 @@ remain true. It runs in CI on every PR.
 
 The `coverage` job in ci.yml enforces 80 %+ statement coverage on
 `pkg/csrf`, `pkg/oauth`, `pkg/pki`, and `pkg/authmw` via
-`scripts/check-coverage.sh` (run it locally with `make cover`).
-`pkg/service/auth.go` is exercised by the integration lane, not this
-gate.
+`scripts/check-coverage.sh` (run it locally with `make cover`). It runs
+`-tags integration` so oauth's DB-backed paths count against a real
+Postgres (testcontainers, no mocked DB). `pkg/service/auth.go` is not in
+the gated set: larger surface, gated separately.
 
 ---
 

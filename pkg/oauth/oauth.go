@@ -30,7 +30,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
 )
 
@@ -102,15 +102,6 @@ func LoadProvider(ctx context.Context, row ProviderRow, redirectBase string) (*P
 	}, nil
 }
 
-// querier is the subset of *pgxpool.Pool (and pgx.Tx) that the auth-request
-// state store needs. Narrowing to it keeps Start/LookupState unit-testable
-// without a live database; production callers pass the BYPASSRLS pool
-// (pkg/service.OAuthService) unchanged.
-type querier interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
 // StartOpts controls the authorize-redirect initiation.
 type StartOpts struct {
 	// ReturnTo is where the user should land after successful callback.
@@ -125,7 +116,7 @@ type StartOpts struct {
 // oauth_auth_requests, and returns the authorize URL the caller should
 // redirect to. Expired rows are swept best-effort on every insert.
 // in: ctx, db pool, StartOpts. out: authorize URL, error.
-func (p *Provider) Start(ctx context.Context, db querier, opts StartOpts) (string, error) {
+func (p *Provider) Start(ctx context.Context, db *pgxpool.Pool, opts StartOpts) (string, error) {
 	state, err := randomURLSafe(32)
 	if err != nil {
 		return "", fmt.Errorf("oauth: state: %w", err)
@@ -180,7 +171,7 @@ var ErrUnknownState = errors.New("oauth: unknown or expired state")
 // LookupState consumes a pending auth-request row and returns its context.
 // The row is deleted on success so state is single-use.
 // in: ctx, db, state string. out: PendingRequest, error.
-func LookupState(ctx context.Context, db querier, state string) (*PendingRequest, error) {
+func LookupState(ctx context.Context, db *pgxpool.Pool, state string) (*PendingRequest, error) {
 	var pr PendingRequest
 	var expiresAt time.Time
 	err := db.QueryRow(ctx, `

@@ -72,12 +72,12 @@ test:
 test-integration:
 	$(GO) test -tags integration -timeout 600s ./...
 
-# Per-package coverage for the unit-tested security packages. The 80%+
-# target is enforced in CI (ci.yml, coverage lane); run this locally to
-# check before push. pkg/service (auth.go) is covered by the integration
-# lane, not this one.
+# Per-package coverage for the security packages, enforced at 80%+ in CI
+# (ci.yml coverage job) via scripts/check-coverage.sh. Runs the integration
+# lane so oauth's DB-backed Start/LookupState count - real Postgres via
+# testcontainers, needs Docker. pkg/service (auth.go) is not gated here.
 cover:
-	$(GO) test -cover ./pkg/csrf/... ./pkg/oauth/... ./pkg/pki/... ./pkg/authmw/...
+	$(GO) test -tags integration -cover -timeout 300s ./pkg/csrf/... ./pkg/oauth/... ./pkg/pki/... ./pkg/authmw/...
 
 # Remove build artifacts.
 clean:

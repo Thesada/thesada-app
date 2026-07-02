@@ -53,8 +53,8 @@ jobs:
       - name: Run unit tests
         run: make test
 
-  # Enforce the 80%+ statement-coverage floor on the security-sensitive
-  # packages (csrf, oauth, pki, authmw). Docker-free unit lane.
+  # 80%+ coverage floor on the security packages (csrf, oauth, pki, authmw).
+  # Runs -tags integration; testcontainers uses ubuntu-latest's Docker daemon.
   coverage:
     runs-on: ubuntu-latest
     steps:
