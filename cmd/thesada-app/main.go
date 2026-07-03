@@ -19,6 +19,7 @@ import (
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/config"
 	"thesada.app/app/pkg/db"
+	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/mailer"
 	"thesada.app/app/pkg/mqtt"
 	"thesada.app/app/pkg/pki"
@@ -260,8 +261,10 @@ func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub
 	root.Handle("/", web)
 
 	return &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           root,
+		Addr: cfg.HTTPAddr,
+		// One wrap covers both frontends: browser security headers on every
+		// web, API, and WS-upgrade response (see pkg/httpsec/headers.go).
+		Handler:           httpsec.SecurityHeaders(root),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 }
