@@ -11,9 +11,38 @@ import (
 	"net/http"
 	"strings"
 
+	"thesada.app/app/pkg/csrf"
 	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/service"
 )
+
+// APICSRFGuard supplies what the cookie-branch CSRF check needs: the app's public
+// base URL (for the same-origin fallback) and the cookie-signing secret (for the
+// double-submit token escape hatch). It is consulted only for cookie-authed
+// unsafe methods; the bearer path never reaches it.
+type APICSRFGuard struct {
+	BaseURL string
+	Secret  []byte
+}
+
+// allowCookieUnsafe reports whether a cookie-authed unsafe request proves
+// same-origin intent - a browser Fetch-Metadata / Origin signal, or a valid
+// double-submit CSRF token - and may therefore mutate state.
+// in: request. out: true if the mutation is allowed.
+func (g APICSRFGuard) allowCookieUnsafe(r *http.Request) bool {
+	return httpsec.SameOriginUnsafe(r, g.BaseURL) || csrf.HasValidToken(r, g.Secret)
+}
+
+// isUnsafeMethod reports whether the method mutates state and thus needs a CSRF
+// check on the cookie-authed API path (the bearer path is exempt).
+// in: method. out: true for POST/PUT/PATCH/DELETE.
+func isUnsafeMethod(m string) bool {
+	switch m {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	}
+	return false
+}
 
 // APIMiddleware resolves the caller for a JSON API request and stores the
 // resolved *service.Session under the same context key the web Middleware uses
@@ -27,7 +56,12 @@ import (
 // allowed. A rotated session cookie is refreshed on the response, same as the
 // web path. Bearer-authed tokens carry no impersonation (API tokens are
 // user-bound), so EffectiveTenantID resolves to the token owner's tenant.
-// in: AuthService, ApiTokenService. out: http.Handler wrapper.
+//
+// Cookie-authed unsafe methods (POST/PUT/PATCH/DELETE) additionally pass through
+// csrfGuard: SameSite=Lax does not stop a same-site sibling subdomain, so the
+// request must prove same-origin intent (Fetch-Metadata / Origin, or a
+// double-submit CSRF token) or it is rejected 403. The bearer path is exempt.
+// in: AuthService, ApiTokenService, cookie-path CSRF guard. out: http.Handler wrapper.
 // TokenValidator resolves a raw bearer token into the owning *service.User.
 // *service.ApiTokenService satisfies it; the interface keeps APIMiddleware
 // unit-testable without a database.
@@ -35,7 +69,7 @@ type TokenValidator interface {
 	ValidateToken(token string) (*service.User, error)
 }
 
-func APIMiddleware(auth SessionValidator, tokens TokenValidator) func(http.Handler) http.Handler {
+func APIMiddleware(auth SessionValidator, tokens TokenValidator, csrfGuard APICSRFGuard) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if tok := BearerToken(r); tok != "" {
@@ -47,6 +81,14 @@ func APIMiddleware(auth SessionValidator, tokens TokenValidator) func(http.Handl
 			}
 			if c, err := r.Cookie(CookieName); err == nil && c.Value != "" {
 				if sess, err := auth.ValidateSession(c.Value); err == nil {
+					// SameSite=Lax leaves a same-site sibling-subdomain CSRF gap and
+					// readJSON ignores Content-Type, so a cookie-authed unsafe method
+					// must additionally prove same-origin intent. Bearer callers never
+					// reach here, so programmatic clients are unaffected.
+					if isUnsafeMethod(r.Method) && !csrfGuard.allowCookieUnsafe(r) {
+						writeJSONError(w, http.StatusForbidden, "csrf verification required")
+						return
+					}
 					if sess.NewToken != "" {
 						SetSessionCookie(w, sess.NewToken, sess.NewExpires, httpsec.RequestIsSecure(r))
 					}

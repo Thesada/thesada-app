@@ -122,6 +122,22 @@ func validToken(secret []byte, value string) bool {
 	return subtle.ConstantTimeCompare([]byte(sig), []byte(sign(secret, body))) == 1
 }
 
+// HasValidToken reports whether the request carries a signed CSRF token in the
+// X-CSRF-Token header that both verifies under secret and matches the
+// double-submit cookie. It mints nothing and writes no cookie: the /api/v1 tree
+// uses it as the interoperable escape hatch so a cookie-authed browser client
+// can prove same-origin intent on an unsafe method without routing through the
+// HTMX Middleware.
+// in: request, HMAC secret. out: true if a valid matching token is present.
+func HasValidToken(r *http.Request, secret []byte) bool {
+	c, err := r.Cookie(CookieName)
+	if err != nil || !validToken(secret, c.Value) {
+		return false
+	}
+	submitted := r.Header.Get(HeaderName)
+	return submitted != "" && subtle.ConstantTimeCompare([]byte(submitted), []byte(c.Value)) == 1
+}
+
 // isUnsafe reports whether the HTTP method mutates state and must be verified.
 // in: method string. out: true for POST/PUT/PATCH/DELETE.
 func isUnsafe(method string) bool {

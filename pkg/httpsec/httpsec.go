@@ -48,6 +48,40 @@ func OriginAllowed(r *http.Request, baseURL string) bool {
 	return strings.EqualFold(o.Scheme, b.Scheme) && strings.EqualFold(o.Host, b.Host)
 }
 
+// SameOriginUnsafe reports whether an unsafe (state-changing) request demonstrably
+// originates from the app's own pages. It trusts the browser-set Fetch Metadata
+// header Sec-Fetch-Site when present - only same-origin / none pass; same-site is
+// rejected because a sibling subdomain riding a SameSite=Lax cookie is exactly
+// the gap being closed - and otherwise falls back to an exact Origin scheme+host
+// match against baseURL. Unlike OriginAllowed, a missing Origin does NOT pass: a
+// cookie-authed mutation carrying neither signal is treated as forgeable. baseURL
+// is the app's public base (config.BaseURL) so the compare honors the public
+// scheme even when a proxy speaks plain HTTP to the app.
+// in: request, app public base URL. out: true if same-origin intent is provable.
+func SameOriginUnsafe(r *http.Request, baseURL string) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	case "same-site", "cross-site":
+		return false
+	}
+	// No Fetch Metadata (older browser, or a proxy stripped it): require an exact
+	// Origin match. An absent Origin fails closed for unsafe methods.
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	o, err := url.Parse(origin)
+	if err != nil || o.Host == "" {
+		return false
+	}
+	b, err := url.Parse(baseURL)
+	if err != nil || b.Host == "" {
+		return false
+	}
+	return strings.EqualFold(o.Scheme, b.Scheme) && strings.EqualFold(o.Host, b.Host)
+}
+
 // ClientIP resolves the originating client address for logging and per-IP rate
 // limiting. When the immediate peer is one of the trusted proxy networks it
 // walks X-Forwarded-For right-to-left and returns the first non-trusted hop -
