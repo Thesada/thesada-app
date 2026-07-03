@@ -50,7 +50,13 @@ func (s *Server) handleAdminDeviceConfig(w http.ResponseWriter, r *http.Request)
 	}
 
 	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
-	if err != nil || device == nil {
+	if err != nil {
+		// A real backend error must not masquerade as 404 (AGENTS.md: fail loud).
+		slog.Error("device lookup failed", "device", id, "err", err)
+		http.Error(w, "device lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -110,7 +116,13 @@ func (s *Server) handleAdminDeviceConfigCmd(w http.ResponseWriter, r *http.Reque
 	}
 
 	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
-	if err != nil || device == nil {
+	if err != nil {
+		// A real backend error must not masquerade as 404 (AGENTS.md: fail loud).
+		slog.Error("device lookup failed", "device", id, "err", err)
+		http.Error(w, "device lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -273,7 +285,13 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 	}
 
 	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
-	if err != nil || device == nil {
+	if err != nil {
+		// A real backend error must not masquerade as 404 (AGENTS.md: fail loud).
+		slog.Error("device lookup failed", "device", id, "err", err)
+		http.Error(w, "device lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -402,7 +420,13 @@ func (s *Server) handleAdminDeviceConfigSnapshot(w http.ResponseWriter, r *http.
 		return
 	}
 	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
-	if err != nil || device == nil {
+	if err != nil {
+		// A real backend error must not masquerade as 404 (AGENTS.md: fail loud).
+		slog.Error("device lookup failed", "device", id, "err", err)
+		http.Error(w, "device lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -452,7 +476,13 @@ func (s *Server) handleAdminDeviceConfigHistory(w http.ResponseWriter, r *http.R
 	// Resolve the device's tenant so HistoryPage can scope under RLS.
 	// Super-admin handler - GetByIDAny is the cross-tenant lookup.
 	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
-	if err != nil || device == nil {
+	if err != nil {
+		// A real backend error must not masquerade as 404 (AGENTS.md: fail loud).
+		slog.Error("device lookup failed", "device", id, "err", err)
+		http.Error(w, "device lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
 		http.NotFound(w, r)
 		return
 	}

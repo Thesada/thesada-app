@@ -173,7 +173,14 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		device, err := s.services.Devices.GetByIDAny(r.Context(), id)
-		if err != nil || device == nil {
+		if err != nil {
+			// Log a real backend error so a DB outage isn't silently counted as
+			// "not found" (matches the bulk-ota loop; the counter still advances).
+			slog.Warn("bulk resolve: device lookup failed", "id", id, "err", err)
+			lookupFailed++
+			continue
+		}
+		if device == nil {
 			lookupFailed++
 			continue
 		}
