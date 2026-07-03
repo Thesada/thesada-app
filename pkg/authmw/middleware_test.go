@@ -156,7 +156,7 @@ func TestAPIMiddleware_BearerValid_InjectsUserWithoutCookie(t *testing.T) {
 	var got *service.Session
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/devices", nil)
 	req.Header.Set("Authorization", "Bearer good-token")
-	APIMiddleware(fa, &fakeTokens{user: u})(captureSession(&got)).ServeHTTP(httptest.NewRecorder(), req)
+	APIMiddleware(fa, &fakeTokens{user: u}, APICSRFGuard{})(captureSession(&got)).ServeHTTP(httptest.NewRecorder(), req)
 	if got == nil || got.User != u {
 		t.Fatalf("injected user = %+v, want token owner", got)
 	}
@@ -171,7 +171,7 @@ func TestAPIMiddleware_BearerInvalid_FallsBackToCookie(t *testing.T) {
 	var got *service.Session
 	req := withCookie(httptest.NewRequest(http.MethodGet, "/api/v1/devices", nil), "cookie-tok")
 	req.Header.Set("Authorization", "Bearer bad-token")
-	APIMiddleware(fa, &fakeTokens{err: errors.New("revoked")})(captureSession(&got)).ServeHTTP(httptest.NewRecorder(), req)
+	APIMiddleware(fa, &fakeTokens{err: errors.New("revoked")}, APICSRFGuard{})(captureSession(&got)).ServeHTTP(httptest.NewRecorder(), req)
 	if got != sess {
 		t.Errorf("session = %+v, want cookie fallback", got)
 	}
@@ -183,7 +183,7 @@ func TestAPIMiddleware_BearerInvalid_FallsBackToCookie(t *testing.T) {
 func TestAPIMiddleware_NoCredentials_Anonymous(t *testing.T) {
 	var got *service.Session
 	rec := httptest.NewRecorder()
-	APIMiddleware(&fakeAuth{}, &fakeTokens{})(captureSession(&got)).ServeHTTP(
+	APIMiddleware(&fakeAuth{}, &fakeTokens{}, APICSRFGuard{})(captureSession(&got)).ServeHTTP(
 		rec, httptest.NewRequest(http.MethodGet, "/api/v1/devices", nil))
 	if got != nil {
 		t.Errorf("session = %+v, want anonymous", got)
@@ -200,7 +200,7 @@ func TestAPIMiddleware_CookieRotation_RefreshesCookie(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := withCookie(httptest.NewRequest(http.MethodGet, "/api/v1/devices", nil), "old")
 	req.Header.Set("X-Forwarded-Proto", "https")
-	APIMiddleware(&fakeAuth{sess: sess}, &fakeTokens{})(okHandler()).ServeHTTP(rec, req)
+	APIMiddleware(&fakeAuth{sess: sess}, &fakeTokens{}, APICSRFGuard{})(okHandler()).ServeHTTP(rec, req)
 	c := cookieNamed(rec.Result(), CookieName)
 	if c == nil || c.Value != "rotated" || !c.Secure {
 		t.Errorf("rotation cookie = %+v, want refreshed+secure", c)

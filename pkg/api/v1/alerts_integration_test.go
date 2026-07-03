@@ -33,7 +33,7 @@ func del(srv http.Handler, path string, hdr map[string]string) *httptest.Respons
 
 func TestAlertHandlers(t *testing.T) {
 	env := servicetest.Start(t)
-	srv := authmw.APIMiddleware(env.Services.Auth, env.Services.ApiTokens)(apiv1.New(env.Cfg, env.Services, nil))
+	srv := authmw.APIMiddleware(env.Services.Auth, env.Services.ApiTokens, authmw.APICSRFGuard{})(apiv1.New(env.Cfg, env.Services, nil))
 	ctx := context.Background()
 
 	const tA, tB = "apialert-a", "apialert-b"

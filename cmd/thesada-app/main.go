@@ -247,7 +247,10 @@ func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub
 	api := apiv1.New(cfg, services, ca)
 	// Resolve a bearer token OR the session cookie so the JSON per-route guards
 	// (authmw.RequireAuthJSON / RequireSuperAdminJSON) see a *Session in context.
-	apiWithAuth := authmw.APIMiddleware(services.Auth, services.ApiTokens)(api)
+	apiWithAuth := authmw.APIMiddleware(services.Auth, services.ApiTokens, authmw.APICSRFGuard{
+		BaseURL: cfg.BaseURL,
+		Secret:  []byte(cfg.CookieSecret),
+	})(api)
 	root.Handle("/api/v1/", http.StripPrefix("/api/v1", apiWithAuth))
 
 	wsChain := authmw.Middleware(services.Auth)(authmw.RequireAuth(hub.ServeHTTP))

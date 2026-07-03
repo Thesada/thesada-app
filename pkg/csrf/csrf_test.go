@@ -147,6 +147,51 @@ func TestMiddleware_RejectsMismatchedToken(t *testing.T) {
 	}
 }
 
+// TestHasValidToken covers the /api/v1 escape hatch: a header-echoed, validly
+// signed, matching token passes; a missing header, absent cookie, planted
+// (unsigned) cookie, or mismatched header all fail.
+func TestHasValidToken(t *testing.T) {
+	tok, err := mint(testSecret)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	other, err := mint(testSecret)
+	if err != nil {
+		t.Fatalf("mint other: %v", err)
+	}
+
+	newReq := func(cookieVal, header string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/x", nil)
+		if cookieVal != "" {
+			r.AddCookie(&http.Cookie{Name: CookieName, Value: cookieVal})
+		}
+		if header != "" {
+			r.Header.Set(HeaderName, header)
+		}
+		return r
+	}
+
+	cases := []struct {
+		name   string
+		cookie string
+		header string
+		want   bool
+	}{
+		{"matching signed token", tok, tok, true},
+		{"no header", tok, "", false},
+		{"no cookie", "", tok, false},
+		{"planted unsigned cookie", "a.b", "a.b", false},
+		{"header mismatches cookie", tok, other, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := HasValidToken(newReq(c.cookie, c.header), testSecret); got != c.want {
+				t.Errorf("HasValidToken = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // findCookie returns the csrf cookie from a response, or nil.
 func findCookie(cs []*http.Cookie) *http.Cookie {
 	for _, c := range cs {

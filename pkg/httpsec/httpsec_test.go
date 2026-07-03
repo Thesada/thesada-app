@@ -128,3 +128,44 @@ func TestClientIP(t *testing.T) {
 		})
 	}
 }
+
+// TestSameOriginUnsafe covers the cookie-authed unsafe-method gate: the
+// Fetch-Metadata header decides when present (same-origin/none pass, same-site/
+// cross-site fail), and otherwise an exact Origin scheme+host match against
+// baseURL is required - a missing or foreign Origin fails closed.
+func TestSameOriginUnsafe(t *testing.T) {
+	const base = "https://app.example.com"
+	cases := []struct {
+		name      string
+		fetchSite string
+		origin    string
+		want      bool
+	}{
+		{"fetch same-origin", "same-origin", "", true},
+		{"fetch none", "none", "", true},
+		{"fetch same-site sibling", "same-site", "https://evil.example.com", false},
+		{"fetch cross-site", "cross-site", "https://evil.com", false},
+		{"no fetch, origin match", "", "https://app.example.com", true},
+		{"no fetch, origin host mismatch", "", "https://evil.example.com", false},
+		{"no fetch, origin scheme mismatch", "", "http://app.example.com", false},
+		{"no fetch, origin absent", "", "", false},
+		{"no fetch, origin suffix trick", "", "https://app.example.com.evil.com", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, err := http.NewRequest(http.MethodPost, base+"/api/v1/x", nil)
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			if c.fetchSite != "" {
+				r.Header.Set("Sec-Fetch-Site", c.fetchSite)
+			}
+			if c.origin != "" {
+				r.Header.Set("Origin", c.origin)
+			}
+			if got := SameOriginUnsafe(r, base); got != c.want {
+				t.Errorf("SameOriginUnsafe = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
