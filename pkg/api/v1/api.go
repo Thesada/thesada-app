@@ -101,7 +101,13 @@ func (s *Server) handleDevicePair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
-	if err != nil || device == nil {
+	if err != nil {
+		// A real backend error must return 500, not a 404 that hides the outage.
+		slog.Error("api pair: device lookup failed", "device", id, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "device lookup failed"})
+		return
+	}
+	if device == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
 		return
 	}
