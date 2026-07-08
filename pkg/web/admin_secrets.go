@@ -7,8 +7,12 @@
 package web
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -16,11 +20,70 @@ import (
 	"thesada.app/app/pkg/service"
 )
 
-// secretFieldStatus is one row of the write-only form: the field key and
-// whether a value is currently stored. The value itself is never carried.
+// secretInfoTimeout bounds the live secret.info round-trip so an offline
+// device never hangs the secrets page - it just renders device state unknown.
+const secretInfoTimeout = 5 * time.Second
+
+// secretFieldStatus is one row of the write-only form: the storage field, its
+// app-store set/unset state, and the live device NVS state ("nvs", "config",
+// "none", or "" when the device was unreachable). The value is never carried.
 type secretFieldStatus struct {
-	Field string
-	Set   bool
+	Field    string
+	Set      bool
+	DevState string
+}
+
+// parseSecretInfo turns firmware `secret.info` output into a map of firmware
+// field key -> state token. Each line is "<field>  <state>" (e.g.
+// "mqtt.password nvs", "wifi.password:HomeNet config/none"); the state is the
+// last whitespace-separated token, normalized to "nvs" or "config".
+// in: output lines. out: map[fwField]state.
+func parseSecretInfo(output []string) map[string]string {
+	states := make(map[string]string, len(output))
+	for _, line := range output {
+		toks := strings.Fields(line)
+		if len(toks) < 2 {
+			continue
+		}
+		field := toks[0]
+		state := toks[len(toks)-1]
+		if strings.HasPrefix(state, "nvs") {
+			states[field] = "nvs"
+		} else {
+			states[field] = "config"
+		}
+	}
+	return states
+}
+
+// deviceSecretState queries the device over MQTT for its live per-field NVS
+// state, keyed by storage field. Bounded by secretInfoTimeout; a timeout or
+// error yields (nil, false) and the page renders state unknown rather than
+// failing. in: ctx, device, wifi ssid. out: map[storageField]state, reachable.
+func (s *Server) deviceSecretState(ctx context.Context, device *service.Device, ssid string) (map[string]string, bool) {
+	if s.mqtt == nil {
+		return nil, false
+	}
+	cctx, cancel := context.WithTimeout(ctx, secretInfoTimeout)
+	defer cancel()
+	resp, err := s.mqtt.CLIRequest(cctx, s.deviceTopicPrefix(device), "secret.info", "")
+	if err != nil || resp == nil || !resp.OK {
+		return nil, false
+	}
+	byFwField := parseSecretInfo(resp.Output)
+	out := make(map[string]string, len(service.SecretFields))
+	for _, f := range service.SecretFields {
+		fwField, ok := service.FirmwareSecretField(f, ssid)
+		if !ok {
+			continue // wifi.password with no known SSID - cannot match a device key
+		}
+		if st, present := byFwField[fwField]; present {
+			out[f] = st
+		} else {
+			out[f] = "none"
+		}
+	}
+	return out, true
 }
 
 // handleAdminDeviceSecrets renders the write-only secrets page for a device:
@@ -53,19 +116,91 @@ func (s *Server) handleAdminDeviceSecrets(w http.ResponseWriter, r *http.Request
 		http.Error(w, "status error", http.StatusInternalServerError)
 		return
 	}
+	// Live device NVS state per field (best-effort; empty when unreachable).
+	// Only queried with the feature on - a KEK-off deployment never provisions.
+	var devState map[string]string
+	reachable := false
+	if s.services.Secrets.Enabled() {
+		ssid := s.deviceWifiSSID(r.Context(), device)
+		devState, reachable = s.deviceSecretState(r.Context(), device, ssid)
+	}
+
 	// Drive display order from SecretFields (Status is an unordered map).
 	fields := make([]secretFieldStatus, 0, len(service.SecretFields))
 	for _, f := range service.SecretFields {
-		fields = append(fields, secretFieldStatus{Field: f, Set: status[f]})
+		fields = append(fields, secretFieldStatus{Field: f, Set: status[f], DevState: devState[f]})
 	}
 
 	s.render(w, r, "admin-device-secrets.html", map[string]interface{}{
-		"Device":  device,
-		"Enabled": s.services.Secrets.Enabled(),
-		"Fields":  fields,
-		"Ok":      r.URL.Query().Get("ok"),
-		"Error":   r.URL.Query().Get("error"),
+		"Device":         device,
+		"Enabled":        s.services.Secrets.Enabled(),
+		"Fields":         fields,
+		"DeviceReported": reachable,
+		"Ok":             r.URL.Query().Get("ok"),
+		"Error":          r.URL.Query().Get("error"),
 	})
+}
+
+// handleAdminDeviceSecretsProvision pushes every stored secret to the device
+// NVS over MQTT (the same path the pair flow uses), then PRG-redirects with a
+// summary. For an already-paired device this is the action the pair flow would
+// otherwise be the only source of. No value is logged.
+// in: writer, POST /admin/devices/{id}/secrets/provision. out: 302 to page.
+func (s *Server) handleAdminDeviceSecretsProvision(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
+	if err != nil {
+		slog.Error("device lookup failed", "device", id, "err", err)
+		http.Error(w, "device lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
+		http.NotFound(w, r)
+		return
+	}
+	dest := "/admin/devices/" + device.ID.String() + "/secrets"
+
+	if !s.services.Secrets.Enabled() {
+		http.Redirect(w, r, dest+"?error=secrets+disabled", http.StatusFound)
+		return
+	}
+
+	topicPrefix := s.deviceTopicPrefix(device)
+	ssid := s.deviceWifiSSID(r.Context(), device)
+	outcome := provisionDeviceSecrets(service.SecretFields, ssid,
+		func(field string) (string, bool, error) {
+			return s.services.Secrets.Reveal(r.Context(), device.TenantID, device.ID, field)
+		},
+		func(fwField, value string) (string, bool) {
+			return s.pushSecret(r.Context(), topicPrefix, fwField, value)
+		},
+	)
+
+	if outcome.AbortMsg != "" {
+		slog.Error("device_secret.provision aborted",
+			"tenant", device.TenantID, "device", device.DeviceID, "reason", outcome.AbortMsg)
+		http.Redirect(w, r, dest+"?error="+url.QueryEscape(outcome.AbortMsg), http.StatusFound)
+		return
+	}
+
+	user := authmw.CurrentUser(r)
+	actor := ""
+	if user != nil {
+		actor = user.Email
+	}
+	slog.Info("device_secret.state_change", "action", "provision",
+		"tenant", device.TenantID, "device", device.DeviceID,
+		"pushed", len(outcome.Pushed), "actor", actor)
+
+	msg := "provisioned+" + itoa(len(outcome.Pushed))
+	if len(outcome.SkippedUnset)+len(outcome.SkippedNoSSID) > 0 {
+		msg += "+(skipped+" + itoa(len(outcome.SkippedUnset)+len(outcome.SkippedNoSSID)) + ")"
+	}
+	http.Redirect(w, r, dest+"?ok="+msg, http.StatusFound)
 }
 
 // handleAdminDeviceSecretsSet stores (or overwrites) one secret value, then
