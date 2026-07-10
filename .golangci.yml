@@ -5,7 +5,7 @@
 #   - keep CI under 60s; no slow analyzers
 #
 # Run locally:  golangci-lint run ./...
-# Run in CI:    .forgejo/workflows/security.yml job 'golangci-lint'
+# Run in CI:    .github/workflows/ci.yml job 'lint'
 version: "2"
 
 run:
