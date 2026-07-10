@@ -1,6 +1,6 @@
 # Failure modes: alert ingest + delivery (app)
 
-`failure -> detection -> recovery` for device -> app ingest and app -> notification-channel delivery (`pkg/mqtt/mqtt_ingest.go`, `pkg/alerts/alerts.go`). The firmware publish side is [`../../../thesada-fw/docs/failure-modes/alerts.md`](../../../thesada-fw/docs/failure-modes/alerts.md). A blank recovery cell is a gap.
+`failure -> detection -> recovery` for device -> app ingest and app -> notification-channel delivery (`pkg/mqtt/mqtt_ingest.go`, `pkg/alerts/alerts.go`). The firmware publish side is [`thesada-fw/docs/failure-modes/alerts.md`](https://github.com/Thesada/thesada-fw/blob/main/docs/failure-modes/alerts.md). A blank recovery cell is a gap.
 
 | Failure | Detection | Recovery |
 |---------|-----------|----------|
@@ -21,4 +21,4 @@
 
 ---
 
-Related: [`../operator-role.md`](../operator-role.md), the fw side [`../../../thesada-fw/docs/failure-modes/alerts.md`](../../../thesada-fw/docs/failure-modes/alerts.md), [`../security-review-checklist.md`](../security-review-checklist.md).
+Related: [`../operator-role.md`](../operator-role.md), the fw side [`thesada-fw/docs/failure-modes/alerts.md`](https://github.com/Thesada/thesada-fw/blob/main/docs/failure-modes/alerts.md), [`../security-review-checklist.md`](../security-review-checklist.md).

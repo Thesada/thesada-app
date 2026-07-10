@@ -67,4 +67,4 @@ Assume broker credentials and/or the dynsec store are untrusted.
 
 ---
 
-Related: [`operator-role.md`](operator-role.md), [`failure-modes/`](failure-modes/), the firmware side [`../../thesada-fw/docs/runbook.md`](../../thesada-fw/docs/runbook.md).
+Related: [`operator-role.md`](operator-role.md), [`failure-modes/`](failure-modes/), the firmware side [`thesada-fw/docs/runbook.md`](https://github.com/Thesada/thesada-fw/blob/main/docs/runbook.md).

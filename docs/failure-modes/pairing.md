@@ -1,6 +1,6 @@
 # Failure modes: device pairing (app side)
 
-`failure -> detection -> recovery` for the app side of the fw pairing flow (`pkg/web/admin_pair.go`). The firmware side lives in [`../../../thesada-fw/docs/failure-modes/mqtt.md`](../../../thesada-fw/docs/failure-modes/mqtt.md). A blank recovery cell is a gap.
+`failure -> detection -> recovery` for the app side of the fw pairing flow (`pkg/web/admin_pair.go`). The firmware side lives in [`thesada-fw/docs/failure-modes/mqtt.md`](https://github.com/Thesada/thesada-fw/blob/main/docs/failure-modes/mqtt.md). A blank recovery cell is a gap.
 
 There is **no app-side bearer pairing token**: pairing is gated by super-admin session auth (404 to hide the surface), and device identity is asserted by MQTT `device_id`. The anti-spoof control is the cross-tenant pairing guard `FindActivePairingTenant` (`pkg/service/certificate.go:116`), which logs + drops on tenant mismatch.
 
