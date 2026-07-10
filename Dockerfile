@@ -4,7 +4,7 @@
 # static, tailwind CSS, SQL migrations) are go:embed'd, so the runtime image is
 # just the single binary + CA roots - no Go, no shell, no assets on disk.
 
-ARG GO_VERSION=1.25.11
+ARG GO_VERSION=1.25.12
 
 # ---- build -----------------------------------------------------------------
 # -bookworm (buildpack-deps based) ships curl + ca-certificates, which `make
