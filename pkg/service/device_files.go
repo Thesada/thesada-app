@@ -41,7 +41,7 @@ func (s *DeviceFilesService) Upsert(ctx context.Context, tenantID string, device
 	// write + ingest path funnels through here, so this is the one chokepoint.
 	// sha256hex is left as the device fingerprint (drift key) - blanking the
 	// stored copy must not read as drift - and the real values live encrypted
-	// in device_config_secrets (#443).
+	// in device_config_secrets.
 	if path == "config.json" || path == "/config.json" {
 		blanked, _, err := blankConfigSecrets(content)
 		if err != nil {

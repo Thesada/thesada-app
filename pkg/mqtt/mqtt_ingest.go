@@ -166,7 +166,7 @@ func (c *Client) handleAlert(tenant, device string, payload []byte, retained boo
 
 	if c.notifier != nil {
 		go func() {
-			if err := c.notifier.Dispatch(context.Background(), alertID); err != nil {
+			if err := c.notifier.Dispatch(context.Background(), tenant, alertID); err != nil {
 				slog.Error("alert dispatch failed", "alert_id", alertID, "err", err)
 			}
 		}()
