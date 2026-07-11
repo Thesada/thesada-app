@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -157,10 +158,61 @@ func (c *Client) handleAlert(tenant, device string, payload []byte, retained boo
 
 	alertID, err := c.services.Alerts.InsertAlert(context.Background(), tenant, devicePk, severity, code, message, payload)
 	if err != nil {
-		slog.Error("alert insert failed", "device_pk", devicePk, "err", err)
+		c.retryAlertInsert(tenant, device, devicePk, severity, code, message, payload, err)
 		return
 	}
+	c.finishAlert(tenant, device, devicePk, alertID)
+}
 
+// Bounded in-memory retry for failed alert inserts. Delays are generous on
+// purpose: the realistic failure is a short DB blip, and MQTT QoS 1 already
+// re-delivers on reconnect - this only bridges a blip inside a live session.
+const (
+	alertInsertRetrySlots = 64
+	alertInsertRetries    = 3
+	alertInsertRetryDelay = 5 * time.Second
+)
+
+// retryAlertInsert retries a failed alert insert in the background, then
+// dead-letters to the log with the full payload so an operator can replay it.
+// The alert is only in process memory here - a crash before success loses it,
+// which is why the dead-letter line carries everything needed to reconstruct.
+// in: topic fields, insert args, the first insert error. out: none (logs).
+func (c *Client) retryAlertInsert(tenant, device string, devicePk uuid.UUID, severity, code, message string, payload []byte, firstErr error) {
+	select {
+	case c.insertRetrySlots <- struct{}{}:
+	default:
+		slog.Error("alert.ingest.dead_letter",
+			"reason", "retry slots exhausted", "tenant", tenant, "device", device,
+			"err", firstErr, "payload", string(payload))
+		return
+	}
+	slog.Warn("alert insert failed, retrying in background",
+		"tenant", tenant, "device", device, "device_pk", devicePk, "err", firstErr)
+	go func() {
+		defer func() { <-c.insertRetrySlots }()
+		delay := alertInsertRetryDelay
+		for attempt := 1; attempt <= alertInsertRetries; attempt++ {
+			time.Sleep(delay)
+			delay *= 3
+			alertID, err := c.services.Alerts.InsertAlert(context.Background(), tenant, devicePk, severity, code, message, payload)
+			if err == nil {
+				slog.Info("alert insert retry succeeded", "tenant", tenant, "device", device, "attempt", attempt)
+				c.finishAlert(tenant, device, devicePk, alertID)
+				return
+			}
+			slog.Warn("alert insert retry failed",
+				"tenant", tenant, "device", device, "attempt", attempt, "max", alertInsertRetries, "err", err)
+		}
+		slog.Error("alert.ingest.dead_letter",
+			"reason", "insert retries exhausted", "tenant", tenant, "device", device,
+			"severity", severity, "code", code, "payload", string(payload))
+	}()
+}
+
+// finishAlert runs the post-insert fan-out: ws hub broadcast + notifier dispatch.
+// in: tenant, device, device pk, alert id. out: none (logs on dispatch error).
+func (c *Client) finishAlert(tenant, device string, devicePk uuid.UUID, alertID int64) {
 	c.hub.Publish(tenant, device, map[string]string{"type": "alert", "device": device, "alert_id": fmt.Sprintf("%d", alertID)})
 	slog.Debug("alert processed", "tenant", tenant, "device", device, "device_pk", devicePk, "alert_id", alertID)
 

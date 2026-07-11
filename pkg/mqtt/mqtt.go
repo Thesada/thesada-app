@@ -65,6 +65,12 @@ type Client struct {
 	// out-of-order delivery, not the primary defence.
 	cliMu    sync.Mutex
 	cliLocks map[string]*sync.Mutex
+
+	// insertRetrySlots caps concurrent alert-insert retry goroutines. A DB
+	// outage overlapping an alert burst spawns one goroutine per alert; when
+	// no slot is free the alert dead-letters to the log immediately instead
+	// of piling up unbounded goroutines.
+	insertRetrySlots chan struct{}
 }
 
 // Start connects to the MQTT broker and subscribes to the tenant topic tree.
@@ -74,7 +80,8 @@ func Start(ctx context.Context, cfg *config.Config, pool *db.Pool, notifier *ale
 		slog.Warn("MQTT broker URL not set, subscriber disabled")
 		return &Client{}, nil
 	}
-	cli := &Client{pool: pool, notifier: notifier, hub: hub, services: services, root: cfg.MQTTTopicRoot}
+	cli := &Client{pool: pool, notifier: notifier, hub: hub, services: services, root: cfg.MQTTTopicRoot,
+		insertRetrySlots: make(chan struct{}, alertInsertRetrySlots)}
 	opts := buildMQTTOptions(cfg, cli)
 
 	c := mqttlib.NewClient(opts)

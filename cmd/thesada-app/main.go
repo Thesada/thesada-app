@@ -169,7 +169,8 @@ func main() {
 	slog.Info("CA loaded", "cn", ca.Cert.Subject.CommonName, "expires", ca.Cert.NotAfter.Format("2006-01-02"))
 
 	mail := mailer.New(cfg)
-	notifier := alerts.New(cfg, pool, mail)
+	notifier := alerts.New(cfg, pools, mail)
+	notifier.StartRedispatcher(rootCtx)
 	hub := ws.New(cfg)
 
 	bootstrapAdmin(cfg, services)

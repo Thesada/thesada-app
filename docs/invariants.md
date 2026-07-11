@@ -4,11 +4,14 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-07-10 (alert Dispatch tenant-scoped through `db.WithTenant`
-so RLS returns rows - #545; pools-app guard limitation noted).
+Dated 2026-07-10 (alert delivery lifecycle: retry with backoff,
+dead-letter budget, startup + periodic redispatch sweep, bounded
+insert retry. Same day, earlier: alert Dispatch tenant-scoped through
+`db.WithTenant` so RLS returns rows; pools-app guard limitation
+noted).
 Previously 2026-07-01 (device-config secrets complete: provision-at-pair via
 `secret.set`, write-only UI, root-KEK rotation, existing-device backfill,
-field keys aligned to the firmware keymap - #443 phases 5-7). Previously
+field keys aligned to the firmware keymap - phases 5-7). Previously
 2026-06-30 (device-config secrets phases 2-4: per-tenant DEK envelope
 encryption, write-only contract, crypto-shred on tenant delete, RLS on
 the two new stores, malformed-KEK boot failure, config-field blanking).
@@ -52,8 +55,8 @@ SendBatch,CopyFrom,BeginTx}` caller outside the grandfathered set in
 Guard limitation, learned 2026-07-10: the check is textual on
 `pools.App.`, so a component that receives the App pool under another
 name evades it - `pkg/alerts` queried through its `n.db` field with no
-tenant GUC and RLS silently returned zero rows (alert delivery dead,
-issue #545). When handing the App pool to a component, the receiver
+tenant GUC and RLS silently returned zero rows (alert delivery dead -
+the silent-drop bug). When handing the App pool to a component, the receiver
 either takes tenant IDs and wraps every query in `db.WithTenant`
 (what `pkg/alerts` does now, verified by
 `pkg/alerts/alerts_integration_test.go`), or it belongs on the
@@ -385,7 +388,7 @@ the `SecretFields` allowlist plus a `sensitiveConfigKeyRE` backstop)
 before the row is written. The device-reported `sha256` is kept as-is
 as the drift fingerprint - blanking changes only the stored content, so
 a sanitized snapshot never reads as drift against the device. Clean
-configs (already-blank, e.g. app-managed devices per #442) pass through
+configs (already-blank, e.g. app-managed devices) pass through
 byte-identical.
 
 Tenant delete crypto-shreds: the `tenant_dek` row cascades away on
@@ -412,7 +415,7 @@ each DEK under the new key and skips already-rotated rows) so the operator
 can re-run until `rotated=0` and no swap-window DEK is orphaned.
 
 Provisioning + field keys: `SecretFields` are the firmware `secret.set`
-keys (#442 keymap) so a paired device is provisioned by
+keys (the firmware keymap) so a paired device is provisioned by
 `handleAdminDevicePairIssue` pushing `secret.set <field>\n<value>` to
 NVS (mirror of `cert.set`, before the restart, feature-gated). Four map
 1:1; `wifi.password` is per-SSID on the firmware, so it is provisioned as
@@ -757,6 +760,51 @@ on every subscribe, so app restarts re-trigger drift checks for any
 device with a content delta accumulated while the app was offline.
 
 Source: `pkg/mqtt/mqtt.go::handleInfo`, `pullAndSnapshot`.
+
+---
+
+## Alert delivery
+
+### Every alert row reaches a terminal delivery state; pending rows are always swept
+
+`device_alerts.delivery_status` is the lifecycle: `pending` ->
+`delivered` / `none` (no matching subscription) / `dead` (attempt
+budget spent, `THESADA_ALERT_MAX_ATTEMPTS`, default 5). A failed send
+leaves the row `pending` with a backed-off `next_attempt_at`; the
+redispatch sweeper (`Notifier.StartRedispatcher`, one pass at startup
++ one per `THESADA_ALERT_REDISPATCH_INTERVAL`) re-runs `Dispatch` for
+every pending-and-due row. A process death between insert and dispatch
+is therefore recovered at next boot, and all-channels-fail is surfaced
+as an `alert.delivery.state_change` to `dead` at error level - never
+silently dropped.
+
+The sweep scan is the one sanctioned cross-tenant read in the alert
+path: it runs on `pools.Admin` via `db.WithAdminAudit` and reads only
+`(tenant_id, alert id)` pairs; each re-dispatch then runs tenant-scoped
+via `db.WithTenant` like the inline path. Per-channel `delivered_*`
+flags guarantee a retry never re-sends a channel that already
+succeeded; channel success is per-alert, not per-recipient (partial
+recipient failure within a channel is not retried). The in-process
+`inflight` claim assumes a single app instance - running more than one
+needs `FOR UPDATE SKIP LOCKED` claims first.
+
+How verified: `pkg/alerts/alerts_integration_test.go` (retry
+scheduling, dead-letter budget, cross-tenant sweep, startup-shaped
+redispatch, no-double-send on partial channel failure).
+
+Source: `pkg/alerts/alerts.go::Dispatch`, `pkg/alerts/redispatch.go`,
+migration `0025_alert_delivery_retry.sql`.
+
+### A failed alert insert retries bounded, then dead-letters to the log
+
+`handleAlert` retries a failed `device_alerts` insert in the background
+(3 attempts, 5s/15s/45s, capped at 64 concurrent retry goroutines) and
+on exhaustion emits `alert.ingest.dead_letter` at error level with the
+full payload, so the alert is reconstructable from logs. Until the
+insert lands the alert exists only in process memory - MQTT QoS 1
+redelivery on reconnect is the transport-level backstop.
+
+Source: `pkg/mqtt/mqtt_ingest.go::retryAlertInsert`.
 
 ---
 

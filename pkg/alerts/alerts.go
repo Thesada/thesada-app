@@ -12,6 +12,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -58,20 +59,63 @@ const telegramAPITimeout = 10 * time.Second
 // It is safe for concurrent use; instantiate once in main and share.
 type Notifier struct {
 	cfg    *config.Config
-	db     *db.Pool
+	db     *db.Pool // App pool: every tenant-scoped query runs through db.WithTenant on it
+	admin  *db.Pool // Admin pool (BYPASSRLS): redispatch sweep scan only, via db.WithAdminAudit
 	mailer *mailer.Mailer
 	http   *http.Client
+
+	// Send seams: tests swap these to drive retry outcomes without a live
+	// SMTP server or api.telegram.org.
+	sendEmail func(to, subject, text, html string) error
+	sendTG    func(ctx context.Context, chatID, body string) error
+
+	// inflight keeps the inline post-ingest dispatch and the redispatch
+	// sweeper from racing the same alert into a double-send. Per-process,
+	// which matches the single-instance deployment; multiple instances would
+	// need SELECT ... FOR UPDATE SKIP LOCKED claims instead.
+	mu       sync.Mutex
+	inflight map[int64]struct{}
 }
 
-// New constructs a Notifier bound to the given config, db pool, and mailer.
-// in: cfg, db pool, mailer. out: ready *Notifier.
-func New(cfg *config.Config, pool *db.Pool, mail *mailer.Mailer) *Notifier {
-	return &Notifier{
-		cfg:    cfg,
-		db:     pool,
-		mailer: mail,
-		http:   &http.Client{Timeout: telegramAPITimeout},
+// New constructs a Notifier bound to the given config, db pools, and mailer.
+// Sends go through the App pool under the tenant GUC; the Admin pool is used
+// only by the redispatch sweeper to scan for due alerts across tenants.
+// in: cfg, db pools, mailer. out: ready *Notifier.
+func New(cfg *config.Config, pools db.Pools, mail *mailer.Mailer) *Notifier {
+	n := &Notifier{
+		cfg:      cfg,
+		db:       pools.App,
+		admin:    pools.Admin,
+		mailer:   mail,
+		http:     &http.Client{Timeout: telegramAPITimeout},
+		inflight: make(map[int64]struct{}),
 	}
+	n.sendEmail = func(to, subject, text, html string) error {
+		return n.mailer.SendMIME(to, subject, text, html)
+	}
+	n.sendTG = n.sendTelegram
+	return n
+}
+
+// claim marks an alert as being dispatched by this process; false means
+// another goroutine already owns it and the caller must back off.
+// in: alert id. out: whether the caller now owns the dispatch.
+func (n *Notifier) claim(alertID int64) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if _, busy := n.inflight[alertID]; busy {
+		return false
+	}
+	n.inflight[alertID] = struct{}{}
+	return true
+}
+
+// release returns an alert claimed by claim.
+// in: alert id. out: none.
+func (n *Notifier) release(alertID int64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	delete(n.inflight, alertID)
 }
 
 // alertRow is the joined snapshot each Dispatch call needs to render one notification.
@@ -84,6 +128,8 @@ type alertRow struct {
 	deviceDisplay *string
 	alreadyEmail  bool
 	alreadyTg     bool
+	status        string
+	attempts      int
 }
 
 // recipient is one subscription the alert was matched against.
@@ -94,17 +140,20 @@ type recipient struct {
 	telegramChatID *string
 }
 
-// Dispatch reads alert_subscriptions for the alert's device and sends
-// notifications via every matching channel (email, telegram). Delivery state
-// is recorded on device_alerts; a single row is only emailed once and only
-// telegrammed once across retries.
-// All queries run inside db.WithTenant on the App pool - the RLS policies on
-// device_alerts / devices / alert_subscriptions / users key on app.tenant_id
-// and return zero rows when the GUC is unset. The sends themselves happen
-// outside the tx so slow SMTP/Telegram calls never hold a connection open.
-// in: ctx, tenant id, device_alerts.id. out: error if the row lookup fails.
-// Per-channel send errors are logged but do not fail the whole dispatch.
+// Dispatch sends one alert through every matching subscription channel and
+// records its delivery lifecycle (pending/delivered/none/dead + per-channel
+// flags, so a retry never re-sends a channel that already succeeded). Queries
+// run tenant-scoped via db.WithTenant on the App pool; the sends themselves
+// happen outside the tx so slow SMTP/Telegram never holds a connection open.
+// in: ctx, tenant id, device_alerts.id. out: error on row lookup failure;
+// send errors drive the retry state instead of failing the call.
 func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64) error {
+	if !n.claim(alertID) {
+		slog.Debug("alert dispatch already in flight", "alert_id", alertID)
+		return nil
+	}
+	defer n.release(alertID)
+
 	var row *alertRow
 	var recipients []recipient
 	err := db.WithTenant(ctx, n.db, tenantID, func(tx pgx.Tx) error {
@@ -118,9 +167,27 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 	if err != nil {
 		return err
 	}
+	if row.status != "pending" {
+		// Idempotence gate: a sweeper pass that raced a finished dispatch, or
+		// an operator re-poke of a delivered/dead row, must not re-send.
+		slog.Debug("alert not pending, skipping dispatch", "alert_id", alertID, "status", row.status)
+		return nil
+	}
 	if len(recipients) == 0 {
 		slog.Debug("alert has no subscribers", "alert_id", alertID)
-		return nil
+		return n.recordOutcome(ctx, tenantID, alertID, false, false, "none", row.attempts, time.Time{})
+	}
+
+	// A channel is "needed" when it has at least one matching subscription and
+	// has not already been delivered by an earlier attempt.
+	var needEmail, needTg bool
+	for _, r := range recipients {
+		switch r.channel {
+		case "email":
+			needEmail = needEmail || !row.alreadyEmail
+		case "telegram":
+			needTg = needTg || !row.alreadyTg
+		}
 	}
 
 	subject, body, htmlBody := renderAlert(row)
@@ -131,7 +198,7 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 			if row.alreadyEmail {
 				continue
 			}
-			if err := n.mailer.SendMIME(r.email, subject, body, htmlBody); err != nil {
+			if err := n.sendEmail(r.email, subject, body, htmlBody); err != nil {
 				slog.Error("alert email failed", "alert_id", alertID, "to", r.email, "err", err)
 				continue
 			}
@@ -144,26 +211,109 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 				slog.Warn("telegram subscription without chat_id", "alert_id", alertID, "user_id", r.userID)
 				continue
 			}
-			if err := n.sendTelegram(ctx, *r.telegramChatID, body); err != nil {
+			if err := n.sendTG(ctx, *r.telegramChatID, body); err != nil {
 				slog.Error("alert telegram failed", "alert_id", alertID, "chat_id", *r.telegramChatID, "err", err)
 				continue
 			}
 			tgOK = true
 		}
 	}
-	if emailOK || tgOK {
-		err := db.WithTenant(ctx, n.db, tenantID, func(tx pgx.Tx) error {
-			return n.markDelivered(ctx, tx, alertID, emailOK, tgOK)
-		})
-		if err != nil {
-			slog.Error("alert delivery mark failed", "alert_id", alertID, "err", err)
-		} else {
-			slog.Info("alert.delivery.state_change",
-				"from", "pending", "to", "delivered",
-				"alert_id", alertID, "email", emailOK, "telegram", tgOK)
+
+	attempts := row.attempts + 1
+	emailDone := !needEmail || emailOK
+	tgDone := !needTg || tgOK
+	switch {
+	case emailDone && tgDone:
+		if err := n.recordOutcome(ctx, tenantID, alertID, emailOK, tgOK, "delivered", attempts, time.Time{}); err != nil {
+			return nil
 		}
+		slog.Info("alert.delivery.state_change",
+			"from", "pending", "to", "delivered",
+			"alert_id", alertID, "email", emailOK || row.alreadyEmail, "telegram", tgOK || row.alreadyTg,
+			"attempts", attempts)
+	case attempts >= n.maxAttempts():
+		if err := n.recordOutcome(ctx, tenantID, alertID, emailOK, tgOK, "dead", attempts, time.Time{}); err != nil {
+			return nil
+		}
+		slog.Error("alert.delivery.state_change",
+			"from", "pending", "to", "dead",
+			"alert_id", alertID, "email", emailOK || row.alreadyEmail, "telegram", tgOK || row.alreadyTg,
+			"attempts", attempts)
+	default:
+		next := time.Now().Add(retryBackoff(n.retryBase(), attempts))
+		if err := n.recordOutcome(ctx, tenantID, alertID, emailOK, tgOK, "pending", attempts, next); err != nil {
+			return nil
+		}
+		slog.Warn("alert.delivery.retry_scheduled",
+			"alert_id", alertID, "attempt", attempts, "max", n.maxAttempts(),
+			"next_attempt_at", next.Format(time.RFC3339))
 	}
 	return nil
+}
+
+// maxAttempts returns the configured dispatch budget with a sane floor.
+// in: receiver. out: attempt budget >= 1.
+func (n *Notifier) maxAttempts() int {
+	if n.cfg.AlertMaxAttempts < 1 {
+		return 1
+	}
+	return n.cfg.AlertMaxAttempts
+}
+
+// retryBase returns the configured first retry delay with a sane floor.
+// in: receiver. out: base delay > 0.
+func (n *Notifier) retryBase() time.Duration {
+	if n.cfg.AlertRetryBase <= 0 {
+		return time.Minute
+	}
+	return n.cfg.AlertRetryBase
+}
+
+// retryBackoff is the delay before attempt+1: base doubled per completed
+// attempt, capped at 6 doublings so a misconfigured budget cannot push the
+// next attempt out by days.
+// in: base delay, completed attempts (>=1). out: delay until the next attempt.
+func retryBackoff(base time.Duration, attempts int) time.Duration {
+	shift := attempts - 1
+	if shift > 6 {
+		shift = 6
+	}
+	if shift < 0 {
+		shift = 0
+	}
+	return base << shift
+}
+
+// recordOutcome persists one dispatch run: ORs the per-channel delivered
+// flags (re-runs never clear them), sets status + attempts, and schedules the
+// next sweep pick-up (zero time = keep current; terminal states are never swept).
+// On write failure the row stays pending and the sweeper redispatches later -
+// that can double-send a succeeded channel, acceptable over losing the alert.
+// in: ctx, tenant id, alert id, per-channel success, status, attempts, next
+// attempt time. out: error from the write (already logged).
+func (n *Notifier) recordOutcome(ctx context.Context, tenantID string, alertID int64, email, tg bool, status string, attempts int, next time.Time) error {
+	const query = `
+		UPDATE device_alerts
+		SET delivered_email = delivered_email OR $2,
+		    delivered_telegram = delivered_telegram OR $3,
+		    delivery_status = $4,
+		    delivery_attempts = $5,
+		    next_attempt_at = CASE WHEN $6::timestamptz IS NULL THEN next_attempt_at ELSE $6 END
+		WHERE id = $1`
+	var nextArg interface{}
+	if !next.IsZero() {
+		nextArg = next
+	}
+	err := db.WithTenant(ctx, n.db, tenantID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, query, alertID, email, tg, status, attempts, nextArg); err != nil {
+			return fmt.Errorf("record delivery outcome: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		slog.Error("alert delivery mark failed", "alert_id", alertID, "status", status, "err", err)
+	}
+	return err
 }
 
 // loadAlert fetches the joined alert + device row for rendering.
@@ -172,7 +322,8 @@ func (n *Notifier) loadAlert(ctx context.Context, tx pgx.Tx, alertID int64) (*al
 	const query = `
 		SELECT a.severity, a.code, a.message, a.received_at,
 		       d.device_id, d.display_name,
-		       a.delivered_email, a.delivered_telegram
+		       a.delivered_email, a.delivered_telegram,
+		       a.delivery_status, a.delivery_attempts
 		FROM device_alerts a
 		JOIN devices d ON d.id = a.device_pk
 		WHERE a.id = $1`
@@ -180,7 +331,8 @@ func (n *Notifier) loadAlert(ctx context.Context, tx pgx.Tx, alertID int64) (*al
 	err := tx.QueryRow(ctx, query, alertID).Scan(
 		&r.severity, &r.code, &r.message, &r.receivedAt,
 		&r.deviceID, &r.deviceDisplay,
-		&r.alreadyEmail, &r.alreadyTg)
+		&r.alreadyEmail, &r.alreadyTg,
+		&r.status, &r.attempts)
 	if err != nil {
 		return nil, fmt.Errorf("alert lookup: %w", err)
 	}
@@ -219,20 +371,6 @@ func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64)
 		return nil, fmt.Errorf("recipients rows: %w", err)
 	}
 	return out, nil
-}
-
-// markDelivered ORs the per-channel delivered flags so re-runs don't clear them.
-// in: ctx, tenant-scoped tx, alert id, whether email fired this run, whether telegram fired. out: error.
-func (n *Notifier) markDelivered(ctx context.Context, tx pgx.Tx, alertID int64, email, tg bool) error {
-	const query = `
-		UPDATE device_alerts
-		SET delivered_email = delivered_email OR $2,
-		    delivered_telegram = delivered_telegram OR $3
-		WHERE id = $1`
-	if _, err := tx.Exec(ctx, query, alertID, email, tg); err != nil {
-		return fmt.Errorf("mark delivered: %w", err)
-	}
-	return nil
 }
 
 // renderAlert builds a human-readable subject + plain text body + MIME html
