@@ -32,4 +32,4 @@ Does NOT apply to: internal refactors, doc-only changes, test-only commits.
 
 ---
 
-Related: [`pre-launch-checklist.md`](pre-launch-checklist.md), [`invariants.md`](invariants.md), [`security.md`](security.md).
+Related: [`pre-launch-checklist.md`](pre-launch-checklist.md), [`invariants.md`](invariants.md), [`security.md`](security.md), [`threat-model.md`](threat-model.md).

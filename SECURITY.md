@@ -41,6 +41,8 @@ If a fix cannot land within 90 days I will communicate the reason and negotiate 
 
 thesada-app is the **multi-tenant** control plane for self-hosted property monitoring: it onboards tenants, provisions device identities, brokers MQTT credentials, ships OTA firmware, and delivers alerts. Where the firmware (thesada-fw) is single-owner on a private network, the app assumes **mutually distrustful tenants** sharing one deployment, plus unauthenticated internet traffic.
 
+This section is the summary; the per-asset, per-attacker matrix (controls and honest residual gaps) lives in [`docs/threat-model.md`](docs/threat-model.md).
+
 **Assets:**
 
 - Tenant data (sensor history, device inventory, contact + alert config)
