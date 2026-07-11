@@ -91,6 +91,13 @@ func New(cfg *config.Config, pools db.Pools, mail *mailer.Mailer) *Notifier {
 		inflight: make(map[int64]struct{}),
 	}
 	n.sendEmail = func(to, subject, text, html string) error {
+		// mailer.SendMIME silently no-ops when SMTP is unconfigured (documented
+		// dev behaviour for magic links). For alerts that would mark the row
+		// delivered with nothing sent, so fail here like the telegram channel
+		// does on a missing token - the alert then retries and dead-letters loudly.
+		if n.cfg.SMTPHost == "" {
+			return errors.New("smtp host not configured")
+		}
 		return n.mailer.SendMIME(to, subject, text, html)
 	}
 	n.sendTG = n.sendTelegram

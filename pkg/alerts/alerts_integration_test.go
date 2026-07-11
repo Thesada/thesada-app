@@ -237,6 +237,28 @@ func TestSweep_RedeliversPendingAcrossTenants(t *testing.T) {
 	}
 }
 
+func TestDispatch_UnconfiguredSMTP_NeverMarksDelivered(t *testing.T) {
+	env := servicetest.Start(t)
+	ctx := context.Background()
+	devicePk, alertID := seedAlert(t, env, "acme")
+	seedEmailSub(t, env, "acme", devicePk, "ops@example.com")
+
+	// Default send seam, no SMTP host: the send must fail (mailer.SendMIME
+	// would silently no-op and return nil), leaving the row pending on its
+	// way to a loud dead-letter - never delivered-with-nothing-sent.
+	env.Cfg.SMTPHost = ""
+	env.Cfg.AlertMaxAttempts = 5
+	env.Cfg.AlertRetryBase = time.Minute
+	n := New(env.Cfg, env.Pools, nil)
+	if err := n.Dispatch(ctx, "acme", alertID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	status, attempts, email, _, _ := deliveryRow(t, env, alertID)
+	if status != "pending" || attempts != 1 || email {
+		t.Fatalf("delivery row = %s/%d email:%v, want pending/1 email:false", status, attempts, email)
+	}
+}
+
 func TestDispatch_PartialChannelFailure_RetriesOnlyFailedChannel(t *testing.T) {
 	env := servicetest.Start(t)
 	ctx := context.Background()
