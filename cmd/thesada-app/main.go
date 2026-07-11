@@ -256,10 +256,10 @@ func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub
 	apiWithAuth := authmw.APIMiddleware(services.Auth, services.ApiTokens, authmw.APICSRFGuard{
 		BaseURL: cfg.BaseURL,
 		Secret:  []byte(cfg.CookieSecret),
-	})(api)
+	}, cfg.TrustedProxies)(api)
 	root.Handle("/api/v1/", http.StripPrefix("/api/v1", apiWithAuth))
 
-	wsChain := authmw.Middleware(services.Auth)(authmw.RequireAuth(hub.ServeHTTP))
+	wsChain := authmw.Middleware(services.Auth, cfg.TrustedProxies)(authmw.RequireAuth(hub.ServeHTTP))
 	root.Handle("/ws", wsChain)
 
 	web := web.New(cfg, services, mail, mqttClient, ca)
@@ -269,7 +269,7 @@ func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub
 		Addr: cfg.HTTPAddr,
 		// One wrap covers both frontends: browser security headers on every
 		// web, API, and WS-upgrade response (see pkg/httpsec/headers.go).
-		Handler:           httpsec.SecurityHeaders(root),
+		Handler:           httpsec.SecurityHeaders(root, cfg.TrustedProxies),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 }

@@ -93,7 +93,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
 		return
 	}
-	authmw.SetSessionCookie(w, cookieTok, cookieExp, httpsec.RequestIsSecure(r))
+	authmw.SetSessionCookie(w, cookieTok, cookieExp, httpsec.RequestIsSecure(r, s.cfg.TrustedProxies))
 
 	token, expires, err := s.services.ApiTokens.IssueToken(u.TenantID, u.ID, "api login")
 	if err != nil {
@@ -121,7 +121,7 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 		if err := s.services.Auth.RevokeSession(c.Value); err != nil {
 			slog.Warn("api logout: session revoke failed", "err", err)
 		}
-		authmw.ClearSessionCookie(w, httpsec.RequestIsSecure(r))
+		authmw.ClearSessionCookie(w, httpsec.RequestIsSecure(r, s.cfg.TrustedProxies))
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

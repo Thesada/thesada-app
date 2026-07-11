@@ -25,7 +25,7 @@ func TestSecurityHeaders(t *testing.T) {
 			r.Header.Set("X-Forwarded-Proto", xfp)
 		}
 		w := httptest.NewRecorder()
-		SecurityHeaders(inner).ServeHTTP(w, r)
+		SecurityHeaders(inner, mustNets(t, "192.0.2.0/24")).ServeHTTP(w, r)
 		return w
 	}
 

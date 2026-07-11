@@ -52,7 +52,7 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 				s.render(w, r, "login.html", map[string]interface{}{"Error": "Too many attempts. Wait a few minutes and try again."})
 				return
 			}
-			slog.Error("password verify failed", "email", email, "err", err)
+			slog.Error("auth.password.verify_failed", "ip", ip, "err", err)
 			http.Error(w, "login failed", http.StatusInternalServerError)
 			return
 		}
@@ -126,7 +126,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("session revoke failed", "err", err)
 		}
 	}
-	authmw.ClearSessionCookie(w, httpsec.RequestIsSecure(r))
+	authmw.ClearSessionCookie(w, httpsec.RequestIsSecure(r, s.cfg.TrustedProxies))
 	if u != nil {
 		slog.Info("auth.session.state_change",
 			"from", "authenticated", "to", "anonymous",
@@ -145,7 +145,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *service
 		slog.Error("session create failed", "user_id", u.ID, "err", err)
 		return
 	}
-	authmw.SetSessionCookie(w, token, expires, httpsec.RequestIsSecure(r))
+	authmw.SetSessionCookie(w, token, expires, httpsec.RequestIsSecure(r, s.cfg.TrustedProxies))
 	slog.Info("auth.session.state_change",
 		"from", "anonymous", "to", "authenticated",
 		"user_id", u.ID, "tenant", u.TenantID, "method", method)

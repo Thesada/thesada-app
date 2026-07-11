@@ -42,7 +42,7 @@ func TestDevicePairHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bootstrap CA: %v", err)
 	}
-	srv := authmw.APIMiddleware(env.Services.Auth, env.Services.ApiTokens, authmw.APICSRFGuard{})(apiv1.New(env.Cfg, env.Services, ca))
+	srv := authmw.APIMiddleware(env.Services.Auth, env.Services.ApiTokens, authmw.APICSRFGuard{}, nil)(apiv1.New(env.Cfg, env.Services, ca))
 
 	const tenant = "apipair-a"
 	env.SeedTenant(t, tenant)

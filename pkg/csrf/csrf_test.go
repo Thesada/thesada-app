@@ -74,7 +74,7 @@ func run(t *testing.T, method string, cookie *http.Cookie, form url.Values) *htt
 		r.AddCookie(cookie)
 	}
 	rec := httptest.NewRecorder()
-	Middleware(testSecret)(okHandler()).ServeHTTP(rec, r)
+	Middleware(testSecret, nil)(okHandler()).ServeHTTP(rec, r)
 	return rec
 }
 
@@ -92,8 +92,8 @@ func TestMiddleware_SafeMethodMintsSignedCookie(t *testing.T) {
 	if !validToken(testSecret, c.Value) {
 		t.Errorf("minted cookie %q fails its own signature check", c.Value)
 	}
-	if c.HttpOnly {
-		t.Error("csrf cookie must be readable by JS for double-submit (HttpOnly set)")
+	if !c.HttpOnly {
+		t.Error("csrf cookie must be HttpOnly: the token reaches JS via the template var, nothing reads the cookie")
 	}
 }
 

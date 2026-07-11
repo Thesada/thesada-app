@@ -4,7 +4,10 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-07-10 (alert delivery lifecycle: retry with backoff,
+Dated 2026-07-11 (X-Forwarded-Proto gated on trusted proxies; CSRF
+cookie HttpOnly; WS hub binds the effective tenant; alert email channel
+fails loudly when SMTP is unconfigured). Previously 2026-07-10 (alert
+delivery lifecycle: retry with backoff,
 dead-letter budget, startup + periodic redispatch sweep, bounded
 insert retry. Same day, earlier: alert Dispatch tenant-scoped through
 `db.WithTenant` so RLS returns rows; pools-app guard limitation
@@ -491,7 +494,7 @@ Source: `pkg/service/auth_users.go::SetPassword`,
 
 ### Every state-changing HTTP endpoint requires CSRF verification
 
-Signed double-submit cookie pattern: server sets a non-HttpOnly cookie
+Signed double-submit cookie pattern: server sets an HttpOnly cookie
 `thesada_csrf` whose value is a random token plus an HMAC-SHA256 signature
 under the app's cookie secret (`<body>.<sig>`); the client reflects the
 exact value via header `X-CSRF-Token` or hidden form field. Middleware
@@ -614,15 +617,19 @@ Source: `migrations/migrate.go::Apply`.
 Session cookie set via `authmw.SetSessionCookie` (login in
 `pkg/web/web.go::startSession` and rotation in `pkg/authmw`); CSRF cookie in
 `pkg/csrf`. All decide the Secure flag through the one shared
-`httpsec.RequestIsSecure(r)` - true when `r.TLS != nil` OR the proxy set
-`X-Forwarded-Proto: https`. So the flag is correct behind HAProxy (TLS to
-the browser, plain HTTP to the app) and dev (plain HTTP) still works without
-config drift. The session cookie is HttpOnly; the CSRF cookie is not (below).
+`httpsec.RequestIsSecure(r, trustedProxies)` - true when `r.TLS != nil`, OR
+the immediate peer is in `THESADA_TRUSTED_PROXIES` and set
+`X-Forwarded-Proto: https`. The trusted-peer gate is the same one `ClientIP`
+uses: an arbitrary peer cannot spoof the header to get Secure-flagged
+cookies (or HSTS) over plain HTTP. Correct behind HAProxy (TLS to the
+browser, plain HTTP to the app, proxy listed in trusted proxies); dev
+(plain HTTP, direct) still works without config drift.
 
-### CSRF cookie: non-HttpOnly (intentional)
+### Session and CSRF cookies are both HttpOnly
 
-The CSRF token cookie must be readable by JS to participate in the
-double-submit pattern; the session cookie stays HttpOnly. Same SameSite=Lax
+Nothing reads either cookie client-side: the CSRF token reaches JS through
+the `CSRFToken` template variable, and the double-submit check compares the
+echoed header/form value against the cookie server-side. Same SameSite=Lax
 + the shared Secure decision above.
 
 Source: `pkg/csrf/csrf.go`, `pkg/web/web.go`, `pkg/authmw`, `pkg/httpsec`.

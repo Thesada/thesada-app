@@ -83,7 +83,7 @@ func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mq
 	}
 	s.parseTemplates()
 	s.routes()
-	s.handler = csrf.Middleware([]byte(cfg.CookieSecret))(authmw.Middleware(services.Auth)(s.mux))
+	s.handler = csrf.Middleware([]byte(cfg.CookieSecret), cfg.TrustedProxies)(authmw.Middleware(services.Auth, cfg.TrustedProxies)(s.mux))
 
 	// Sweep residual keys left by expired windows; without this the maps grow
 	// unbounded. context.Background: sweepers live for the process lifetime.
