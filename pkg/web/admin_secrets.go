@@ -1,4 +1,4 @@
-// Super-admin write-only device-config-secrets UI (#443 phase 6). The
+// Super-admin write-only device-config-secrets UI. The
 // operator sets/overwrites the encrypted secrets; the page shows only
 // set/unset status per field and NEVER a value. There is no read-back path -
 // SecretService.Reveal is server-side-only (provision/rotate) and is
@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -59,8 +60,10 @@ func parseSecretInfo(output []string) map[string]string {
 // deviceSecretState queries the device over MQTT for its live per-field NVS
 // state, keyed by storage field. Bounded by secretInfoTimeout; a timeout or
 // error yields (nil, false) and the page renders state unknown rather than
-// failing. in: ctx, device, wifi ssid. out: map[storageField]state, reachable.
-func (s *Server) deviceSecretState(ctx context.Context, device *service.Device, ssid string) (map[string]string, bool) {
+// failing. Since storage field == firmware field (per-SSID keys included), the
+// parsed device report maps straight through.
+// in: ctx, device, storage fields to report. out: map[storageField]state, reachable.
+func (s *Server) deviceSecretState(ctx context.Context, device *service.Device, fields []string) (map[string]string, bool) {
 	if s.mqtt == nil {
 		return nil, false
 	}
@@ -71,19 +74,50 @@ func (s *Server) deviceSecretState(ctx context.Context, device *service.Device, 
 		return nil, false
 	}
 	byFwField := parseSecretInfo(resp.Output)
-	out := make(map[string]string, len(service.SecretFields))
-	for _, f := range service.SecretFields {
-		fwField, ok := service.FirmwareSecretField(f, ssid)
-		if !ok {
-			continue // wifi.password with no known SSID - cannot match a device key
-		}
-		if st, present := byFwField[fwField]; present {
+	out := make(map[string]string, len(fields))
+	for _, f := range fields {
+		if st, present := byFwField[f]; present {
 			out[f] = st
 		} else {
 			out[f] = "none"
 		}
 	}
 	return out, true
+}
+
+// secretDisplayFields is the ordered field list for the secrets page: the
+// scalars, then wifi.password:<ssid> for each configured network, then any
+// stored WiFi row (legacy bare key or a per-SSID row whose SSID is no longer
+// configured) so the operator can see and clear it. Deduped, config order.
+// in: stored status map, configured SSIDs. out: ordered storage fields.
+func secretDisplayFields(status map[string]bool, ssids []string) []string {
+	fields := append([]string{}, service.ScalarSecretFields...)
+	seen := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		seen[f] = true
+	}
+	add := func(f string) {
+		if f != "" && !seen[f] {
+			fields = append(fields, f)
+			seen[f] = true
+		}
+	}
+	for _, ssid := range ssids {
+		add(service.WifiSecretField(ssid))
+	}
+	// Stored WiFi rows not already listed (legacy / removed SSID), sorted so
+	// the page order is stable across requests (status is an unordered map).
+	var orphans []string
+	for f, set := range status {
+		if set && service.IsWifiPasswordField(f) && !seen[f] {
+			orphans = append(orphans, f)
+		}
+	}
+	sort.Strings(orphans)
+	for _, f := range orphans {
+		add(f)
+	}
+	return fields
 }
 
 // handleAdminDeviceSecrets renders the write-only secrets page for a device:
@@ -116,18 +150,21 @@ func (s *Server) handleAdminDeviceSecrets(w http.ResponseWriter, r *http.Request
 		http.Error(w, "status error", http.StatusInternalServerError)
 		return
 	}
+	// Display order: the scalars, then one wifi.password:<ssid> per configured
+	// network, then any stored WiFi row not matching a current network (legacy
+	// bare key or a removed SSID) so the operator can still see and clear it.
+	displayFields := secretDisplayFields(status, s.deviceWifiSSIDs(r.Context(), device))
+
 	// Live device NVS state per field (best-effort; empty when unreachable).
 	// Only queried with the feature on - a KEK-off deployment never provisions.
 	var devState map[string]string
 	reachable := false
 	if s.services.Secrets.Enabled() {
-		ssid := s.deviceWifiSSID(r.Context(), device)
-		devState, reachable = s.deviceSecretState(r.Context(), device, ssid)
+		devState, reachable = s.deviceSecretState(r.Context(), device, displayFields)
 	}
 
-	// Drive display order from SecretFields (Status is an unordered map).
-	fields := make([]secretFieldStatus, 0, len(service.SecretFields))
-	for _, f := range service.SecretFields {
+	fields := make([]secretFieldStatus, 0, len(displayFields))
+	for _, f := range displayFields {
 		fields = append(fields, secretFieldStatus{Field: f, Set: status[f], DevState: devState[f]})
 	}
 
@@ -170,8 +207,8 @@ func (s *Server) handleAdminDeviceSecretsProvision(w http.ResponseWriter, r *htt
 	}
 
 	topicPrefix := s.deviceTopicPrefix(device)
-	ssid := s.deviceWifiSSID(r.Context(), device)
-	outcome := provisionDeviceSecrets(service.SecretFields, ssid,
+	fields, primarySSID := secretProvisionFields(s.deviceWifiSSIDs(r.Context(), device))
+	outcome := provisionDeviceSecrets(fields, primarySSID,
 		func(field string) (string, bool, error) {
 			return s.services.Secrets.Reveal(r.Context(), device.TenantID, device.ID, field)
 		},

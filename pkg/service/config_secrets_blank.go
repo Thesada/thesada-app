@@ -1,17 +1,16 @@
 // config_secrets_blank.go - strips plaintext device-config secrets out of
-// config.json content before it is persisted to device_files / history
-// (#443, phase 4). The real values live encrypted in device_config_secrets
-// (pkg/secrets); the stored snapshot keeps the config shape with the
-// sensitive leaves emptied so an operator never reads a secret back out of a
-// snapshot, a history row, or the config editor.
+// config.json content before it is persisted to device_files / history. The
+// real values live encrypted in device_config_secrets (pkg/secrets); the
+// stored snapshot keeps the config shape with the sensitive leaves emptied so
+// an operator never reads a secret back out of a snapshot, a history row, or
+// the config editor.
 //
-// Two layers, matching the design in #443:
-//   - explicit allowlist: the 5 known secret fields (SecretFields), by their
-//     dotted path into the nested config object.
+// Two layers:
+//   - explicit allowlist: the scalar secret fields (ScalarSecretFields), by
+//     their dotted path into the nested config object.
 //   - backstop: any leaf whose key looks sensitive (sensitiveConfigKeyRE),
-//     so a firmware config that grows a new secret field is covered without
-//     a code change. Mirrors the redaction regex used for the super-admin
-//     config dump in pkg/web/admin_debug.go.
+//     which also covers each wifi.networks[].password. Mirrors the redaction
+//     regex used for the super-admin config dump in pkg/web/admin_debug.go.
 //
 // The caller keeps the device-reported sha256 as the stored fingerprint;
 // blanking changes only the content column, never the hash, so a blanked
@@ -55,9 +54,11 @@ func blankConfigSecrets(content string) (string, bool, error) {
 	}
 
 	changed := false
-	// Explicit allowlist first: guarantees the 5 known fields are blanked
-	// even if the backstop regex is ever narrowed.
-	for _, dotted := range SecretFields {
+	// Explicit allowlist first: guarantees the 4 scalar fields are blanked
+	// even if the backstop regex is ever narrowed. Per-SSID WiFi passwords
+	// live in the wifi.networks[] array and are covered by the backstop
+	// (blankSensitiveLeaves recurses arrays and empties every password leaf).
+	for _, dotted := range ScalarSecretFields {
 		if blankPath(m, strings.Split(dotted, ".")) {
 			changed = true
 		}
@@ -79,20 +80,68 @@ func blankConfigSecrets(content string) (string, bool, error) {
 
 // extractConfigSecrets pulls the plaintext values of the known secret fields
 // out of config.json content, for backfilling existing devices into the
-// encrypted store. Returns storage-field -> value for every SecretFields
-// entry present with a non-empty string leaf; missing / empty / already-blanked
-// leaves are omitted. Non-object content yields an empty map. The keys are the
-// SecretFields storage keys (== the config dotted paths), ready for SetSecret.
+// encrypted store. Returns storage-field -> value for every scalar field
+// present with a non-empty leaf, plus one wifi.password:<ssid> entry for each
+// wifi.networks[] element that carries a non-empty password. Missing / empty /
+// already-blanked leaves are omitted. Non-object content yields an empty map.
+// The keys are storage keys ready for SetSecret.
 // in: config.json content. out: field -> plaintext value.
 func extractConfigSecrets(content string) map[string]string {
 	out := make(map[string]string)
 	var m map[string]any
+	// A parse failure returns nothing to migrate, which is safe: every caller
+	// pairs this with blankConfigSecrets, and that path fails closed on
+	// unparseable object content, so a corrupt config never silently persists
+	// its plaintext. Extraction is best-effort; blanking is the guard.
 	if json.Unmarshal([]byte(content), &m) != nil {
 		return out
 	}
-	for _, dotted := range SecretFields {
+	for _, dotted := range ScalarSecretFields {
 		if v, ok := readPath(m, strings.Split(dotted, ".")); ok && v != "" {
 			out[dotted] = v
+		}
+	}
+	for _, ssid := range WifiNetworkSSIDs(m) {
+		if pw, ok := wifiNetworkPassword(m, ssid); ok && pw != "" {
+			out[WifiSecretField(ssid)] = pw
+		}
+	}
+	return out
+}
+
+// WifiNetworkSSIDs returns the SSID of every wifi.networks[] entry that has a
+// non-empty ssid, in config order. out: SSIDs (may be empty).
+func WifiNetworkSSIDs(m map[string]any) []string {
+	var out []string
+	for _, net := range wifiNetworks(m) {
+		if ssid, _ := net["ssid"].(string); ssid != "" {
+			out = append(out, ssid)
+		}
+	}
+	return out
+}
+
+// wifiNetworkPassword returns the plaintext password of the first
+// wifi.networks[] entry whose ssid matches. out: password, found.
+func wifiNetworkPassword(m map[string]any, ssid string) (string, bool) {
+	for _, net := range wifiNetworks(m) {
+		if s, _ := net["ssid"].(string); s == ssid {
+			pw, ok := net["password"].(string)
+			return pw, ok
+		}
+	}
+	return "", false
+}
+
+// wifiNetworks returns the wifi.networks[] array as objects, skipping any
+// non-object element. out: network objects (may be empty).
+func wifiNetworks(m map[string]any) []map[string]any {
+	wifi, _ := m["wifi"].(map[string]any)
+	arr, _ := wifi["networks"].([]any)
+	out := make([]map[string]any, 0, len(arr))
+	for _, e := range arr {
+		if net, ok := e.(map[string]any); ok {
+			out = append(out, net)
 		}
 	}
 	return out

@@ -1,6 +1,6 @@
 //go:build integration
 
-// SecretService integration tests (#443, phase 2). Envelope round-trip
+// SecretService integration tests. Envelope round-trip
 // through the real DB: per-tenant DEK create + wrap, secret encrypt + upsert,
 // server-side decrypt, write-only Status, and RLS tenant isolation. Also the
 // feature-off gate and the malformed-KEK boot failure.
@@ -81,14 +81,47 @@ func TestSecretService(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Status: %v", err)
 		}
-		if len(st) != len(service.SecretFields) {
-			t.Fatalf("Status has %d fields, want %d", len(st), len(service.SecretFields))
+		// Only a scalar is set, so Status is exactly the scalar set (no wifi rows).
+		if len(st) != len(service.ScalarSecretFields) {
+			t.Fatalf("Status has %d fields, want %d", len(st), len(service.ScalarSecretFields))
 		}
 		if !st["telegram.bot_token"] {
 			t.Error("telegram.bot_token should be set")
 		}
-		if st["wifi.password"] || st["web.password"] {
+		if st["wifi.ap_password"] || st["web.password"] {
 			t.Error("unset fields should be false")
+		}
+	})
+
+	t.Run("PerSSID_wifi_passwords_coexist", func(t *testing.T) {
+		pk := mustUpsert(t, dev, tA, "sec-dev-multi", "", "", "", "")
+		// Two networks stored under distinct per-SSID keys (migration 0024
+		// relaxed the field CHECK to accept wifi.password:<ssid>).
+		if err := sec.SetSecret(ctx, tA, pk, "wifi.password:HomeNet", "home-pw"); err != nil {
+			t.Fatalf("SetSecret HomeNet: %v", err)
+		}
+		if err := sec.SetSecret(ctx, tA, pk, "wifi.password:Barn", "barn-pw"); err != nil {
+			t.Fatalf("SetSecret Barn: %v", err)
+		}
+		for field, want := range map[string]string{
+			"wifi.password:HomeNet": "home-pw",
+			"wifi.password:Barn":    "barn-pw",
+		} {
+			got, found, err := sec.Reveal(ctx, tA, pk, field)
+			if err != nil || !found || got != want {
+				t.Errorf("Reveal(%q) = %q found=%v err=%v, want %q", field, got, found, err, want)
+			}
+		}
+		// Both show as set in Status, alongside the 4 scalars.
+		st, err := sec.Status(ctx, tA, pk)
+		if err != nil {
+			t.Fatalf("Status: %v", err)
+		}
+		if !st["wifi.password:HomeNet"] || !st["wifi.password:Barn"] {
+			t.Errorf("Status missing a per-SSID wifi row: %v", st)
+		}
+		if len(st) != len(service.ScalarSecretFields)+2 {
+			t.Errorf("Status has %d fields, want %d (scalars + 2 wifi)", len(st), len(service.ScalarSecretFields)+2)
 		}
 	})
 

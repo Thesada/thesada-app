@@ -177,7 +177,7 @@ func main() {
 	mqttClient := mustStartMQTT(rootCtx, cfg, pool, notifier, hub, services)
 	defer mqttClient.Stop()
 
-	httpServer := buildHTTPServer(cfg, services, hub, mail, mqttClient, ca)
+	httpServer := buildHTTPServer(cfg, services, hub, mail, mqttClient, ca, pool)
 	runHTTPServer(httpServer, cancel)
 
 	<-rootCtx.Done()
@@ -241,11 +241,15 @@ func mustStartMQTT(ctx context.Context, cfg *config.Config, pool *db.Pool,
 // /api/v1/ -> JSON API, /ws -> WebSocket hub, everything else -> HTMX dashboard.
 // The mqtt client is passed through so the super-admin /admin/mqtt shell can
 // register taps and publish through the shared paho connection.
-// in: cfg, services bundle, ws hub, mailer, mqtt client. out: configured *http.Server.
-func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub, mail *mailer.Mailer, mqttClient *mqtt.Client, ca *pki.CA) *http.Server {
+// in: cfg, services bundle, ws hub, mailer, mqtt client, app db pool (health probe). out: configured *http.Server.
+func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub, mail *mailer.Mailer, mqttClient *mqtt.Client, ca *pki.CA, pool *db.Pool) *http.Server {
 	root := http.NewServeMux()
 
 	api := apiv1.New(cfg, services, ca)
+	api.SetHealthProbes(
+		func(ctx context.Context) error { return db.Ping(ctx, pool) },
+		mqttClient.Status,
+	)
 	// Resolve a bearer token OR the session cookie so the JSON per-route guards
 	// (authmw.RequireAuthJSON / RequireSuperAdminJSON) see a *Session in context.
 	apiWithAuth := authmw.APIMiddleware(services.Auth, services.ApiTokens, authmw.APICSRFGuard{

@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"thesada.app/app/pkg/mqtt/mqtttest"
+	"thesada.app/app/pkg/service"
 	"thesada.app/app/pkg/service/servicetest"
 )
 
@@ -80,7 +81,7 @@ func TestAdminDeviceSecretsProvision_Integration(t *testing.T) {
 		if err != nil || device == nil {
 			t.Fatalf("fetch device: %v", err)
 		}
-		state, reachable := s.deviceSecretState(ctx, device, "")
+		state, reachable := s.deviceSecretState(ctx, device, service.ScalarSecretFields)
 		if !reachable {
 			t.Fatal("reachable = false, want true")
 		}

@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"thesada.app/app/pkg/config"
 	"thesada.app/app/pkg/db"
 	"thesada.app/app/pkg/mailer"
@@ -74,14 +76,14 @@ func New(cfg *config.Config, pool *db.Pool, mail *mailer.Mailer) *Notifier {
 
 // alertRow is the joined snapshot each Dispatch call needs to render one notification.
 type alertRow struct {
-	severity       string
-	code           *string
-	message        string
-	receivedAt     time.Time
-	deviceID       string
-	deviceDisplay  *string
-	alreadyEmail   bool
-	alreadyTg      bool
+	severity      string
+	code          *string
+	message       string
+	receivedAt    time.Time
+	deviceID      string
+	deviceDisplay *string
+	alreadyEmail  bool
+	alreadyTg     bool
 }
 
 // recipient is one subscription the alert was matched against.
@@ -96,14 +98,23 @@ type recipient struct {
 // notifications via every matching channel (email, telegram). Delivery state
 // is recorded on device_alerts; a single row is only emailed once and only
 // telegrammed once across retries.
-// in: ctx, device_alerts.id. out: error if the row lookup fails. Per-channel
-// send errors are logged but do not fail the whole dispatch.
-func (n *Notifier) Dispatch(ctx context.Context, alertID int64) error {
-	row, err := n.loadAlert(ctx, alertID)
-	if err != nil {
+// All queries run inside db.WithTenant on the App pool - the RLS policies on
+// device_alerts / devices / alert_subscriptions / users key on app.tenant_id
+// and return zero rows when the GUC is unset. The sends themselves happen
+// outside the tx so slow SMTP/Telegram calls never hold a connection open.
+// in: ctx, tenant id, device_alerts.id. out: error if the row lookup fails.
+// Per-channel send errors are logged but do not fail the whole dispatch.
+func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64) error {
+	var row *alertRow
+	var recipients []recipient
+	err := db.WithTenant(ctx, n.db, tenantID, func(tx pgx.Tx) error {
+		var err error
+		if row, err = n.loadAlert(ctx, tx, alertID); err != nil {
+			return err
+		}
+		recipients, err = n.loadRecipients(ctx, tx, alertID)
 		return err
-	}
-	recipients, err := n.loadRecipients(ctx, alertID)
+	})
 	if err != nil {
 		return err
 	}
@@ -141,7 +152,10 @@ func (n *Notifier) Dispatch(ctx context.Context, alertID int64) error {
 		}
 	}
 	if emailOK || tgOK {
-		if err := n.markDelivered(ctx, alertID, emailOK, tgOK); err != nil {
+		err := db.WithTenant(ctx, n.db, tenantID, func(tx pgx.Tx) error {
+			return n.markDelivered(ctx, tx, alertID, emailOK, tgOK)
+		})
+		if err != nil {
 			slog.Error("alert delivery mark failed", "alert_id", alertID, "err", err)
 		} else {
 			slog.Info("alert.delivery.state_change",
@@ -153,8 +167,8 @@ func (n *Notifier) Dispatch(ctx context.Context, alertID int64) error {
 }
 
 // loadAlert fetches the joined alert + device row for rendering.
-// in: ctx, alert id. out: populated *alertRow or error.
-func (n *Notifier) loadAlert(ctx context.Context, alertID int64) (*alertRow, error) {
+// in: ctx, tenant-scoped tx, alert id. out: populated *alertRow or error.
+func (n *Notifier) loadAlert(ctx context.Context, tx pgx.Tx, alertID int64) (*alertRow, error) {
 	const query = `
 		SELECT a.severity, a.code, a.message, a.received_at,
 		       d.device_id, d.display_name,
@@ -163,7 +177,7 @@ func (n *Notifier) loadAlert(ctx context.Context, alertID int64) (*alertRow, err
 		JOIN devices d ON d.id = a.device_pk
 		WHERE a.id = $1`
 	var r alertRow
-	err := n.db.QueryRow(ctx, query, alertID).Scan(
+	err := tx.QueryRow(ctx, query, alertID).Scan(
 		&r.severity, &r.code, &r.message, &r.receivedAt,
 		&r.deviceID, &r.deviceDisplay,
 		&r.alreadyEmail, &r.alreadyTg)
@@ -176,8 +190,8 @@ func (n *Notifier) loadAlert(ctx context.Context, alertID int64) (*alertRow, err
 // loadRecipients walks alert_subscriptions for the alert's device or a
 // tenant-wide wildcard row (device_pk IS NULL) and returns everyone whose
 // min_severity threshold is met.
-// in: ctx, alert id. out: [] recipient, error.
-func (n *Notifier) loadRecipients(ctx context.Context, alertID int64) ([]recipient, error) {
+// in: ctx, tenant-scoped tx, alert id. out: [] recipient, error.
+func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64) ([]recipient, error) {
 	const query = `
 		SELECT s.user_id::text, s.channel, u.email::text, u.telegram_chat_id
 		FROM device_alerts a
@@ -188,7 +202,7 @@ func (n *Notifier) loadRecipients(ctx context.Context, alertID int64) ([]recipie
 		  AND (CASE a.severity WHEN 'info' THEN 0 WHEN 'warn' THEN 1 WHEN 'crit' THEN 2 END)
 		      >=
 		      (CASE s.min_severity WHEN 'info' THEN 0 WHEN 'warn' THEN 1 WHEN 'crit' THEN 2 END)`
-	rows, err := n.db.Query(ctx, query, alertID)
+	rows, err := tx.Query(ctx, query, alertID)
 	if err != nil {
 		return nil, fmt.Errorf("recipients query: %w", err)
 	}
@@ -197,23 +211,28 @@ func (n *Notifier) loadRecipients(ctx context.Context, alertID int64) ([]recipie
 	for rows.Next() {
 		var r recipient
 		if err := rows.Scan(&r.userID, &r.channel, &r.email, &r.telegramChatID); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("recipients scan: %w", err)
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("recipients rows: %w", err)
+	}
+	return out, nil
 }
 
 // markDelivered ORs the per-channel delivered flags so re-runs don't clear them.
-// in: ctx, alert id, whether email fired this run, whether telegram fired. out: error.
-func (n *Notifier) markDelivered(ctx context.Context, alertID int64, email, tg bool) error {
+// in: ctx, tenant-scoped tx, alert id, whether email fired this run, whether telegram fired. out: error.
+func (n *Notifier) markDelivered(ctx context.Context, tx pgx.Tx, alertID int64, email, tg bool) error {
 	const query = `
 		UPDATE device_alerts
 		SET delivered_email = delivered_email OR $2,
 		    delivered_telegram = delivered_telegram OR $3
 		WHERE id = $1`
-	_, err := n.db.Exec(ctx, query, alertID, email, tg)
-	return err
+	if _, err := tx.Exec(ctx, query, alertID, email, tg); err != nil {
+		return fmt.Errorf("mark delivered: %w", err)
+	}
+	return nil
 }
 
 // renderAlert builds a human-readable subject + plain text body + MIME html

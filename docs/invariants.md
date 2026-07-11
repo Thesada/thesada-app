@@ -4,7 +4,9 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-07-01 (device-config secrets complete: provision-at-pair via
+Dated 2026-07-10 (alert Dispatch tenant-scoped through `db.WithTenant`
+so RLS returns rows - #545; pools-app guard limitation noted).
+Previously 2026-07-01 (device-config secrets complete: provision-at-pair via
 `secret.set`, write-only UI, root-KEK rotation, existing-device backfill,
 field keys aligned to the firmware keymap - #443 phases 5-7). Previously
 2026-06-30 (device-config secrets phases 2-4: per-tenant DEK envelope
@@ -46,6 +48,16 @@ How enforced: `scripts/check-pools-app.sh` (wired into
 PR that introduces a new `pools.App.{Query,QueryRow,Exec,Begin,
 SendBatch,CopyFrom,BeginTx}` caller outside the grandfathered set in
 `scripts/pools-app-allowlist.txt`.
+
+Guard limitation, learned 2026-07-10: the check is textual on
+`pools.App.`, so a component that receives the App pool under another
+name evades it - `pkg/alerts` queried through its `n.db` field with no
+tenant GUC and RLS silently returned zero rows (alert delivery dead,
+issue #545). When handing the App pool to a component, the receiver
+either takes tenant IDs and wraps every query in `db.WithTenant`
+(what `pkg/alerts` does now, verified by
+`pkg/alerts/alerts_integration_test.go`), or it belongs on the
+allowlist with a justification.
 
 Phase 2 is complete: every `pkg/service/*.go` file converted to
 `db.WithTenant` / `db.WithAdminAudit`. Every `pkg/service` file is now
