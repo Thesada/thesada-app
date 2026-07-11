@@ -85,7 +85,9 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.Error("ws upgrade failed", "err", err)
 		return
 	}
-	cn := &conn{ws: socket, send: make(chan []byte, sendBuffer), tenant: u.TenantID}
+	// EffectiveTenantID, not u.TenantID: an impersonating super-admin must see
+	// the impersonated tenant's events, not their home tenant's.
+	cn := &conn{ws: socket, send: make(chan []byte, sendBuffer), tenant: authmw.EffectiveTenantID(r)}
 	h.register(cn)
 	slog.Info("ws client connected", "tenant", cn.tenant, "user", u.Email)
 	go h.writePump(cn)

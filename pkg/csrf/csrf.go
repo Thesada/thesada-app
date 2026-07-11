@@ -11,6 +11,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 
@@ -36,11 +37,12 @@ const tokenKey ctxKey = 1
 
 // Middleware ensures every request carries a signed CSRF cookie and verifies
 // unsafe methods echo the value back (form field or header); failures return 403.
-// in: HMAC secret. out: http.Handler wrapper factory.
-func Middleware(secret []byte) func(http.Handler) http.Handler {
+// in: HMAC secret, trusted proxy networks (for the cookie Secure decision).
+// out: http.Handler wrapper factory.
+func Middleware(secret []byte, trusted []*net.IPNet) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token := ensureCookie(w, r, secret)
+			token := ensureCookie(w, r, secret, trusted)
 			if isUnsafe(r.Method) {
 				if !verify(r, token) {
 					http.Error(w, "csrf token mismatch", http.StatusForbidden)
@@ -67,8 +69,8 @@ func Token(r *http.Request) string {
 
 // ensureCookie returns the request's CSRF token, minting a fresh signed one when
 // absent or invalid (attacker-planted cookies fail the signature check and are replaced).
-// in: writer, request, HMAC secret. out: the token now bound to the request.
-func ensureCookie(w http.ResponseWriter, r *http.Request, secret []byte) string {
+// in: writer, request, HMAC secret, trusted proxies. out: the token now bound to the request.
+func ensureCookie(w http.ResponseWriter, r *http.Request, secret []byte, trusted []*net.IPNet) string {
 	if c, err := r.Cookie(CookieName); err == nil && validToken(secret, c.Value) {
 		return c.Value
 	}
@@ -80,11 +82,13 @@ func ensureCookie(w http.ResponseWriter, r *http.Request, secret []byte) string 
 		return ""
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     CookieName,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: false,
-		Secure:   httpsec.RequestIsSecure(r),
+		Name:  CookieName,
+		Value: token,
+		Path:  "/",
+		// HttpOnly: the token reaches JS via the CSRFToken template var, nothing
+		// reads the cookie client-side, so it does not need to be scriptable.
+		HttpOnly: true,
+		Secure:   httpsec.RequestIsSecure(r, trusted),
 		SameSite: http.SameSiteLaxMode,
 	})
 	return token

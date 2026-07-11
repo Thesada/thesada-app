@@ -7,6 +7,7 @@ package authmw
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -66,7 +67,7 @@ func withCookie(r *http.Request, val string) *http.Request {
 func TestMiddleware_NoCookie_StaysAnonymous(t *testing.T) {
 	fa := &fakeAuth{sess: newSession(false, nil)}
 	var got *service.Session
-	Middleware(fa)(captureSession(&got)).ServeHTTP(
+	Middleware(fa, nil)(captureSession(&got)).ServeHTTP(
 		httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 	if got != nil {
 		t.Errorf("session = %+v, want anonymous", got)
@@ -80,7 +81,7 @@ func TestMiddleware_InvalidCookie_SilentlyAnonymous(t *testing.T) {
 	fa := &fakeAuth{err: errors.New("expired")}
 	var got *service.Session
 	rec := httptest.NewRecorder()
-	Middleware(fa)(captureSession(&got)).ServeHTTP(rec, withCookie(httptest.NewRequest(http.MethodGet, "/", nil), "bad"))
+	Middleware(fa, nil)(captureSession(&got)).ServeHTTP(rec, withCookie(httptest.NewRequest(http.MethodGet, "/", nil), "bad"))
 	if got != nil {
 		t.Errorf("session = %+v, want anonymous on validation failure", got)
 	}
@@ -93,7 +94,7 @@ func TestMiddleware_ValidCookie_InjectsSession(t *testing.T) {
 	sess := newSession(false, nil)
 	fa := &fakeAuth{sess: sess}
 	var got *service.Session
-	Middleware(fa)(captureSession(&got)).ServeHTTP(
+	Middleware(fa, nil)(captureSession(&got)).ServeHTTP(
 		httptest.NewRecorder(), withCookie(httptest.NewRequest(http.MethodGet, "/", nil), "raw-token"))
 	if got != sess {
 		t.Errorf("injected session = %+v, want %+v", got, sess)
@@ -112,7 +113,7 @@ func TestMiddleware_RotatedToken_WritesSecureCookie(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := withCookie(httptest.NewRequest(http.MethodGet, "/", nil), "old")
 	req.Header.Set("X-Forwarded-Proto", "https") // TLS-terminated upstream
-	Middleware(fa)(okHandler()).ServeHTTP(rec, req)
+	Middleware(fa, testProxyNets(t))(okHandler()).ServeHTTP(rec, req)
 
 	c := cookieNamed(rec.Result(), CookieName)
 	if c == nil {
@@ -131,7 +132,7 @@ func TestMiddleware_RotatedToken_InsecureOverPlainHTTP(t *testing.T) {
 	sess.NewToken = "rotated"
 	sess.NewExpires = time.Now().Add(time.Hour)
 	rec := httptest.NewRecorder()
-	Middleware(&fakeAuth{sess: sess})(okHandler()).ServeHTTP(
+	Middleware(&fakeAuth{sess: sess}, nil)(okHandler()).ServeHTTP(
 		rec, withCookie(httptest.NewRequest(http.MethodGet, "/", nil), "old"))
 	c := cookieNamed(rec.Result(), CookieName)
 	if c == nil || c.Secure {
@@ -141,7 +142,7 @@ func TestMiddleware_RotatedToken_InsecureOverPlainHTTP(t *testing.T) {
 
 func TestMiddleware_NoRotation_NoCookieWritten(t *testing.T) {
 	rec := httptest.NewRecorder()
-	Middleware(&fakeAuth{sess: newSession(false, nil)})(okHandler()).ServeHTTP(
+	Middleware(&fakeAuth{sess: newSession(false, nil)}, nil)(okHandler()).ServeHTTP(
 		rec, withCookie(httptest.NewRequest(http.MethodGet, "/", nil), "tok"))
 	if c := cookieNamed(rec.Result(), CookieName); c != nil {
 		t.Errorf("cookie written without rotation: %+v", c)
@@ -156,7 +157,7 @@ func TestAPIMiddleware_BearerValid_InjectsUserWithoutCookie(t *testing.T) {
 	var got *service.Session
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/devices", nil)
 	req.Header.Set("Authorization", "Bearer good-token")
-	APIMiddleware(fa, &fakeTokens{user: u}, APICSRFGuard{})(captureSession(&got)).ServeHTTP(httptest.NewRecorder(), req)
+	APIMiddleware(fa, &fakeTokens{user: u}, APICSRFGuard{}, nil)(captureSession(&got)).ServeHTTP(httptest.NewRecorder(), req)
 	if got == nil || got.User != u {
 		t.Fatalf("injected user = %+v, want token owner", got)
 	}
@@ -171,7 +172,7 @@ func TestAPIMiddleware_BearerInvalid_FallsBackToCookie(t *testing.T) {
 	var got *service.Session
 	req := withCookie(httptest.NewRequest(http.MethodGet, "/api/v1/devices", nil), "cookie-tok")
 	req.Header.Set("Authorization", "Bearer bad-token")
-	APIMiddleware(fa, &fakeTokens{err: errors.New("revoked")}, APICSRFGuard{})(captureSession(&got)).ServeHTTP(httptest.NewRecorder(), req)
+	APIMiddleware(fa, &fakeTokens{err: errors.New("revoked")}, APICSRFGuard{}, nil)(captureSession(&got)).ServeHTTP(httptest.NewRecorder(), req)
 	if got != sess {
 		t.Errorf("session = %+v, want cookie fallback", got)
 	}
@@ -183,7 +184,7 @@ func TestAPIMiddleware_BearerInvalid_FallsBackToCookie(t *testing.T) {
 func TestAPIMiddleware_NoCredentials_Anonymous(t *testing.T) {
 	var got *service.Session
 	rec := httptest.NewRecorder()
-	APIMiddleware(&fakeAuth{}, &fakeTokens{}, APICSRFGuard{})(captureSession(&got)).ServeHTTP(
+	APIMiddleware(&fakeAuth{}, &fakeTokens{}, APICSRFGuard{}, nil)(captureSession(&got)).ServeHTTP(
 		rec, httptest.NewRequest(http.MethodGet, "/api/v1/devices", nil))
 	if got != nil {
 		t.Errorf("session = %+v, want anonymous", got)
@@ -200,7 +201,7 @@ func TestAPIMiddleware_CookieRotation_RefreshesCookie(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := withCookie(httptest.NewRequest(http.MethodGet, "/api/v1/devices", nil), "old")
 	req.Header.Set("X-Forwarded-Proto", "https")
-	APIMiddleware(&fakeAuth{sess: sess}, &fakeTokens{}, APICSRFGuard{})(okHandler()).ServeHTTP(rec, req)
+	APIMiddleware(&fakeAuth{sess: sess}, &fakeTokens{}, APICSRFGuard{}, testProxyNets(t))(okHandler()).ServeHTTP(rec, req)
 	c := cookieNamed(rec.Result(), CookieName)
 	if c == nil || c.Value != "rotated" || !c.Secure {
 		t.Errorf("rotation cookie = %+v, want refreshed+secure", c)
@@ -246,4 +247,15 @@ func TestClearSessionCookie_ExpiresImmediately(t *testing.T) {
 
 func okHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }
+}
+
+// testProxyNets marks httptest's default RemoteAddr (192.0.2.1) as a trusted
+// proxy so X-Forwarded-Proto is honoured in the rotation tests.
+func testProxyNets(t *testing.T) []*net.IPNet {
+	t.Helper()
+	_, n, err := net.ParseCIDR("192.0.2.0/24")
+	if err != nil {
+		t.Fatalf("parse test proxy net: %v", err)
+	}
+	return []*net.IPNet{n}
 }

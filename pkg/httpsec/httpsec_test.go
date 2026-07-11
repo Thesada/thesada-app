@@ -7,32 +7,39 @@ import (
 	"testing"
 )
 
-// TestRequestIsSecure covers direct TLS, the proxy forwarded-proto header
-// (case-insensitive), and the plain-HTTP fallthrough.
-func TestRequestIsSecure(t *testing.T) {
+// TestRequestIsSecure_TrustedProxyGate covers direct TLS, the forwarded-proto
+// header honoured only from a trusted proxy peer (case-insensitive), the
+// spoofed-header rejection from untrusted peers, and the plain-HTTP fallthrough.
+func TestRequestIsSecure_TrustedProxyGate(t *testing.T) {
+	proxyNets := mustNets(t, "10.0.0.0/8")
 	cases := []struct {
-		name string
-		tls  bool
-		xfp  string
-		want bool
+		name    string
+		tls     bool
+		xfp     string
+		peer    string
+		trusted []*net.IPNet
+		want    bool
 	}{
-		{"direct tls", true, "", true},
-		{"xfp https", false, "https", true},
-		{"xfp HTTPS mixed case", false, "HTTPS", true},
-		{"xfp http", false, "http", false},
-		{"no tls no header", false, "", false},
+		{"direct tls", true, "", "203.0.113.9:444", nil, true},
+		{"xfp https from trusted proxy", false, "https", "10.0.0.2:5555", proxyNets, true},
+		{"xfp HTTPS mixed case trusted", false, "HTTPS", "10.0.0.2:5555", proxyNets, true},
+		{"xfp https spoofed by untrusted peer", false, "https", "203.0.113.9:444", proxyNets, false},
+		{"xfp https with no trusted proxies", false, "https", "10.0.0.2:5555", nil, false},
+		{"xfp http from trusted proxy", false, "http", "10.0.0.2:5555", proxyNets, false},
+		{"no tls no header", false, "", "10.0.0.2:5555", proxyNets, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			r, _ := http.NewRequest(http.MethodGet, "http://app/x", nil)
+			r.RemoteAddr = c.peer
 			if c.tls {
 				r.TLS = &tls.ConnectionState{}
 			}
 			if c.xfp != "" {
 				r.Header.Set("X-Forwarded-Proto", c.xfp)
 			}
-			if got := RequestIsSecure(r); got != c.want {
-				t.Errorf("RequestIsSecure(tls=%v xfp=%q) = %v, want %v", c.tls, c.xfp, got, c.want)
+			if got := RequestIsSecure(r, c.trusted); got != c.want {
+				t.Errorf("RequestIsSecure(tls=%v xfp=%q peer=%s) = %v, want %v", c.tls, c.xfp, c.peer, got, c.want)
 			}
 		})
 	}

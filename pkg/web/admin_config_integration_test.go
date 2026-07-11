@@ -221,12 +221,12 @@ func TestAdminConfigSnapshotEndpoint(t *testing.T) {
 	// Going through it (not the bare handler) is what catches a dropped or
 	// misordered middleware.
 	secret := []byte(env.Cfg.CookieSecret)
-	chain := csrf.Middleware(secret)(authmw.Middleware(env.Services.Auth)(
+	chain := csrf.Middleware(secret, nil)(authmw.Middleware(env.Services.Auth, nil)(
 		http.HandlerFunc(s.handleAdminDeviceConfigSnapshot)))
 
 	// Mint a signed CSRF cookie the way a browser gets one: a safe request.
 	mintRec := httptest.NewRecorder()
-	csrf.Middleware(secret)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
+	csrf.Middleware(secret, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
 		ServeHTTP(mintRec, httptest.NewRequest(http.MethodGet, "/", nil))
 	var csrfCookie *http.Cookie
 	for _, c := range mintRec.Result().Cookies() {

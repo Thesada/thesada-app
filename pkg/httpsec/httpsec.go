@@ -12,13 +12,17 @@ import (
 )
 
 // RequestIsSecure reports whether the request reached the app over TLS, either
-// directly (r.TLS != nil) or via a reverse proxy that terminated TLS and set
-// the standard X-Forwarded-Proto header. Both the session and CSRF cookies use
-// this so their Secure flag stays consistent end-to-end behind HAProxy.
-// in: request. out: true when cookies should be marked Secure.
-func RequestIsSecure(r *http.Request) bool {
+// directly (r.TLS != nil) or via a trusted reverse proxy that terminated TLS
+// and set X-Forwarded-Proto. The header is only honoured when the immediate
+// peer is in the trusted proxy set - same gate as ClientIP - so an arbitrary
+// peer cannot spoof "https" and get Secure-flagged cookies over plain HTTP.
+// in: request, trusted proxy networks. out: true when cookies should be marked Secure.
+func RequestIsSecure(r *http.Request, trusted []*net.IPNet) bool {
 	if r.TLS != nil {
 		return true
+	}
+	if !ipInAny(net.ParseIP(hostOnly(r.RemoteAddr)), trusted) {
+		return false
 	}
 	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }

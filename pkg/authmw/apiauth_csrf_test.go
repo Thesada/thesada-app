@@ -20,7 +20,7 @@ func runAPICSRF(t *testing.T, r *http.Request) (int, *service.Session) {
 	var got *service.Session
 	guard := APICSRFGuard{BaseURL: csrfBase}
 	rec := httptest.NewRecorder()
-	APIMiddleware(&fakeAuth{sess: newSession(false, nil)}, &fakeTokens{}, guard)(
+	APIMiddleware(&fakeAuth{sess: newSession(false, nil)}, &fakeTokens{}, guard, nil)(
 		captureSession(&got)).ServeHTTP(rec, r)
 	return rec.Code, got
 }
@@ -97,7 +97,7 @@ func TestAPIMiddleware_BearerUnsafe_BypassesGate(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/devices", nil)
 	r.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
-	APIMiddleware(&fakeAuth{}, &fakeTokens{user: u}, guard)(
+	APIMiddleware(&fakeAuth{}, &fakeTokens{user: u}, guard, nil)(
 		captureSession(&got)).ServeHTTP(rec, r)
 	if rec.Code != http.StatusOK || got == nil || got.User != u {
 		t.Errorf("status=%d session=%v, want 200 + token owner", rec.Code, got)

@@ -8,6 +8,7 @@ package authmw
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"strings"
 
@@ -61,7 +62,8 @@ func isUnsafeMethod(m string) bool {
 // csrfGuard: SameSite=Lax does not stop a same-site sibling subdomain, so the
 // request must prove same-origin intent (Fetch-Metadata / Origin, or a
 // double-submit CSRF token) or it is rejected 403. The bearer path is exempt.
-// in: AuthService, ApiTokenService, cookie-path CSRF guard. out: http.Handler wrapper.
+// in: AuthService, ApiTokenService, cookie-path CSRF guard, trusted proxy networks.
+// out: http.Handler wrapper.
 // TokenValidator resolves a raw bearer token into the owning *service.User.
 // *service.ApiTokenService satisfies it; the interface keeps APIMiddleware
 // unit-testable without a database.
@@ -69,7 +71,7 @@ type TokenValidator interface {
 	ValidateToken(token string) (*service.User, error)
 }
 
-func APIMiddleware(auth SessionValidator, tokens TokenValidator, csrfGuard APICSRFGuard) func(http.Handler) http.Handler {
+func APIMiddleware(auth SessionValidator, tokens TokenValidator, csrfGuard APICSRFGuard, trusted []*net.IPNet) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if tok := BearerToken(r); tok != "" {
@@ -90,7 +92,7 @@ func APIMiddleware(auth SessionValidator, tokens TokenValidator, csrfGuard APICS
 						return
 					}
 					if sess.NewToken != "" {
-						SetSessionCookie(w, sess.NewToken, sess.NewExpires, httpsec.RequestIsSecure(r))
+						SetSessionCookie(w, sess.NewToken, sess.NewExpires, httpsec.RequestIsSecure(r, trusted))
 					}
 					ctx := context.WithValue(r.Context(), sessionKey, sess)
 					next.ServeHTTP(w, r.WithContext(ctx))

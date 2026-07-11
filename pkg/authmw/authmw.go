@@ -4,6 +4,7 @@ package authmw
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"time"
 
@@ -34,10 +35,10 @@ type SessionValidator interface {
 // the middleware writes the fresh cookie on the response before invoking the
 // next handler. The Secure flag follows the request transport: TLS-terminated
 // requests get Secure=true, plain HTTP loopback dev gets false. Plain HTTP
-// requests behind a TLS-terminating reverse proxy are detected by the
+// requests behind a TLS-terminating trusted reverse proxy are detected by the
 // X-Forwarded-Proto header so the cookie keeps the Secure flag end-to-end.
-// in: AuthService. out: http.Handler wrapper.
-func Middleware(auth SessionValidator) func(http.Handler) http.Handler {
+// in: AuthService, trusted proxy networks. out: http.Handler wrapper.
+func Middleware(auth SessionValidator, trusted []*net.IPNet) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			c, err := r.Cookie(CookieName)
@@ -51,7 +52,7 @@ func Middleware(auth SessionValidator) func(http.Handler) http.Handler {
 				return
 			}
 			if sess.NewToken != "" {
-				SetSessionCookie(w, sess.NewToken, sess.NewExpires, httpsec.RequestIsSecure(r))
+				SetSessionCookie(w, sess.NewToken, sess.NewExpires, httpsec.RequestIsSecure(r, trusted))
 			}
 			ctx := context.WithValue(r.Context(), sessionKey, sess)
 			next.ServeHTTP(w, r.WithContext(ctx))
