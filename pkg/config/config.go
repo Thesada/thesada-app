@@ -72,6 +72,18 @@ type Config struct {
 	// CLIRequestTimeout bounds the MQTT CLI response goroutine; generous to cover
 	// SIM7080 cellular backoff (up to 40 s) plus broker RTT. Default 120s.
 	CLIRequestTimeout time.Duration
+
+	// AlertMaxAttempts is the dispatch budget per alert before it is
+	// dead-lettered (delivery_status='dead'). Default 5.
+	AlertMaxAttempts int
+
+	// AlertRetryBase is the first retry delay; each further attempt doubles it
+	// (base, 2x, 4x, ...). Default 1m, so a 5-attempt budget spans ~15m.
+	AlertRetryBase time.Duration
+
+	// AlertRedispatchInterval is the sweep cadence for pending-and-due alerts
+	// (startup redispatch runs one sweep immediately). Default 1m.
+	AlertRedispatchInterval time.Duration
 }
 
 // Load reads all THESADA_* environment variables into a Config.
@@ -102,6 +114,9 @@ func Load() (*Config, error) {
 		DeviceConfigKEK:         os.Getenv("THESADA_DEVICE_CONFIG_KEK"),
 		DeviceConfigNewKEK:      os.Getenv("THESADA_DEVICE_CONFIG_KEK_NEW"),
 		CLIRequestTimeout:       envOrDuration("THESADA_CLI_REQUEST_TIMEOUT", 120*time.Second),
+		AlertMaxAttempts:        envOrInt("THESADA_ALERT_MAX_ATTEMPTS", 5),
+		AlertRetryBase:          envOrDuration("THESADA_ALERT_RETRY_BASE", time.Minute),
+		AlertRedispatchInterval: envOrDuration("THESADA_ALERT_REDISPATCH_INTERVAL", time.Minute),
 	}
 	tp, err := parseTrustedProxies(os.Getenv("THESADA_TRUSTED_PROXIES"))
 	if err != nil {

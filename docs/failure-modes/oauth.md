@@ -15,7 +15,7 @@
 
 ## Gaps
 
-- **Auto-link then session-create is not one transaction (#68-class).** On email-match, identity is `LinkIdentity`'d, then `startSession` (`web/oauth.go:162`); a `CreateSession` DB failure leaves the identity linked with no session and no user error (only the operator `session create failed` log). Next login recovers, but the partial state is invisible.
+- **Auto-link then session-create is not one transaction (non-transactional multi-step class).** On email-match, identity is `LinkIdentity`'d, then `startSession` (`web/oauth.go:162`); a `CreateSession` DB failure leaves the identity linked with no session and no user error (only the operator `session create failed` log). Next login recovers, but the partial state is invisible.
 - **No cached-provider fallback:** OIDC discovery runs per request via `LoadProvider`, so a brief IdP blip fails the whole flow with a 502 rather than using a last-known-good provider.
 
 ---

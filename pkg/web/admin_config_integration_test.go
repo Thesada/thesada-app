@@ -40,7 +40,7 @@ func startWebBrokerServer(t *testing.T, env *servicetest.Env, brokerURL string) 
 	cfg.CLIRequestTimeout = 15 * time.Second
 
 	client, err := mqtt.Start(context.Background(), cfg, env.Pools.MQTT,
-		alerts.New(cfg, env.Pools.App, nil), ws.New(cfg), env.Services)
+		alerts.New(cfg, env.Pools, nil), ws.New(cfg), env.Services)
 	if err != nil {
 		t.Fatalf("mqtt start: %v", err)
 	}

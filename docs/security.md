@@ -185,7 +185,7 @@ purge plaintext from older `device_file_history` rows.
 
 At pair time (`handleAdminDevicePairIssue`), each set secret is decrypted
 and pushed to the device NVS via `secret.set` (mirror of `cert.set`),
-before the device restart. Field keys match the firmware keymap (#442);
+before the device restart. Field keys match the firmware keymap;
 `wifi.password` is provisioned per-SSID as `wifi.password:<ssid>`, using
 the device's configured SSID.
 
