@@ -222,11 +222,11 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 	// entirely. Push-first-persist-last holds - a failed secret push aborts the
 	// pair with no paired_at flip, and a retry re-pushes (secret.set overwrites).
 	if s.services.Secrets.Enabled() {
-		// wifi.password is keyed per-SSID on the firmware; resolve the device's
-		// configured SSID from its stored config so we can push
-		// secret.set wifi.password:<ssid>.
-		ssid := s.deviceWifiSSID(r.Context(), device)
-		outcome := provisionDeviceSecrets(service.SecretFields, ssid,
+		// WiFi passwords are keyed per-SSID on the firmware; build one field
+		// per configured network from the device's stored config so we push
+		// secret.set wifi.password:<ssid> for each.
+		fields, primarySSID := secretProvisionFields(s.deviceWifiSSIDs(r.Context(), device))
+		outcome := provisionDeviceSecrets(fields, primarySSID,
 			func(field string) (string, bool, error) {
 				v, found, err := s.services.Secrets.Reveal(r.Context(), device.TenantID, device.ID, field)
 				if err != nil {
@@ -343,6 +343,26 @@ func (s *Server) runCLI(ctx context.Context, topicPrefix, command, payload strin
 	return "", true
 }
 
+// secretProvisionFields is the ordered storage-field list to provision to a
+// device: the scalars, then one wifi.password:<ssid> per configured network,
+// then the legacy bare wifi.password for any pre-per-SSID stored row. reveal
+// skips the ones that are not stored, so unconfigured / absent fields drop out.
+// out: field list, primary SSID (for the legacy remap; "" if no networks).
+func secretProvisionFields(ssids []string) ([]string, string) {
+	fields := append([]string{}, service.ScalarSecretFields...)
+	for _, ssid := range ssids {
+		if f := service.WifiSecretField(ssid); f != "" {
+			fields = append(fields, f)
+		}
+	}
+	fields = append(fields, service.LegacyWifiPassword)
+	primary := ""
+	if len(ssids) > 0 {
+		primary = ssids[0]
+	}
+	return fields, primary
+}
+
 // provisionOutcome is the result of the pure provisioning loop: which
 // firmware fields were pushed, which were skipped and why, and a non-empty
 // AbortMsg when the pair must be aborted (redirect error=AbortMsg).
@@ -414,24 +434,21 @@ func (s *Server) pushSecret(ctx context.Context, topicPrefix, fwField, value str
 	return "", true
 }
 
-// deviceWifiSSID reads the wifi.ssid leaf from the device's most recent
-// stored config.json so wifi.password can be provisioned as
-// secret.set wifi.password:<ssid>. The stored config is blanked (phase 4) but
-// ssid is not a secret, so it survives. Returns "" on any miss - the caller
-// then skips wifi.password rather than pushing a malformed field.
-// in: ctx, device. out: configured SSID, or "".
-func (s *Server) deviceWifiSSID(ctx context.Context, device *service.Device) string {
+// deviceWifiSSIDs reads the SSID of every wifi.networks[] entry from the
+// device's most recent stored config.json, so each network's password can be
+// provisioned as secret.set wifi.password:<ssid>. The stored config is blanked
+// but the SSIDs are not secret, so they survive. Returns nil on any miss.
+// in: ctx, device. out: configured SSIDs in config order, or nil.
+func (s *Server) deviceWifiSSIDs(ctx context.Context, device *service.Device) []string {
 	snap, err := s.services.DeviceFiles.Latest(ctx, device.TenantID, device.ID, "config.json")
 	if err != nil || snap == nil {
-		return ""
+		return nil
 	}
 	var m map[string]any
 	if json.Unmarshal([]byte(snap.Content), &m) != nil {
-		return ""
+		return nil
 	}
-	wifi, _ := m["wifi"].(map[string]any)
-	ssid, _ := wifi["ssid"].(string)
-	return ssid
+	return service.WifiNetworkSSIDs(m)
 }
 
 // handleAdminDevicePairRevoke marks the active cert as revoked in the db

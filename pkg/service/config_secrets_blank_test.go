@@ -104,9 +104,16 @@ func TestBlankConfigSecrets(t *testing.T) {
 		}
 	})
 
-	t.Run("extractConfigSecrets is the inverse of blanking", func(t *testing.T) {
+	t.Run("extractConfigSecrets pulls scalars + one per wifi network", func(t *testing.T) {
 		in := `{
-			"wifi": {"ssid": "home", "password": "wp", "ap_password": "app"},
+			"wifi": {
+				"ap_password": "app",
+				"networks": [
+					{"ssid": "home", "password": "wp"},
+					{"ssid": "barn", "password": "bp"},
+					{"ssid": "open", "password": ""}
+				]
+			},
 			"mqtt": {"password": "mp"},
 			"telegram": {"bot_token": "tt"},
 			"web": {"password": ""},
@@ -114,11 +121,12 @@ func TestBlankConfigSecrets(t *testing.T) {
 		}`
 		got := extractConfigSecrets(in)
 		want := map[string]string{
-			"wifi.password":      "wp",
 			"wifi.ap_password":   "app",
+			"wifi.password:home": "wp",
+			"wifi.password:barn": "bp",
 			"mqtt.password":      "mp",
 			"telegram.bot_token": "tt",
-			// web.password is empty -> omitted
+			// web.password and the empty-password network are omitted
 		}
 		if len(got) != len(want) {
 			t.Fatalf("got %d fields %v, want %d %v", len(got), got, len(want), want)
@@ -128,8 +136,29 @@ func TestBlankConfigSecrets(t *testing.T) {
 				t.Errorf("extract[%q] = %q, want %q", k, got[k], v)
 			}
 		}
-		if _, present := got["web.password"]; present {
-			t.Error("empty web.password should be omitted from extraction")
+		if _, present := got["wifi.password:open"]; present {
+			t.Error("empty-password network should be omitted from extraction")
+		}
+	})
+
+	t.Run("blank empties every wifi.networks[] password, keeps SSIDs", func(t *testing.T) {
+		in := `{"wifi":{"networks":[{"ssid":"home","password":"wp"},{"ssid":"barn","password":"bp"}]}}`
+		out, changed, err := blankConfigSecrets(in)
+		if err != nil || !changed {
+			t.Fatalf("changed=%v err=%v, want changed", changed, err)
+		}
+		if got := extractConfigSecrets(out); len(got) != 0 {
+			t.Errorf("extract from blanked networks = %v, want empty", got)
+		}
+		var m map[string]any
+		_ = json.Unmarshal([]byte(out), &m)
+		for _, ssid := range WifiNetworkSSIDs(m) {
+			if ssid != "home" && ssid != "barn" {
+				t.Errorf("unexpected SSID after blanking: %q", ssid)
+			}
+		}
+		if ssids := WifiNetworkSSIDs(m); len(ssids) != 2 {
+			t.Errorf("SSIDs after blanking = %v, want both preserved", ssids)
 		}
 	})
 

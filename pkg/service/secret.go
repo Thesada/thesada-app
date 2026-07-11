@@ -1,7 +1,6 @@
 // secret.go - SecretService: the storage + retrieval layer for
-// device-config secrets (#443, phase 2). It sits on top of the pure
-// envelope-crypto core in pkg/secrets and the two tables from
-// migration 0023 (tenant_dek, device_config_secrets).
+// device-config secrets. It sits on top of the pure envelope-crypto core in
+// pkg/secrets and the two tables tenant_dek + device_config_secrets.
 //
 // Key hierarchy (see pkg/secrets):
 //
@@ -9,8 +8,8 @@
 //
 // The operator writes secrets (SetSecret) and reads only set/unset status
 // (Status); the value never comes back out to the UI. The server can
-// decrypt (Reveal) to provision a device at pair time (phase 5) - that path
-// is server-side only, never wired to an operator-facing handler.
+// decrypt (Reveal) to provision a device at pair time - that path is
+// server-side only, never wired to an operator-facing handler.
 //
 // Feature gate: an empty THESADA_DEVICE_CONFIG_KEK leaves keyring nil and
 // every write/decrypt path returns ErrSecretsDisabled; devices keep their
@@ -22,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -31,38 +31,53 @@ import (
 	"thesada.app/app/pkg/secrets"
 )
 
-// SecretFields is the closed set of device-config fields that are stored
-// encrypted. It mirrors the CHECK constraint in migration 0023 and, by
-// design decision, the firmware secret.set field keys (#442
-// secret_keymap.h) so provisioning maps them cleanly to device NVS. Order
-// is the display order.
-//
-// Four map 1:1 to the firmware secret.set field. The exception is
-// wifi.password: the firmware keys wifi passwords per-SSID
-// ("wifi.password:<ssid>"), so provisioning appends the device's configured
-// SSID (see FirmwareSecretField). The app stores a single wifi.password per
-// device; the SSID is resolved at provision time from the device config.
-var SecretFields = []string{
-	"wifi.password",
+// WifiPasswordPrefix keys a per-SSID WiFi password. The firmware stores each
+// network's password in NVS under "wifi.password:<ssid>"; the app stores one
+// row per network under the same key, so storage field == firmware field.
+const WifiPasswordPrefix = "wifi.password:"
+
+// LegacyWifiPassword is the bare storage field from before per-SSID support.
+// It carries no SSID, so provisioning appends the device's primary configured
+// SSID; new writes always use the per-SSID form.
+const LegacyWifiPassword = "wifi.password"
+
+// ScalarSecretFields is the closed set of non-WiFi device-config secrets, each
+// mapping 1:1 to a firmware secret.set field. Order is display order; per-SSID
+// WiFi passwords are appended after these, one per configured network.
+var ScalarSecretFields = []string{
 	"mqtt.password",
 	"telegram.bot_token",
 	"web.password",
 	"wifi.ap_password",
 }
 
-// FirmwareSecretField maps an app storage field key (a SecretFields entry) to
-// the firmware secret.set field key (#442 secret_keymap.h). All but
-// wifi.password are identical. wifi.password is per-SSID on the firmware, so
-// it becomes "wifi.password:<ssid>" and needs the device's configured SSID;
-// ok is false when the SSID is unknown, so the caller skips it rather than
-// pushing a field the firmware rejects ("unknown field or NVS write failed").
-// in: storage field, device wifi SSID (may be ""). out: firmware field, ok.
-func FirmwareSecretField(field, ssid string) (string, bool) {
-	if field == "wifi.password" {
-		if ssid == "" {
+// WifiSecretField builds the per-SSID storage/firmware field for a network
+// password. out: "" for an empty SSID so callers skip it.
+func WifiSecretField(ssid string) string {
+	if ssid == "" {
+		return ""
+	}
+	return WifiPasswordPrefix + ssid
+}
+
+// IsWifiPasswordField reports whether field is a per-SSID WiFi password
+// ("wifi.password:<ssid>") or the legacy bare "wifi.password".
+func IsWifiPasswordField(field string) bool {
+	return field == LegacyWifiPassword ||
+		(strings.HasPrefix(field, WifiPasswordPrefix) && len(field) > len(WifiPasswordPrefix))
+}
+
+// FirmwareSecretField maps a storage field to the firmware secret.set field.
+// Scalars and per-SSID WiFi keys are identical; the legacy bare wifi.password
+// is the only remap, needing a device SSID appended (ok=false when none known,
+// so the caller skips it).
+// in: storage field, device primary SSID (legacy field only). out: firmware field, ok.
+func FirmwareSecretField(field, primarySSID string) (string, bool) {
+	if field == LegacyWifiPassword {
+		if primarySSID == "" {
 			return "", false
 		}
-		return "wifi.password:" + ssid, true
+		return WifiPasswordPrefix + primarySSID, true
 	}
 	return field, true
 }
@@ -153,7 +168,7 @@ func (s *SecretService) ProvisionTenantDEKTx(ctx context.Context, tx pgx.Tx, ten
 
 // SetSecret encrypts value under the tenant DEK and upserts it for
 // (tenant, device, field), overwriting any prior value. Device-level only in
-// v1; tenant-default secrets (device_pk NULL) are #450.
+// v1; tenant-default secrets (device_pk NULL) are a later feature.
 // in: ctx, tenant_id, device pk, field, plaintext value. out: error.
 func (s *SecretService) SetSecret(ctx context.Context, tenantID string, devicePk uuid.UUID, field, value string) error {
 	if s.keyring == nil {
@@ -163,7 +178,7 @@ func (s *SecretService) SetSecret(ctx context.Context, tenantID string, devicePk
 		return fmt.Errorf("secret: unknown field %q", field)
 	}
 	if devicePk == uuid.Nil {
-		return errors.New("secret: device-level SetSecret requires a device pk (tenant-default secrets are #450)")
+		return errors.New("secret: device-level SetSecret requires a device pk (tenant-default secrets are a later feature)")
 	}
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		dek, err := s.tenantDEK(ctx, tx, tenantID)
@@ -184,13 +199,14 @@ func (s *SecretService) SetSecret(ctx context.Context, tenantID string, devicePk
 	})
 }
 
-// Status reports which fields are set for a device, never the values. Every
-// known field is present in the map; unset fields map to false. Works with
-// the feature off (pure existence read, no decrypt).
+// Status reports which fields are set for a device, never the values. The 4
+// scalar fields are always present (unset -> false); every stored per-SSID
+// WiFi password (and any legacy bare wifi.password) is added as true. Works
+// with the feature off (pure existence read, no decrypt).
 // in: ctx, tenant_id, device pk. out: field -> isSet, error.
 func (s *SecretService) Status(ctx context.Context, tenantID string, devicePk uuid.UUID) (map[string]bool, error) {
-	out := make(map[string]bool, len(SecretFields))
-	for _, f := range SecretFields {
+	out := make(map[string]bool, len(ScalarSecretFields)+2)
+	for _, f := range ScalarSecretFields {
 		out[f] = false
 	}
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
@@ -385,13 +401,14 @@ func secretAAD(tenantID string, devicePk uuid.UUID, field string) []byte {
 	return []byte(tenantID + "\x00" + devicePk.String() + "\x00" + field)
 }
 
-// validSecretField reports whether field is one of the known encrypted
-// fields (mirrors the CHECK in migration 0023).
+// validSecretField reports whether field is a storable encrypted secret:
+// one of the 4 scalars, a per-SSID WiFi password ("wifi.password:<ssid>"),
+// or the legacy bare "wifi.password". Mirrors the CHECK in migration 0024.
 func validSecretField(field string) bool {
-	for _, f := range SecretFields {
+	for _, f := range ScalarSecretFields {
 		if f == field {
 			return true
 		}
 	}
-	return false
+	return IsWifiPasswordField(field)
 }

@@ -7,15 +7,13 @@ import (
 	"errors"
 	"reflect"
 	"testing"
-
-	"thesada.app/app/pkg/service"
 )
 
 func TestProvisionDeviceSecrets(t *testing.T) {
-	fields := service.SecretFields // wifi.password, mqtt.password, telegram.bot_token, web.password, wifi.ap_password
+	// Legacy-shaped field list (bare wifi.password) to exercise the remap path.
+	fields := []string{"wifi.password", "mqtt.password", "telegram.bot_token", "web.password", "wifi.ap_password"}
 
-	t.Run("pushes set fields under firmware keys, skips unset", func(t *testing.T) {
-		// wifi.password + mqtt.password set; the rest unset.
+	t.Run("legacy wifi.password provisioned per-SSID, mqtt 1:1, skips unset", func(t *testing.T) {
 		set := map[string]string{"wifi.password": "wp", "mqtt.password": "mp"}
 		var pushed [][2]string
 		out := provisionDeviceSecrets(fields, "HomeNet",
@@ -25,13 +23,39 @@ func TestProvisionDeviceSecrets(t *testing.T) {
 		if out.AbortMsg != "" {
 			t.Fatalf("AbortMsg = %q, want empty", out.AbortMsg)
 		}
-		// wifi.password is provisioned per-SSID; mqtt.password 1:1.
 		want := [][2]string{{"wifi.password:HomeNet", "wp"}, {"mqtt.password", "mp"}}
 		if !reflect.DeepEqual(pushed, want) {
 			t.Errorf("pushed = %v, want %v", pushed, want)
 		}
 		if len(out.SkippedUnset) != 3 {
 			t.Errorf("SkippedUnset = %v, want 3 (the unset fields)", out.SkippedUnset)
+		}
+	})
+
+	t.Run("per-SSID wifi fields pass through unchanged", func(t *testing.T) {
+		// The real multi-network path: storage field == firmware field, no remap.
+		perSSID := []string{"wifi.password:HomeNet", "wifi.password:Barn"}
+		set := map[string]string{"wifi.password:HomeNet": "hp", "wifi.password:Barn": "bp"}
+		var pushed [][2]string
+		out := provisionDeviceSecrets(perSSID, "HomeNet",
+			func(f string) (string, bool, error) { v, ok := set[f]; return v, ok, nil },
+			func(fw, v string) (string, bool) { pushed = append(pushed, [2]string{fw, v}); return "", true },
+		)
+		want := [][2]string{{"wifi.password:HomeNet", "hp"}, {"wifi.password:Barn", "bp"}}
+		if out.AbortMsg != "" || !reflect.DeepEqual(pushed, want) {
+			t.Errorf("multi-SSID: AbortMsg=%q pushed=%v, want %v", out.AbortMsg, pushed, want)
+		}
+	})
+
+	t.Run("secretProvisionFields builds scalars + per-SSID + legacy", func(t *testing.T) {
+		got, primary := secretProvisionFields([]string{"HomeNet", "Barn"})
+		want := []string{"mqtt.password", "telegram.bot_token", "web.password", "wifi.ap_password",
+			"wifi.password:HomeNet", "wifi.password:Barn", "wifi.password"}
+		if !reflect.DeepEqual(got, want) || primary != "HomeNet" {
+			t.Errorf("secretProvisionFields = %v, %q; want %v, HomeNet", got, primary, want)
+		}
+		if _, primary := secretProvisionFields(nil); primary != "" {
+			t.Errorf("no-network primary = %q, want empty", primary)
 		}
 	})
 

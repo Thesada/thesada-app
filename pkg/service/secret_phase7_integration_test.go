@@ -1,6 +1,6 @@
 //go:build integration
 
-// Phase 7 integration tests (#443): root-KEK rotation (RotateRootKEK) and the
+// Phase 7 integration tests: root-KEK rotation (RotateRootKEK) and the
 // existing-device backfill (BackfillDeviceSecrets).
 //
 //	go test -tags integration -run 'TestSecretRotation|TestSecretBackfill' ./pkg/service/...
@@ -98,7 +98,8 @@ func TestSecretBackfill(t *testing.T) {
 	// Seed a PLAINTEXT config.json straight into device_files via the superuser
 	// pool, bypassing the Upsert blanking chokepoint - this is the pre-feature
 	// state backfill exists to migrate.
-	const plaintext = `{"wifi":{"ssid":"home","password":"wp","ap_password":"app"},` +
+	const plaintext = `{"wifi":{"ap_password":"app","networks":[` +
+		`{"ssid":"home","password":"wp"},{"ssid":"barn","password":"bp"}]},` +
 		`"mqtt":{"password":"mp"},"telegram":{"bot_token":"tt"},"web":{"password":"webp"}}`
 	if _, err := env.Super.Exec(ctx,
 		`INSERT INTO device_files (device_pk, path, content, sha256, source, updated_at)
@@ -110,8 +111,9 @@ func TestSecretBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BackfillDeviceSecrets: %v", err)
 	}
-	if res.Secrets != 5 {
-		t.Errorf("migrated %d secrets, want 5 (all of SecretFields)", res.Secrets)
+	// 4 scalars (ap/mqtt/telegram/web) + one per wifi network (home, barn).
+	if res.Secrets != 6 {
+		t.Errorf("migrated %d secrets, want 6 (4 scalar + 2 per-SSID wifi)", res.Secrets)
 	}
 	if res.DevicesMigrated != 1 {
 		t.Errorf("devices migrated = %d, want 1", res.DevicesMigrated)
@@ -119,7 +121,8 @@ func TestSecretBackfill(t *testing.T) {
 
 	// The secrets are now in the encrypted store and decrypt to the seeded values.
 	for field, want := range map[string]string{
-		"wifi.password":      "wp",
+		"wifi.password:home": "wp",
+		"wifi.password:barn": "bp",
 		"wifi.ap_password":   "app",
 		"mqtt.password":      "mp",
 		"telegram.bot_token": "tt",
@@ -136,13 +139,15 @@ func TestSecretBackfill(t *testing.T) {
 	if err != nil || snap == nil {
 		t.Fatalf("Latest config = %v err %v", snap, err)
 	}
-	for _, leak := range []string{`"wp"`, `"app"`, `"mp"`, `"tt"`, `"webp"`} {
+	for _, leak := range []string{`"wp"`, `"bp"`, `"app"`, `"mp"`, `"tt"`, `"webp"`} {
 		if strings.Contains(snap.Content, leak) {
 			t.Errorf("blanked config still contains secret %s:\n%s", leak, snap.Content)
 		}
 	}
-	if !strings.Contains(snap.Content, "home") {
-		t.Errorf("blanked config dropped the non-secret ssid:\n%s", snap.Content)
+	for _, ssid := range []string{"home", "barn"} {
+		if !strings.Contains(snap.Content, ssid) {
+			t.Errorf("blanked config dropped the non-secret ssid %q:\n%s", ssid, snap.Content)
+		}
 	}
 
 	// Idempotent: a second run finds nothing to migrate (config now blank).
@@ -156,8 +161,8 @@ func TestSecretBackfill(t *testing.T) {
 }
 
 // TestSecretBackfillBackstopReblank covers the finding that a config whose
-// only sensitive field is caught by the backstop regex (not one of the 5
-// allowlist SecretFields) must still be re-blanked - migrating zero secrets
+// only sensitive field is caught by the backstop regex (not one of the
+// allowlist ScalarSecretFields) must still be re-blanked - migrating zero secrets
 // must not mean leaving plaintext behind.
 func TestSecretBackfillBackstopReblank(t *testing.T) {
 	env := servicetest.Start(t)

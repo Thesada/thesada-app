@@ -1,7 +1,7 @@
 -- Device-config secrets: envelope-encrypted store for the 5 sensitive
 -- config fields (wifi.password, mqtt.password, telegram.bot_token,
 -- web.password, wifi.ap_password). Field keys match the firmware secret.set
--- keymap (#442) so provisioning maps cleanly. See #443.
+-- keymap so provisioning maps cleanly.
 --
 -- Two tables, two key levels (envelope encryption, pkg/secrets):
 --   tenant_dek             - per-tenant DEK, wrapped under the deployment
@@ -26,12 +26,12 @@ CREATE TABLE tenant_dek (
 );
 
 -- One encrypted secret value per (tenant, device, field). device_pk is
--- NULLABLE so #450 can add tenant-default secrets later; device-level rows
+-- NULLABLE so a later feature can add tenant-default secrets; device-level rows
 -- are the only ones written in v1.
 CREATE TABLE device_config_secrets (
     id          BIGSERIAL PRIMARY KEY,
     tenant_id   TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    device_pk   UUID REFERENCES devices(id) ON DELETE CASCADE,  -- NULL = tenant default (#450)
+    device_pk   UUID REFERENCES devices(id) ON DELETE CASCADE,  -- NULL = tenant default (later feature)
     field       TEXT NOT NULL CHECK (field IN (
                     'wifi.password', 'mqtt.password', 'telegram.bot_token',
                     'web.password', 'wifi.ap_password')),

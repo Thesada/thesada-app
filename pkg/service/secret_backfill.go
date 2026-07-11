@@ -1,5 +1,5 @@
 // secret_backfill.go - one-shot migration of existing app-managed devices
-// into the encrypted device-config-secrets store (#443 phase 7). For each
+// into the encrypted device-config-secrets store. For each
 // device it reads the last stored config.json snapshot, extracts any
 // plaintext secret values still present, writes them to the encrypted store
 // (SetSecret), and re-blanks the stored config so no plaintext lingers in
