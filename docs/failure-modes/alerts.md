@@ -20,7 +20,7 @@
 - **Channel success is per-alert, not per-recipient.** Two email subscribers, one send fails: the channel counts delivered and the failed recipient is not retried (`alerts.go::Dispatch`).
 - **`dead` alerts are operator-visible only (logs/DB).** No UI surface for delivery state yet; the end user still cannot see that their alert never went out.
 - **Sweeper claim is in-process.** Running more than one app instance can double-send; needs `FOR UPDATE SKIP LOCKED` claims first (`alerts.go::claim`).
-- **No duplicate-alert detection.** QoS 1 (at-least-once), `InsertAlert` has no dedup key (`alert.go`), and `handleAlert` discards the retained flag (`_ = retained`, `mqtt_ingest.go`) - a retained alert re-ingests into a new row and re-notifies on every app reconnect.
+- **No duplicate-alert detection.** QoS 1 (at-least-once), `InsertAlert` has no dedup key (`alert.go`), and `handleAlert` discards the retained flag (`_ = retained`, `mqtt_ingest.go`) - a retained alert re-ingests into a new row and re-notifies on every app reconnect. The insert retry widens this: a retry after a lost commit-ack can insert a second row for the same alert. A dedup key + `ON CONFLICT DO NOTHING` would close both.
 
 ---
 

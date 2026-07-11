@@ -782,11 +782,14 @@ The sweep scan is the one sanctioned cross-tenant read in the alert
 path: it runs on `pools.Admin` via `db.WithAdminAudit` and reads only
 `(tenant_id, alert id)` pairs; each re-dispatch then runs tenant-scoped
 via `db.WithTenant` like the inline path. Per-channel `delivered_*`
-flags guarantee a retry never re-sends a channel that already
-succeeded; channel success is per-alert, not per-recipient (partial
-recipient failure within a channel is not retried). The in-process
-`inflight` claim assumes a single app instance - running more than one
-needs `FOR UPDATE SKIP LOCKED` claims first.
+flags normally keep a retry from re-sending a channel that already
+succeeded - the guarantee holds once the outcome write lands; if that
+write fails the row stays pending and the next sweep can re-send a
+channel that succeeded this run (accepted: duplicate beats lost, see
+`recordOutcome`). Channel success is per-alert, not per-recipient
+(partial recipient failure within a channel is not retried). The
+in-process `inflight` claim assumes a single app instance - running
+more than one needs `FOR UPDATE SKIP LOCKED` claims first.
 
 How verified: `pkg/alerts/alerts_integration_test.go` (retry
 scheduling, dead-letter budget, cross-tenant sweep, startup-shaped
