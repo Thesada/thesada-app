@@ -3,7 +3,7 @@
 // Broker-path integration tests: a real mosquitto container between the app
 // client and a FakeDevice answering the firmware CLI protocol, on top of the
 // usual migrated-Postgres harness. Covers the three mqtt-side DeviceFiles
-// callers (#458): handleInfo's drift chain, pullAndSnapshot, and
+// callers: handleInfo's drift chain, pullAndSnapshot, and
 // discoverAndSnapshotScripts.
 //
 //	go test -tags integration -run TestBroker ./pkg/mqtt/...

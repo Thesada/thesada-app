@@ -35,6 +35,11 @@ type Client struct {
 	services *service.Services
 	root     string
 
+	// Broker connectivity for logs + health endpoints. Own flag rather than
+	// paho's IsConnected(), which reports true through the whole reconnect
+	// window and would hide an outage from /readyz.
+	connUp atomic.Bool
+
 	// Fan-out tap registry for the /admin/mqtt shell. Each registered tap
 	// has a compiled wildcard matcher and a sink callback; onMessage forwards
 	// every message whose topic matches at least one tap. Guarded by mu.
@@ -96,7 +101,22 @@ func buildMQTTOptions(cfg *config.Config, cli *Client) *mqttlib.ClientOptions {
 		SetConnectRetryInterval(5 * time.Second).
 		SetOrderMatters(false)
 
+	// Connectivity edges are state_change events; without these a broker
+	// outage was invisible (auto-reconnect recovers ingest, but nothing
+	// logged the gap and /healthz stayed ok throughout).
+	opts.SetConnectionLostHandler(func(_ mqttlib.Client, err error) {
+		cli.connUp.Store(false)
+		slog.Error("mqtt.connection.state_change", "from", "up", "to", "down", "err", err)
+	})
+	opts.SetReconnectingHandler(func(_ mqttlib.Client, _ *mqttlib.ClientOptions) {
+		// Fires on every 5 s retry - keep per-attempt noise at debug; the
+		// up/down edges above carry the signal.
+		slog.Debug("mqtt.connection.reconnecting")
+	})
+
 	opts.OnConnect = func(c mqttlib.Client) {
+		cli.connUp.Store(true)
+		slog.Info("mqtt.connection.state_change", "from", "down", "to", "up")
 		// Subscribe to the full tree so both tenant-prefixed (thesada/<tenant>/<device>/...)
 		// and legacy tenant-less (thesada/<device>/...) topics are ingested,
 		// plus the dynsec response topic so pkg/mqtt/dynsec.go can read
@@ -112,6 +132,18 @@ func buildMQTTOptions(cfg *config.Config, cli *Client) *mqttlib.ClientOptions {
 		slog.Info("mqtt subscribed", "topics", subs)
 	}
 	return opts
+}
+
+// Status reports broker connectivity for the health endpoints.
+// in: receiver. out: "disabled" (no broker configured), "up", or "down".
+func (c *Client) Status() string {
+	if c.c == nil {
+		return "disabled"
+	}
+	if c.connUp.Load() {
+		return "up"
+	}
+	return "down"
 }
 
 // Stop disconnects the MQTT client cleanly with a 500ms quiesce window.

@@ -1,7 +1,7 @@
 //go:build integration
 
-// Broker-path integration tests for the admin_config DeviceFiles callers
-// (#458): runCLICmd -> snapshotFromCmdResponse ("read"), runCLIWrite's
+// Broker-path integration tests for the admin_config DeviceFiles callers:
+// runCLICmd -> snapshotFromCmdResponse ("read"), runCLIWrite's
 // chunked push ("write"), and the /config/snapshot endpoint - each through a
 // real mosquitto broker with a FakeDevice answering the CLI protocol.
 //

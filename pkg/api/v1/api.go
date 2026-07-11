@@ -6,6 +6,7 @@
 package v1
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -31,6 +32,11 @@ type Server struct {
 	services *service.Services
 	ca       *pki.CA
 	mux      *http.ServeMux
+
+	// Health probes, wired by SetHealthProbes. Closures so this package
+	// stays free of db/mqtt imports.
+	dbPing       func(context.Context) error
+	brokerStatus func() string
 }
 
 // New constructs the API server with all routes wired up.
@@ -52,6 +58,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // in: receiver. out: none (mutates s.mux).
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
+	s.mux.HandleFunc("GET /readyz", s.handleReady)
 	s.mux.HandleFunc("POST /auth/login", s.handleAuthLogin)
 	s.mux.HandleFunc("POST /auth/logout", s.handleAuthLogout)
 	s.mux.HandleFunc("POST /auth/magic-link", s.handleAuthMagicLink)
@@ -67,10 +74,58 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /alert-subscriptions/{id}", authmw.RequireAuthJSON(s.handleSubsDelete))
 }
 
-// handleHealth is the API liveness probe.
-// in: writer, request. out: 200 with {"status":"ok"}.
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+// SetHealthProbes wires the dependency checks the health endpoints report.
+// Both may be nil; the component then reports "unknown".
+// in: dbPing (short-timeout DB reachability), brokerStatus ("disabled"/"up"/"down").
+func (s *Server) SetHealthProbes(dbPing func(context.Context) error, brokerStatus func() string) {
+	s.dbPing = dbPing
+	s.brokerStatus = brokerStatus
+}
+
+// componentHealth runs the wired probes.
+// out: db + mqtt component states, and readiness (db ok, broker up or
+// deliberately disabled).
+func (s *Server) componentHealth(ctx context.Context) (dbState, mqttState string, ready bool) {
+	dbState, mqttState = "unknown", "unknown"
+	if s.dbPing != nil {
+		if err := s.dbPing(ctx); err != nil {
+			dbState = "down"
+		} else {
+			dbState = "ok"
+		}
+	}
+	if s.brokerStatus != nil {
+		mqttState = s.brokerStatus()
+	}
+	ready = dbState != "down" && mqttState != "down"
+	return dbState, mqttState, ready
+}
+
+// handleHealth is the API liveness probe: 200 as long as the process serves
+// HTTP, with per-component detail. Never non-200 for a broker/DB outage -
+// that would turn an infra blip into a container restart loop; /readyz
+// carries the gating signal.
+// in: writer, request. out: 200 with {"status","db","mqtt"}.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	dbState, mqttState, _ := s.componentHealth(r.Context())
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "ok", "db": dbState, "mqtt": mqttState,
+	})
+}
+
+// handleReady is the readiness probe: 503 while the DB is unreachable or the
+// broker connection is down. A disabled broker (no URL configured) does not
+// fail readiness.
+// in: writer, request. out: 200/503 with the same component JSON.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	dbState, mqttState, ready := s.componentHealth(r.Context())
+	status, code := "ready", http.StatusOK
+	if !ready {
+		status, code = "degraded", http.StatusServiceUnavailable
+	}
+	writeJSON(w, code, map[string]string{
+		"status": status, "db": dbState, "mqtt": mqttState,
+	})
 }
 
 // pairResponse is the JSON body returned from POST /devices/{id}/pair.
