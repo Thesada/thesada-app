@@ -14,7 +14,7 @@ There is **no app-side bearer pairing token**: pairing is gated by super-admin s
 
 ## Gaps
 
-- **Pair flow is not transactional (#68-class).** An MQTT-push + DB-persist sequence not wrapped in a transaction: a partial NVS write persists on the device while `paired_at` is never flipped -> **DB shows unpaired while the device is half-provisioned.** No reconciliation. Mitigated (not guaranteed) by idempotent re-click (`admin_pair.go:154`).
+- **Pair flow is not transactional (non-transactional multi-step class).** An MQTT-push + DB-persist sequence not wrapped in a transaction: a partial NVS write persists on the device while `paired_at` is never flipped -> **DB shows unpaired while the device is half-provisioned.** No reconciliation. Mitigated (not guaranteed) by idempotent re-click (`admin_pair.go:154`).
 - **Duplicate pairing has no guard.** `Issue` does not revoke the prior active cert; each Issue click INSERTs another non-revoked `device_certificates` row (`certificate.go:39`). `GetActive` just picks newest -> multiple active certs accumulate silently. `Revoke` clears all at once, papering over it.
 - **Abandoned pairing is invisible.** Pair-page status derives purely from `GetActive` (`admin_pair.go:130`); a device with partial NVS but no cert row shows "unpaired" - divergence from device reality has no reconciliation/health job.
 - **Revocation is not broker-enforced (no CRL/OCSP).** Revoke flips the DB row + deletes the dynsec client; a still-valid cert is kept out only by the dynsec delete (`admin_pair.go:437`).

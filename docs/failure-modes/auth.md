@@ -18,7 +18,7 @@
 - **Magic-link replay attempt logs nothing security-relevant** - generic user message only, no `slog.Warn`/audit event (`auth_magiclink.go:213`).
 - **No stolen-session anomaly detection** (concurrent-use / IP-change) (`auth_sessions.go`).
 - **DB failure at session-create gives a misleading success-redirect.** `startSession` returns void; on `CreateSession` failure the handler still redirects to `/devices` with no cookie, then `RequireAuth` bounces to `/login` - no user-facing error (`web_auth.go:59`, `:145`).
-- **Password-reset is not atomic (#68-class).** `ConsumeResetLink` -> `SetPassword` (tx) -> `MarkResetConsumed` (separate tx, failure only `slog.Warn`). A crash between steps leaves the reset token consumable for its remaining TTL after the password already changed (`web_auth.go:307`).
+- **Password-reset is not atomic (non-transactional multi-step class).** `ConsumeResetLink` -> `SetPassword` (tx) -> `MarkResetConsumed` (separate tx, failure only `slog.Warn`). A crash between steps leaves the reset token consumable for its remaining TTL after the password already changed (`web_auth.go:307`).
 
 ---
 
