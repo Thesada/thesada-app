@@ -437,15 +437,27 @@ func (s *Server) pushSecret(ctx context.Context, topicPrefix, fwField, value str
 // deviceWifiSSIDs reads the SSID of every wifi.networks[] entry from the
 // device's most recent stored config.json, so each network's password can be
 // provisioned as secret.set wifi.password:<ssid>. The stored config is blanked
-// but the SSIDs are not secret, so they survive. Returns nil on any miss.
+// but the SSIDs are not secret, so they survive.
+// A backend error is logged (not fatal) and treated as "no SSIDs" so a
+// transient DB blip degrades to scalar-only provisioning rather than aborting
+// the whole pair; the operator sees the logged cause and the missing wifi
+// state on the device. A missing snapshot or non-object config is a normal
+// pre-config device, not an error.
 // in: ctx, device. out: configured SSIDs in config order, or nil.
 func (s *Server) deviceWifiSSIDs(ctx context.Context, device *service.Device) []string {
 	snap, err := s.services.DeviceFiles.Latest(ctx, device.TenantID, device.ID, "config.json")
-	if err != nil || snap == nil {
+	if err != nil {
+		slog.Error("wifi SSIDs: config snapshot read failed",
+			"device", device.ID, "err", err)
+		return nil
+	}
+	if snap == nil {
 		return nil
 	}
 	var m map[string]any
-	if json.Unmarshal([]byte(snap.Content), &m) != nil {
+	if err := json.Unmarshal([]byte(snap.Content), &m); err != nil {
+		slog.Warn("wifi SSIDs: stored config is not valid JSON",
+			"device", device.ID, "err", err)
 		return nil
 	}
 	return service.WifiNetworkSSIDs(m)

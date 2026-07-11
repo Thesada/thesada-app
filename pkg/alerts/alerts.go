@@ -211,11 +211,14 @@ func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64)
 	for rows.Next() {
 		var r recipient
 		if err := rows.Scan(&r.userID, &r.channel, &r.email, &r.telegramChatID); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("recipients scan: %w", err)
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("recipients rows: %w", err)
+	}
+	return out, nil
 }
 
 // markDelivered ORs the per-channel delivered flags so re-runs don't clear them.
@@ -226,8 +229,10 @@ func (n *Notifier) markDelivered(ctx context.Context, tx pgx.Tx, alertID int64, 
 		SET delivered_email = delivered_email OR $2,
 		    delivered_telegram = delivered_telegram OR $3
 		WHERE id = $1`
-	_, err := tx.Exec(ctx, query, alertID, email, tg)
-	return err
+	if _, err := tx.Exec(ctx, query, alertID, email, tg); err != nil {
+		return fmt.Errorf("mark delivered: %w", err)
+	}
+	return nil
 }
 
 // renderAlert builds a human-readable subject + plain text body + MIME html

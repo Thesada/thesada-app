@@ -89,6 +89,10 @@ func blankConfigSecrets(content string) (string, bool, error) {
 func extractConfigSecrets(content string) map[string]string {
 	out := make(map[string]string)
 	var m map[string]any
+	// A parse failure returns nothing to migrate, which is safe: every caller
+	// pairs this with blankConfigSecrets, and that path fails closed on
+	// unparseable object content, so a corrupt config never silently persists
+	// its plaintext. Extraction is best-effort; blanking is the guard.
 	if json.Unmarshal([]byte(content), &m) != nil {
 		return out
 	}
