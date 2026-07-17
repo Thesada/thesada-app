@@ -31,14 +31,15 @@ CREATE INDEX admin_audit_at_idx        ON admin_audit (at DESC);
 CREATE INDEX admin_audit_actor_at_idx  ON admin_audit (actor_user_id, at DESC);
 CREATE INDEX admin_audit_action_at_idx ON admin_audit (action, at DESC);
 
--- Created after the 0001 ALL-TABLES grant, so grants are explicit. The
--- tenant-scoped runtime role gets nothing; the admin role gets SELECT +
--- INSERT only. The REVOKE strips the UPDATE/DELETE that 0001's default
--- privileges may have auto-granted, keeping the trail append-only from
--- the app's connections (retention pruning is an operator/superuser job).
+-- 0001's default privileges auto-grant SELECT/INSERT/UPDATE/DELETE on new
+-- tables and USAGE/SELECT/UPDATE on new sequences. Revoke EVERYTHING both
+-- roles inherited, then grant the narrow append-only set: the trail must
+-- not be updatable, deletable, truncatable, or sequence-resettable from
+-- any app connection (retention pruning is an operator/superuser job).
+REVOKE ALL ON admin_audit               FROM thesada_app, thesada_app_admin;
+REVOKE ALL ON SEQUENCE admin_audit_id_seq FROM thesada_app, thesada_app_admin;
 GRANT SELECT, INSERT ON admin_audit TO thesada_app_admin;
 GRANT USAGE, SELECT ON SEQUENCE admin_audit_id_seq TO thesada_app_admin;
-REVOKE UPDATE, DELETE ON admin_audit FROM thesada_app, thesada_app_admin;
 
 -- Row-level security: no CREATE POLICY on purpose (see header).
 ALTER TABLE admin_audit ENABLE ROW LEVEL SECURITY;

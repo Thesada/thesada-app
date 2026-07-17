@@ -216,4 +216,24 @@ func TestAuditService(t *testing.T) {
 			t.Fatal("app-role INSERT into admin_audit succeeded, want RLS deny")
 		}
 	})
+
+	t.Run("audit_table_is_append_only", func(t *testing.T) {
+		// TRUNCATE bypasses RLS entirely - only the 0026 REVOKE ALL stands
+		// between an app connection and an erased trail. UPDATE/DELETE on the
+		// admin role prove the narrow re-grant (env re-grants broad to
+		// thesada_app only, so admin keeps exactly what 0026 left it).
+		if _, err := env.Pools.App.Exec(ctx, `TRUNCATE admin_audit`); err == nil {
+			t.Fatal("app-role TRUNCATE admin_audit succeeded, want permission denied")
+		}
+		if _, err := env.Pools.Admin.Exec(ctx, `TRUNCATE admin_audit`); err == nil {
+			t.Fatal("admin-role TRUNCATE admin_audit succeeded, want permission denied")
+		}
+		if _, err := env.Pools.Admin.Exec(ctx,
+			`UPDATE admin_audit SET action = 'tampered'`); err == nil {
+			t.Fatal("admin-role UPDATE admin_audit succeeded, want permission denied")
+		}
+		if _, err := env.Pools.Admin.Exec(ctx, `DELETE FROM admin_audit`); err == nil {
+			t.Fatal("admin-role DELETE admin_audit succeeded, want permission denied")
+		}
+	})
 }

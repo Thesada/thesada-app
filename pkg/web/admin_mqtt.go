@@ -93,9 +93,16 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := authmw.CurrentUser(r)
+	if user == nil {
+		// RequireSuperAdmin makes this unreachable; if middleware regresses,
+		// fail closed instead of granting the unrestricted root prefix.
+		slog.Error("admin mqtt ws: no user in context, closing")
+		_ = conn.Close()
+		return
+	}
 	root := s.cfg.MQTTTopicRoot
 	allowedPrefix := root + "/"
-	if user != nil && !authz.Can(user, authz.MQTTPublishAnyTenant) {
+	if !authz.Can(user, authz.MQTTPublishAnyTenant) {
 		allowedPrefix = root + "/" + user.TenantID + "/"
 	}
 

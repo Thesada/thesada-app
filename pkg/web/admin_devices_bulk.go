@@ -110,16 +110,19 @@ func (s *Server) bulkOTACheck(w http.ResponseWriter, r *http.Request) {
 	user := authmw.CurrentUser(r)
 
 	var ok, failed int
+	var okIDs, failedIDs []string
 	for _, raw := range ids {
 		id, err := uuid.Parse(raw)
 		if err != nil {
 			failed++
+			failedIDs = append(failedIDs, raw)
 			continue
 		}
 		device, err := s.services.Devices.GetByIDAny(r.Context(), id)
 		if err != nil {
 			slog.Warn("bulk ota: device lookup failed", "id", id, "err", err)
 			failed++
+			failedIDs = append(failedIDs, raw)
 			continue
 		}
 		topicPrefix := s.deviceTopicPrefix(device)
@@ -127,17 +130,21 @@ func (s *Server) bulkOTACheck(w http.ResponseWriter, r *http.Request) {
 		if err := s.mqtt.PublishRaw(cmdTopic, []byte("--force"), 0, false); err != nil {
 			slog.Warn("bulk ota: publish failed", "device", device.DeviceID, "topic", cmdTopic, "err", err)
 			failed++
+			failedIDs = append(failedIDs, device.DeviceID)
 			continue
 		}
 		ok++
+		okIDs = append(okIDs, device.DeviceID)
 	}
 	slog.Info("admin bulk ota dispatched",
 		"user", user.Email, "ok", ok, "failed", failed, "total", len(ids))
-	// One row for the whole dispatch - per-device rows would say nothing
-	// beyond the counts (fire-and-forget, no per-device outcome to record).
+	// One row for the whole dispatch, carrying WHICH devices got the command
+	// (form selection, so bounded by the device list UI). Fire-and-forget:
+	// there is no per-device outcome beyond publish success to record.
 	s.audit(r.Context(), user, authz.OTADispatch, service.AuditEntry{
 		TargetType: "devices",
-		Detail:     map[string]any{"ok": ok, "failed": failed, "total": len(ids)},
+		Detail: map[string]any{"ok": ok, "failed": failed, "total": len(ids),
+			"ok_ids": okIDs, "failed_ids": failedIDs},
 	})
 
 	http.Redirect(w, r,

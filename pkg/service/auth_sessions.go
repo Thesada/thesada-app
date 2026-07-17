@@ -210,11 +210,13 @@ func (s *AuthService) ClearImpersonation(sessionID uuid.UUID) error {
 	ctx := context.Background()
 	return db.WithAdminAudit(ctx, s.pools.Admin, "auth.clear_impersonation", func(tx pgx.Tx) error {
 		// Read the outgoing target first so the audit row names the tenant
-		// whose impersonation ended. A vanished session stays a silent no-op
-		// (matches the pre-audit UPDATE-zero-rows behavior).
+		// whose impersonation ended. FOR UPDATE: a concurrent SetImpersonation
+		// between probe and clear would otherwise make the audit name one
+		// tenant while the UPDATE removes another. A vanished session stays a
+		// silent no-op (matches the pre-audit UPDATE-zero-rows behavior).
 		var prev *string
 		err := tx.QueryRow(ctx,
-			`SELECT impersonated_tenant_id FROM user_sessions WHERE id = $1`,
+			`SELECT impersonated_tenant_id FROM user_sessions WHERE id = $1 FOR UPDATE`,
 			sessionID).Scan(&prev)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -222,17 +224,16 @@ func (s *AuthService) ClearImpersonation(sessionID uuid.UUID) error {
 		if err != nil {
 			return fmt.Errorf("auth: clear impersonation probe for session %s: %w", sessionID, err)
 		}
+		if prev == nil {
+			return nil // nothing to clear; no audit row for a no-op
+		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE user_sessions SET impersonated_tenant_id = NULL WHERE id = $1`,
 			sessionID); err != nil {
 			return fmt.Errorf("auth: clear impersonation for session %s: %w", sessionID, err)
 		}
-		target := ""
-		if prev != nil {
-			target = *prev
-		}
 		// Slug mirrors authz.ImpersonationClear (import cycle, see SetImpersonation).
-		return auditImpersonationTx(ctx, tx, sessionID, "impersonation.clear", target)
+		return auditImpersonationTx(ctx, tx, sessionID, "impersonation.clear", *prev)
 	})
 }
 

@@ -16,15 +16,20 @@ import (
 
 // audit records one privileged mutation, filling the actor from the
 // resolved user. Best-effort: failure logs audit.record_failed and returns.
-// in: ctx (request ctx, or a fresh one on post-request paths), actor
-// (nil tolerated), action, partially-filled entry. out: none.
+// A nil actor is a middleware regression - refuse to write an unattributed
+// row and log loudly instead.
+// in: ctx (request ctx, or a fresh one on post-request paths), actor,
+// action, partially-filled entry. out: none.
 func (s *Server) audit(ctx context.Context, actor *service.User, action authz.Action, e service.AuditEntry) {
 	e.Action = string(action)
-	if actor != nil {
-		id := actor.ID
-		e.ActorUserID = &id
-		e.ActorEmail = actor.Email
+	if actor == nil {
+		slog.Error("audit.actor_missing", "action", e.Action,
+			"target_type", e.TargetType, "target", e.TargetID)
+		return
 	}
+	id := actor.ID
+	e.ActorUserID = &id
+	e.ActorEmail = actor.Email
 	if err := s.services.Audit.Record(ctx, e); err != nil {
 		slog.Error("audit.record_failed", "action", e.Action,
 			"target_type", e.TargetType, "target", e.TargetID, "err", err)
