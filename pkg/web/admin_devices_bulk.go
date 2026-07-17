@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/service"
 )
 
@@ -78,6 +79,10 @@ func (s *Server) bulkReassign(w http.ResponseWriter, r *http.Request) {
 			failed++
 			continue
 		}
+		s.audit(r.Context(), user, authz.DeviceReassign, service.AuditEntry{
+			TargetType: "device", TargetID: id.String(), TenantID: target,
+			Detail: map[string]any{"target_tenant": target, "bulk": true},
+		})
 		ok++
 	}
 	slog.Info("admin bulk reassign dispatched",
@@ -128,6 +133,12 @@ func (s *Server) bulkOTACheck(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("admin bulk ota dispatched",
 		"user", user.Email, "ok", ok, "failed", failed, "total", len(ids))
+	// One row for the whole dispatch - per-device rows would say nothing
+	// beyond the counts (fire-and-forget, no per-device outcome to record).
+	s.audit(r.Context(), user, authz.OTADispatch, service.AuditEntry{
+		TargetType: "devices",
+		Detail:     map[string]any{"ok": ok, "failed": failed, "total": len(ids)},
+	})
 
 	http.Redirect(w, r,
 		"/admin/devices?ok=ota+dispatched+"+strconv.Itoa(ok)+
@@ -209,6 +220,10 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 			failed++
 			continue
 		}
+		s.audit(r.Context(), user, authz.DeviceDelete, service.AuditEntry{
+			TargetType: "device", TargetID: p.device.ID.String(), TenantID: p.device.TenantID,
+			Detail: map[string]any{"device_id": p.device.DeviceID, "bulk": true},
+		})
 		ok++
 	}
 	slog.Info("admin bulk delete dispatched",

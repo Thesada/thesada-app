@@ -24,6 +24,7 @@ type Services struct {
 	OAuth        *OAuthService
 	ApiTokens    *ApiTokenService
 	Secrets      *SecretService
+	Audit        *AuditService
 }
 
 // New constructs all services on shared cfg + role-scoped pools (App=tenant reads, Admin=BYPASSRLS, MQTT=ingest).
@@ -48,5 +49,6 @@ func New(cfg *config.Config, pools db.Pools) (*Services, error) {
 		OAuth:        NewOAuthService(cfg, pools),
 		ApiTokens:    &ApiTokenService{cfg: cfg, pools: pools},
 		Secrets:      secretsSvc,
+		Audit:        &AuditService{cfg: cfg, pools: pools},
 	}, nil
 }

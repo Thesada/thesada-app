@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/mqtt"
 	"thesada.app/app/pkg/service"
 )
@@ -299,6 +300,10 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 	}
 
 	logPairStateChange(device, "unpaired", "paired", user.Email, "pair_issue")
+	s.audit(r.Context(), user, authz.CertIssue, service.AuditEntry{
+		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
+		Detail: map[string]any{"device_id": device.DeviceID, "cn": cn, "serial": serialHex},
+	})
 
 	http.Redirect(w, r, "/admin/devices/pair?ok=paired+"+device.DeviceID, http.StatusFound)
 }
@@ -491,6 +496,10 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 		http.Redirect(w, r, "/admin/devices/pair?error=revoke+failed", http.StatusFound)
 		return
 	}
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.CertRevoke, service.AuditEntry{
+		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
+		Detail: map[string]any{"device_id": device.DeviceID},
+	})
 
 	// Best-effort transition the online device into password-mode recovery
 	// state before tearing down broker-side dynsec. The old sequence here

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/service"
 )
 
@@ -41,7 +42,7 @@ func (s *Server) handleDeviceDetail(w http.ResponseWriter, r *http.Request) {
 	// their own (or impersonated) tenant.
 	me := authmw.CurrentUser(r)
 	var device *service.Device
-	if me != nil && me.IsSuperAdmin {
+	if authz.Can(me, authz.DeviceReadCrossTenant) {
 		device, err = s.services.Devices.GetByIDAny(r.Context(), id)
 	} else {
 		device, err = s.services.Devices.GetByID(id, authmw.EffectiveTenantID(r))
@@ -90,7 +91,7 @@ func (s *Server) handleDeviceDetail(w http.ResponseWriter, r *http.Request) {
 	// "Admin -> Devices -> click a row -> back -> wrong page" surprise.
 	backHref := "/devices"
 	backLabel := "All devices"
-	if u := authmw.CurrentUser(r); u != nil && u.IsSuperAdmin {
+	if authz.Can(authmw.CurrentUser(r), authz.DeviceReadCrossTenant) {
 		ref := r.Referer()
 		if strings.Contains(ref, "/admin/devices") && !strings.Contains(ref, "/admin/devices/") {
 			backHref = "/admin/devices"
@@ -122,7 +123,7 @@ func (s *Server) handleDeviceChartJSON(w http.ResponseWriter, r *http.Request) {
 	}
 	me := authmw.CurrentUser(r)
 	var device *service.Device
-	if me != nil && me.IsSuperAdmin {
+	if authz.Can(me, authz.DeviceReadCrossTenant) {
 		device, err = s.services.Devices.GetByIDAny(r.Context(), id)
 	} else {
 		device, err = s.services.Devices.GetByID(id, authmw.EffectiveTenantID(r))

@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/authz"
+	"thesada.app/app/pkg/service"
 )
 
 // handleAdminDeviceDelete tears down a device end-to-end:
@@ -157,6 +159,10 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 
 	slog.Info("device deleted",
 		"user", user.Email, "device", device.DeviceID, "tenant", device.TenantID, "pk", device.ID)
+	s.audit(r.Context(), user, authz.DeviceDelete, service.AuditEntry{
+		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
+		Detail: map[string]any{"device_id": device.DeviceID},
+	})
 
 	http.Redirect(w, r,
 		"/admin/devices?ok=deleted+"+device.DeviceID,
