@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/service"
 )
 
@@ -64,7 +65,7 @@ func (s *Server) handleDeviceSensorDelete(w http.ResponseWriter, r *http.Request
 	// Tenant scope - mirror handleDeviceDetail.
 	me := authmw.CurrentUser(r)
 	var device *service.Device
-	if me != nil && me.IsSuperAdmin {
+	if authz.Can(me, authz.SensorDeleteCrossTenant) {
 		device, err = s.services.Devices.GetByIDAny(r.Context(), id)
 	} else {
 		device, err = s.services.Devices.GetByID(id, authmw.EffectiveTenantID(r))

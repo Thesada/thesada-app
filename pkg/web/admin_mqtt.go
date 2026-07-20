@@ -15,8 +15,10 @@ import (
 	"github.com/gorilla/websocket"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/ratelimit"
+	"thesada.app/app/pkg/service"
 )
 
 // adminMqttMaxBuffer caps the per-socket outbound channel. When full, new
@@ -91,14 +93,37 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := authmw.CurrentUser(r)
+	if user == nil {
+		// RequireSuperAdmin makes this unreachable; if middleware regresses,
+		// fail closed instead of granting the unrestricted root prefix.
+		slog.Error("admin mqtt ws: no user in context, closing")
+		_ = conn.Close()
+		return
+	}
 	root := s.cfg.MQTTTopicRoot
 	allowedPrefix := root + "/"
-	if user != nil && !user.IsSuperAdmin {
+	if !authz.Can(user, authz.MQTTPublishAnyTenant) {
 		allowedPrefix = root + "/" + user.TenantID + "/"
 	}
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+
+	// One admin_audit row per ws session, written on close with the publish
+	// count - never per message, or a busy shell would flood the table.
+	// Fresh context: the request/ws contexts are already canceled by the
+	// time this defer runs.
+	var publishes int
+	defer func() {
+		if publishes == 0 {
+			return
+		}
+		actx, acancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer acancel()
+		s.audit(actx, user, authz.MQTTShellPublish, service.AuditEntry{
+			Detail: map[string]any{"publishes": publishes},
+		})
+	}()
 
 	// Outbound queue: the tap sink pushes here, the writer goroutine drains.
 	out := make(chan adminMqttOutboundMsg, adminMqttMaxBuffer)
@@ -222,6 +247,7 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 				slog.Warn("admin mqtt publish failed", "topic", topic, "err", err)
 				continue
 			}
+			publishes++
 			slog.Info("admin mqtt publish",
 				"user", func() string {
 					if user == nil {

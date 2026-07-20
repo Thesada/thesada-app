@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/service"
 )
 
@@ -278,6 +279,10 @@ func (s *Server) handleAdminWaitlistConvert(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	slog.Info("admin waitlist convert ok", "user_id", u.ID, "email", u.Email, "tenant", u.TenantID)
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.WaitlistConvert, service.AuditEntry{
+		TargetType: "user", TargetID: u.ID.String(), TenantID: u.TenantID,
+		Detail: map[string]any{"email": u.Email, "waitlist_id": id.String(), "is_admin": isAdmin},
+	})
 	http.Redirect(w, r, "/admin/waitlist?ok=converted", http.StatusFound)
 }
 
@@ -299,6 +304,9 @@ func (s *Server) handleAdminWaitlistDelete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	slog.Info("admin waitlist delete ok", "waitlist_id", id)
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.WaitlistDelete, service.AuditEntry{
+		TargetType: "waitlist", TargetID: id.String(),
+	})
 	http.Redirect(w, r, "/admin/waitlist?ok=deleted", http.StatusFound)
 }
 
@@ -548,5 +556,9 @@ func (s *Server) handleAdminDeviceReassign(w http.ResponseWriter, r *http.Reques
 		http.Redirect(w, r, "/admin/devices?error=reassign+failed+(duplicate+device_id+in+target?)", http.StatusFound)
 		return
 	}
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.DeviceReassign, service.AuditEntry{
+		TargetType: "device", TargetID: id.String(), TenantID: target,
+		Detail: map[string]any{"target_tenant": target},
+	})
 	http.Redirect(w, r, "/admin/devices?ok=reassigned", http.StatusFound)
 }

@@ -185,7 +185,11 @@ func (s *AuthService) SetImpersonation(sessionID uuid.UUID, tenantID string) err
 			return fmt.Errorf("auth: set impersonation for session %s: %w", sessionID, err)
 		}
 		if tag.RowsAffected() == 1 {
-			return nil
+			// Same tx as the mutation: a failed audit write rolls the
+			// impersonation back rather than leaving an unrecorded grant.
+			// Slug mirrors authz.ImpersonationSet (authz imports this
+			// package, so the constant cannot be referenced here).
+			return auditImpersonationTx(ctx, tx, sessionID, "impersonation.set", tenantID)
 		}
 		var exists bool
 		if err := tx.QueryRow(ctx,
@@ -205,10 +209,31 @@ func (s *AuthService) SetImpersonation(sessionID uuid.UUID, tenantID string) err
 func (s *AuthService) ClearImpersonation(sessionID uuid.UUID) error {
 	ctx := context.Background()
 	return db.WithAdminAudit(ctx, s.pools.Admin, "auth.clear_impersonation", func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+		// Read the outgoing target first so the audit row names the tenant
+		// whose impersonation ended. FOR UPDATE: a concurrent SetImpersonation
+		// between probe and clear would otherwise make the audit name one
+		// tenant while the UPDATE removes another. A vanished session stays a
+		// silent no-op (matches the pre-audit UPDATE-zero-rows behavior).
+		var prev *string
+		err := tx.QueryRow(ctx,
+			`SELECT impersonated_tenant_id FROM user_sessions WHERE id = $1 FOR UPDATE`,
+			sessionID).Scan(&prev)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("auth: clear impersonation probe for session %s: %w", sessionID, err)
+		}
+		if prev == nil {
+			return nil // nothing to clear; no audit row for a no-op
+		}
+		if _, err := tx.Exec(ctx,
 			`UPDATE user_sessions SET impersonated_tenant_id = NULL WHERE id = $1`,
-			sessionID)
-		return err
+			sessionID); err != nil {
+			return fmt.Errorf("auth: clear impersonation for session %s: %w", sessionID, err)
+		}
+		// Slug mirrors authz.ImpersonationClear (import cycle, see SetImpersonation).
+		return auditImpersonationTx(ctx, tx, sessionID, "impersonation.clear", *prev)
 	})
 }
 

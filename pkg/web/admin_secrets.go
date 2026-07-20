@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/service"
 )
 
@@ -232,6 +233,14 @@ func (s *Server) handleAdminDeviceSecretsProvision(w http.ResponseWriter, r *htt
 	slog.Info("device_secret.state_change", "action", "provision",
 		"tenant", device.TenantID, "device", device.DeviceID,
 		"pushed", len(outcome.Pushed), "actor", actor)
+	s.audit(r.Context(), user, authz.DeviceSecretProvision, service.AuditEntry{
+		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
+		Detail: map[string]any{
+			"device_id": device.DeviceID,
+			"pushed":    len(outcome.Pushed),
+			"skipped":   len(outcome.SkippedUnset) + len(outcome.SkippedNoSSID),
+		},
+	})
 
 	msg := "provisioned+" + itoa(len(outcome.Pushed))
 	if len(outcome.SkippedUnset)+len(outcome.SkippedNoSSID) > 0 {
@@ -290,6 +299,11 @@ func (s *Server) handleAdminDeviceSecretsSet(w http.ResponseWriter, r *http.Requ
 	}
 	slog.Info("device_secret.state_change", "action", "set",
 		"tenant", device.TenantID, "device", device.DeviceID, "field", field, "actor", actor)
+	// Field name + actor only, never the value.
+	s.audit(r.Context(), user, authz.DeviceSecretSet, service.AuditEntry{
+		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
+		Detail: map[string]any{"device_id": device.DeviceID, "field": field},
+	})
 
 	http.Redirect(w, r, dest+"?ok=set+"+field, http.StatusFound)
 }
