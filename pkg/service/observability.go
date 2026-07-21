@@ -141,12 +141,12 @@ func alertDeliveryCounts(ctx context.Context, tx pgx.Tx) ([]AlertDeliveryCount, 
 	for rows.Next() {
 		var c AlertDeliveryCount
 		if err := rows.Scan(&c.Status, &c.Last24h, &c.Last7d); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("alert delivery counts: scan: %w", err)
 		}
 		byStatus[c.Status] = c
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("alert delivery counts: %w", err)
 	}
 	out := make([]AlertDeliveryCount, 0, len(alertDeliveryStatuses))
 	for _, status := range alertDeliveryStatuses {
@@ -175,9 +175,12 @@ func auditActionCounts(ctx context.Context, tx pgx.Tx) ([]AuditActionCount, erro
 	for rows.Next() {
 		var c AuditActionCount
 		if err := rows.Scan(&c.Action, &c.Count); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("audit action counts: scan: %w", err)
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("audit action counts: %w", err)
+	}
+	return out, nil
 }

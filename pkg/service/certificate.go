@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -57,6 +58,14 @@ var ErrCertNotPending = errors.New("certificate: no pending row to flip")
 // in: ctx, tx, device pk, serial hex, CN, validity window, cert PEM, status.
 // out: new cert row id, error.
 func issueTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, serialHex, cn string, notBefore, notAfter time.Time, certPEM, status string) (int64, error) {
+	// Serialize concurrent Issues for the same device on its devices row -
+	// without the lock two racing calls can both pass the supersede UPDATE
+	// and leave two unrevoked rows.
+	var lockPk uuid.UUID
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM devices WHERE id = $1 FOR UPDATE`, devicePk).Scan(&lockPk); err != nil {
+		return 0, fmt.Errorf("cert issue: lock device %s: %w", devicePk, err)
+	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE device_certificates SET revoked = true, revoked_at = NOW()
 		 WHERE device_pk = $1 AND revoked = false`, devicePk); err != nil {
@@ -133,8 +142,8 @@ func (s *CertificateService) Activate(ctx context.Context, tenantID string, cert
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
 			`UPDATE device_certificates SET status = $1
-			 WHERE id = $2 AND status = $3 AND revoked = false`,
-			CertStatusActive, certID, CertStatusPending)
+			 WHERE id = $2 AND device_pk = $3 AND status = $4 AND revoked = false`,
+			CertStatusActive, certID, devicePk, CertStatusPending)
 		if err != nil {
 			return err
 		}
@@ -157,7 +166,7 @@ func (s *CertificateService) MarkFailed(ctx context.Context, tenantID string, ce
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
 			`UPDATE device_certificates SET status = $1
-			 WHERE id = $2 AND status = $3`,
+			 WHERE id = $2 AND status = $3 AND revoked = false`,
 			CertStatusFailed, certID, CertStatusPending)
 		if err != nil {
 			return err

@@ -7,6 +7,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -291,7 +292,10 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Every push step confirmed: flip the pending row live + set paired_at.
-	if err := s.services.Certificates.Activate(r.Context(), device.TenantID, certID, device.ID); err != nil {
+	// WithoutCancel mirrors failPairIssue: the device holds working certs by
+	// now, so the DB flip + audit must land even if the operator disconnects.
+	finalizeCtx := context.WithoutCancel(r.Context())
+	if err := s.services.Certificates.Activate(finalizeCtx, device.TenantID, certID, device.ID); err != nil {
 		slog.Error("activate device cert failed", "device", device.ID, "cert", certID, "err", err)
 		s.failPairIssue(w, r, device, certID, cn, serialHex, "activate", "activate+failed")
 		return
@@ -332,12 +336,20 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 // slug (which push step died), user-facing query-encoded message. out: 302.
 func (s *Server) failPairIssue(w http.ResponseWriter, r *http.Request, device *service.Device, certID int64, cn, serialHex, stage, msg string) {
 	ctx := context.WithoutCancel(r.Context())
+	// If the row was already finalized/superseded, the audit row must not
+	// claim we flipped it to failed - record what actually happened.
+	auditStatus := service.CertStatusFailed
 	if err := s.services.Certificates.MarkFailed(ctx, device.TenantID, certID); err != nil {
 		slog.Error("mark cert failed errored", "device", device.ID, "cert", certID, "err", err)
+		if errors.Is(err, service.ErrCertNotPending) {
+			auditStatus = "superseded"
+		} else {
+			auditStatus = "flip_failed"
+		}
 	}
 	s.audit(ctx, authmw.CurrentUser(r), authz.CertIssue, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
-		Detail: pairIssueDetail(device.DeviceID, cn, serialHex, service.CertStatusFailed, stage),
+		Detail: pairIssueDetail(device.DeviceID, cn, serialHex, auditStatus, stage),
 	})
 	http.Redirect(w, r, "/admin/devices/pair?error="+msg, http.StatusFound)
 }

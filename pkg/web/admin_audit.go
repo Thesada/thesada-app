@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"thesada.app/app/pkg/authz"
@@ -124,7 +125,10 @@ func newAuditRow(rec service.AuditRecord) auditRow {
 	row.DetailShort = row.Detail
 	if len(row.Detail) > auditDetailInlineMax {
 		row.DetailIsLong = true
-		row.DetailShort = row.Detail[:auditDetailInlineMax] + "..."
+		// Rune-safe cut: a byte-boundary slice can split a UTF-8 sequence
+		// (detail may embed international names/emails).
+		cut := row.Detail[:auditDetailInlineMax]
+		row.DetailShort = strings.ToValidUTF8(cut, "") + "..."
 	}
 	return row
 }
