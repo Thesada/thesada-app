@@ -13,18 +13,19 @@ import (
 // Services bundles every service the HTTP layers need.
 // Construct once in main and pass to both pkg/web and pkg/api/v1.
 type Services struct {
-	Devices      *DeviceService
-	Telemetry    *TelemetryService
-	Alerts       *AlertService
-	Auth         *AuthService
-	Tenants      *TenantService
-	Settings     *SettingsService
-	DeviceFiles  *DeviceFilesService
-	Certificates *CertificateService
-	OAuth        *OAuthService
-	ApiTokens    *ApiTokenService
-	Secrets      *SecretService
-	Audit        *AuditService
+	Devices       *DeviceService
+	Telemetry     *TelemetryService
+	Alerts        *AlertService
+	Auth          *AuthService
+	Tenants       *TenantService
+	Settings      *SettingsService
+	DeviceFiles   *DeviceFilesService
+	Certificates  *CertificateService
+	OAuth         *OAuthService
+	ApiTokens     *ApiTokenService
+	Secrets       *SecretService
+	Audit         *AuditService
+	Observability *ObservabilityService
 }
 
 // New constructs all services on shared cfg + role-scoped pools (App=tenant reads, Admin=BYPASSRLS, MQTT=ingest).
@@ -38,17 +39,18 @@ func New(cfg *config.Config, pools db.Pools) (*Services, error) {
 		return nil, err
 	}
 	return &Services{
-		Devices:      &DeviceService{cfg: cfg, pools: pools},
-		Telemetry:    &TelemetryService{cfg: cfg, pools: pools},
-		Alerts:       &AlertService{cfg: cfg, pools: pools},
-		Auth:         NewAuthService(cfg, pools),
-		Tenants:      &TenantService{cfg: cfg, pools: pools, secrets: secretsSvc},
-		Settings:     &SettingsService{cfg: cfg, pools: pools, cache: make(map[string]json.RawMessage)},
-		DeviceFiles:  &DeviceFilesService{cfg: cfg, pools: pools},
-		Certificates: &CertificateService{cfg: cfg, pools: pools},
-		OAuth:        NewOAuthService(cfg, pools),
-		ApiTokens:    &ApiTokenService{cfg: cfg, pools: pools},
-		Secrets:      secretsSvc,
-		Audit:        &AuditService{cfg: cfg, pools: pools},
+		Devices:       &DeviceService{cfg: cfg, pools: pools},
+		Telemetry:     &TelemetryService{cfg: cfg, pools: pools},
+		Alerts:        &AlertService{cfg: cfg, pools: pools},
+		Auth:          NewAuthService(cfg, pools),
+		Tenants:       &TenantService{cfg: cfg, pools: pools, secrets: secretsSvc},
+		Settings:      &SettingsService{cfg: cfg, pools: pools, cache: make(map[string]json.RawMessage)},
+		DeviceFiles:   &DeviceFilesService{cfg: cfg, pools: pools},
+		Certificates:  &CertificateService{cfg: cfg, pools: pools},
+		OAuth:         NewOAuthService(cfg, pools),
+		ApiTokens:     &ApiTokenService{cfg: cfg, pools: pools},
+		Secrets:       secretsSvc,
+		Audit:         &AuditService{cfg: cfg, pools: pools},
+		Observability: &ObservabilityService{cfg: cfg, pools: pools},
 	}, nil
 }

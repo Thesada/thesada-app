@@ -151,11 +151,12 @@ func (s *Server) handleAdminDevicePairIndex(w http.ResponseWriter, r *http.Reque
 }
 
 // handleAdminDevicePairIssue signs a per-device cert with the CA, persists
-// via CertificateService, then pushes client_cert + client_key via MQTT CLI
-// cert.set and triggers cert.apply. Atomic: on any failure mid-flow the
-// operator can re-click to retry (Issue writes a new cert row, revoking
-// any prior one implicitly via the Revoke action, and firmware tolerates
-// re-set).
+// it as a 'pending' row via CertificateService.IssuePending, pushes
+// client_cert + client_key via MQTT CLI cert.set plus config/secrets/
+// dynsec, and flips the row 'active' once every push step confirmed.
+// Retry-safe: on any failure mid-flow the row flips 'failed' and the
+// operator can re-click (IssuePending supersedes any prior unrevoked row,
+// firmware tolerates re-set, dynsec tolerates "already exists").
 // in: writer, POST /admin/devices/{id}/pair/issue. out: 302 to pair page.
 func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
@@ -190,38 +191,52 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 	topicPrefix := s.deviceTopicPrefix(device)
 	user := authmw.CurrentUser(r)
 
-	// Push-first, persist-last. If any MQTT step fails we do NOT mark the
-	// device paired in the db, so the UI state always reflects what the
-	// device actually has in NVS.
+	// Persist-first, then push, then confirm (the alert pending ->
+	// delivered/dead lifecycle shape). The 'pending' row lands BEFORE any
+	// MQTT step so a mid-air failure can never leave a certed device the
+	// DB does not know about; only the final Activate makes it live.
 	//
 	// Order keeps the device in a valid auth state the whole time:
-	//   1. cert.set client_cert - NVS half-written, hasClientCert() stays false -> password auth
-	//   2. cert.set client_key  - NVS complete, but port still 8883 -> cert sits dormant
-	//   3. config.set mqtt.port 8884 - stored, not active until next reconnect
-	//   4. CertificateService.Issue - persist + flip paired_at (only now)
-	//   5. config.reload - best-effort reconnect on mTLS listener
+	//   1. IssuePending - persist row status='pending' (supersedes any prior cert)
+	//   2. cert.set client_cert - NVS half-written, hasClientCert() stays false -> password auth
+	//   3. cert.set client_key  - NVS complete, but port still 8883 -> cert sits dormant
+	//   4. config.set mqtt.port 8884 - stored, not active until next reconnect
+	//   5. secrets + dynsec provisioning
+	//   6. Activate - flip status='active' + paired_at (only now)
+	//   7. cli/restart - best-effort reconnect on mTLS listener
+	// Any failure in 2-6 flips the row 'failed' and surfaces the error.
+	now := time.Now()
+	certID, err := s.services.Certificates.IssuePending(r.Context(), device.TenantID, device.ID,
+		serialHex, cn, now, now.Add(deviceCertValidity), certPEM)
+	if err != nil {
+		slog.Error("persist pending device cert failed", "device", device.ID, "err", err)
+		http.Redirect(w, r, "/admin/devices/pair?error=persist+failed", http.StatusFound)
+		return
+	}
+
 	if msg, ok := s.pushCertPart(r.Context(), topicPrefix, "client_cert", certPEM); !ok {
 		slog.Error("push client_cert failed", "device", device.ID, "err", msg)
-		http.Redirect(w, r, "/admin/devices/pair?error="+msg, http.StatusFound)
+		s.failPairIssue(w, r, device, certID, cn, serialHex, "push_client_cert", msg)
 		return
 	}
 	if msg, ok := s.pushCertPart(r.Context(), topicPrefix, "client_key", keyPEM); !ok {
 		slog.Error("push client_key failed", "device", device.ID, "err", msg)
-		http.Redirect(w, r, "/admin/devices/pair?error="+msg, http.StatusFound)
+		s.failPairIssue(w, r, device, certID, cn, serialHex, "push_client_key", msg)
 		return
 	}
 	if msg, ok := s.runCLI(r.Context(), topicPrefix, "config.set",
 		fmt.Sprintf("mqtt.port %d", mqttPortMTLS)); !ok {
 		slog.Error("config.set mqtt.port failed", "device", device.ID, "err", msg)
-		http.Redirect(w, r, "/admin/devices/pair?error="+msg, http.StatusFound)
+		s.failPairIssue(w, r, device, certID, cn, serialHex, "config_set_port", msg)
 		return
 	}
 
-	// 3b. Provision device-config secrets into NVS (mirror of cert.set), while
+	// 4b. Provision device-config secrets into NVS (mirror of cert.set), while
 	// still in the device-NVS-write group and before the restart. Only when the
 	// feature is on: a KEK-off deployment keeps plaintext config and skips this
-	// entirely. Push-first-persist-last holds - a failed secret push aborts the
-	// pair with no paired_at flip, and a retry re-pushes (secret.set overwrites).
+	// entirely. The cert row is still 'pending' here - a failed secret push
+	// flips it 'failed' with no paired_at flip, and a retry re-pushes
+	// (secret.set overwrites).
 	if s.services.Secrets.Enabled() {
 		// WiFi passwords are keyed per-SSID on the firmware; build one field
 		// per configured network from the device's stored config so we push
@@ -246,15 +261,15 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 		}
 		if outcome.AbortMsg != "" {
 			slog.Error("secret provisioning aborted pair", "device", device.ID, "err", outcome.AbortMsg)
-			http.Redirect(w, r, "/admin/devices/pair?error="+outcome.AbortMsg, http.StatusFound)
+			s.failPairIssue(w, r, device, certID, cn, serialHex, "secret_provision", outcome.AbortMsg)
 			return
 		}
 	}
 
-	// Provision the dynsec role + client before persist. Role-first so the
-	// client create can attach it atomically. "already exists" is tolerated
-	// for retry safety: a prior pair attempt that succeeded here but failed
-	// on Issue should be resumable.
+	// Provision the dynsec role + client before the Activate flip.
+	// Role-first so the client create can attach it atomically. "already
+	// exists" is tolerated for retry safety: a prior pair attempt that
+	// succeeded here but failed later should be resumable.
 	dynsecCtx, dynsecCancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer dynsecCancel()
 	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
@@ -265,20 +280,20 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 		dynsecSettingCrossTenantRead, device.TenantID == "default")
 	if err := s.mqtt.CreateDynsecRole(dynsecCtx, roleName, dynsecDeviceACLs(device.TenantID, topicPrefix, broadRead)); err != nil && !mqtt.IsDynsecAlreadyExists(err) {
 		slog.Error("dynsec createRole failed", "device", device.ID, "role", roleName, "err", err)
-		http.Redirect(w, r, "/admin/devices/pair?error=dynsec+role+create+failed", http.StatusFound)
+		s.failPairIssue(w, r, device, certID, cn, serialHex, "dynsec_role_create", "dynsec+role+create+failed")
 		return
 	}
 	// Cert-only client: empty password, auth via TLS CN on the mTLS listener.
 	if err := s.mqtt.CreateDynsecClient(dynsecCtx, cn, "", []string{roleName}); err != nil && !mqtt.IsDynsecAlreadyExists(err) {
 		slog.Error("dynsec createClient failed", "device", device.ID, "cn", cn, "err", err)
-		http.Redirect(w, r, "/admin/devices/pair?error=dynsec+client+create+failed", http.StatusFound)
+		s.failPairIssue(w, r, device, certID, cn, serialHex, "dynsec_client_create", "dynsec+client+create+failed")
 		return
 	}
 
-	now := time.Now()
-	if err := s.services.Certificates.Issue(r.Context(), device.TenantID, device.ID, serialHex, cn, now, now.Add(deviceCertValidity), certPEM); err != nil {
-		slog.Error("persist device cert failed", "device", device.ID, "err", err)
-		http.Redirect(w, r, "/admin/devices/pair?error=persist+failed", http.StatusFound)
+	// Every push step confirmed: flip the pending row live + set paired_at.
+	if err := s.services.Certificates.Activate(r.Context(), device.TenantID, certID, device.ID); err != nil {
+		slog.Error("activate device cert failed", "device", device.ID, "cert", certID, "err", err)
+		s.failPairIssue(w, r, device, certID, cn, serialHex, "activate", "activate+failed")
 		return
 	}
 
@@ -302,10 +317,48 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 	logPairStateChange(device, "unpaired", "paired", user.Email, "pair_issue")
 	s.audit(r.Context(), user, authz.CertIssue, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
-		Detail: map[string]any{"device_id": device.DeviceID, "cn": cn, "serial": serialHex},
+		Detail: pairIssueDetail(device.DeviceID, cn, serialHex, service.CertStatusActive, ""),
 	})
 
 	http.Redirect(w, r, "/admin/devices/pair?ok=paired+"+device.DeviceID, http.StatusFound)
+}
+
+// failPairIssue finalizes an aborted issue attempt: flips the pending cert
+// row to 'failed' (WithoutCancel - the flip must land even if the operator
+// tears the request down), records the cert.issue outcome in the audit
+// trail, and surfaces the error to the operator via the pair-page flash.
+// The specific failure was already slog'd at the call site.
+// in: writer, request, device, pending cert row id, CN, serial, stage
+// slug (which push step died), user-facing query-encoded message. out: 302.
+func (s *Server) failPairIssue(w http.ResponseWriter, r *http.Request, device *service.Device, certID int64, cn, serialHex, stage, msg string) {
+	ctx := context.WithoutCancel(r.Context())
+	if err := s.services.Certificates.MarkFailed(ctx, device.TenantID, certID); err != nil {
+		slog.Error("mark cert failed errored", "device", device.ID, "cert", certID, "err", err)
+	}
+	s.audit(ctx, authmw.CurrentUser(r), authz.CertIssue, service.AuditEntry{
+		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
+		Detail: pairIssueDetail(device.DeviceID, cn, serialHex, service.CertStatusFailed, stage),
+	})
+	http.Redirect(w, r, "/admin/devices/pair?error="+msg, http.StatusFound)
+}
+
+// pairIssueDetail builds the cert.issue audit detail payload in one shape
+// for both outcomes: identifying labels plus the lifecycle status the row
+// ended in ('active' | 'failed') and, on failure, the stage that died.
+// Never carries secret values (AuditEntry contract).
+// in: device_id label, CN, serial hex, final status, failed stage ("" on
+// success). out: detail map.
+func pairIssueDetail(deviceID, cn, serial, status, stage string) map[string]any {
+	d := map[string]any{
+		"device_id": deviceID,
+		"cn":        cn,
+		"serial":    serial,
+		"status":    status,
+	}
+	if stage != "" {
+		d["stage"] = stage
+	}
+	return d
 }
 
 // pushCertPart sends one cert.set call with the "<type>\n<PEM>" payload and

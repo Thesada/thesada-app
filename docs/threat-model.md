@@ -81,7 +81,7 @@ network MITM, **device** = malicious/compromised device.
 |---|---|---|---|
 | device | Publish onto another tenant's `thesada/<other>/#` | `dynsecDeviceACLs` pins each device's publish scope to its own prefix; ingest re-checks `FindActivePairingTenant` in `onMessage` | A never-paired `device_id` is trusted on the topic-claimed tenant (cert-CN cross-check on auto-create is WIP). The shared `homeassistant/#` discovery tree is publish+retain for every device in every tenant. |
 | device | Keep using a revoked cert (365-day validity) | `Revoke` flips `revoked=true` and deletes the dynsec client so the broker refuses the CN | No CRL/OCSP - enforcement rests on a **best-effort, warn-only** dynsec `deleteClient`; a failed delete silently leaves the cert working. |
-| net | Mint a cert via `POST /admin/devices/{id}/pair/issue` | `RequireSuperAdmin` + CSRF on all pair routes; unauthorized access 404s | Stolen super-admin session passes outright (no step-up). Duplicate Issue accumulates multiple active certs (no revoke-prior guard). |
+| net | Mint a cert via `POST /admin/devices/{id}/pair/issue` | `RequireSuperAdmin` + CSRF on all pair routes; unauthorized access 404s. Persist-first lifecycle: the row lands `status='pending'` before any push and only `Activate` makes it live, so a mid-air failure leaves a queryable `failed` row, never an unrecorded cert; `issueTx` revokes every prior unrevoked cert in the same tx, so duplicate Issue supersedes instead of accumulating. `cert.issue` audit rows record the outcome (`status` + failed `stage`). | Stolen super-admin session passes outright (no step-up). |
 
 ### OTA channel integrity
 

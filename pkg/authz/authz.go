@@ -14,6 +14,7 @@ package authz
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"thesada.app/app/pkg/service"
 )
@@ -76,6 +77,20 @@ var superAdminActions = map[Action]bool{
 	DeviceSecretProvision:   true,
 	OTADispatch:             true,
 	MQTTShellPublish:        true,
+}
+
+// Actions returns every registered Action slug, sorted, for UIs that need
+// the vocabulary (the /admin/audit action dropdown). Derived from the
+// grant table so a new Action registered there shows up without a second
+// list to maintain.
+// out: sorted action slugs.
+func Actions() []Action {
+	out := make([]Action, 0, len(superAdminActions))
+	for a := range superAdminActions {
+		out = append(out, a)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // Can reports whether u may perform a. Nil-safe: an anonymous caller can

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,17 +59,97 @@ type AuditRecord struct {
 }
 
 // AuditFilter narrows List. Zero values mean "no filter"; Limit <= 0
-// defaults to 100.
+// defaults to 100. ActorEmail is a case-insensitive substring match (the
+// table is operator-scale, so a seqscan ILIKE is the cheap option); every
+// other field is exact. From is inclusive, To exclusive - a UI passing a
+// date range hands the day-after as To. Offset > 0 skips rows for
+// pagination.
 type AuditFilter struct {
 	Action      string
 	ActorUserID *uuid.UUID
+	ActorEmail  string
+	TargetType  string
+	TargetID    string
 	TenantID    string
+	From        time.Time
+	To          time.Time
 	Limit       int
+	Offset      int
 }
 
 // auditListMaxLimit caps a single List page so a UI bug cannot pull the
 // whole table into memory.
 const auditListMaxLimit = 500
+
+// escapeLike neutralizes LIKE metacharacters in user input so a filter of
+// "100%" matches the literal text instead of everything.
+// in: raw substring. out: pattern-safe substring (caller adds the %...%).
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
+// auditListQuery builds the List SQL + bind args from a filter. Pure so
+// the clause assembly is unit-testable without a database.
+// in: filter. out: full query text, ordered bind args.
+func auditListQuery(f AuditFilter) (string, []any) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > auditListMaxLimit {
+		limit = auditListMaxLimit
+	}
+	query := `SELECT id, at, actor_user_id, actor_email, action, target_type, target_id, tenant_id, detail
+	            FROM admin_audit`
+	var (
+		args  []any
+		where string
+	)
+	and := func(clause string, v any) {
+		args = append(args, v)
+		if where == "" {
+			where = " WHERE "
+		} else {
+			where += " AND "
+		}
+		// Sprintf builds the bind index only; the value lives in args.
+		where += fmt.Sprintf(clause, len(args))
+	}
+	if f.Action != "" {
+		and("action = $%d", f.Action)
+	}
+	if f.ActorUserID != nil {
+		and("actor_user_id = $%d", *f.ActorUserID)
+	}
+	if f.ActorEmail != "" {
+		and("actor_email ILIKE $%d", "%"+escapeLike(f.ActorEmail)+"%")
+	}
+	if f.TargetType != "" {
+		and("target_type = $%d", f.TargetType)
+	}
+	if f.TargetID != "" {
+		and("target_id = $%d", f.TargetID)
+	}
+	if f.TenantID != "" {
+		and("tenant_id = $%d", f.TenantID)
+	}
+	if !f.From.IsZero() {
+		and("at >= $%d", f.From)
+	}
+	if !f.To.IsZero() {
+		and("at < $%d", f.To)
+	}
+	args = append(args, limit)
+	query += where + fmt.Sprintf(" ORDER BY at DESC, id DESC LIMIT $%d", len(args))
+	if f.Offset > 0 {
+		args = append(args, f.Offset)
+		query += fmt.Sprintf(" OFFSET $%d", len(args))
+	}
+	return query, args
+}
 
 // Record inserts one admin_audit row via the admin pool. Callers on
 // best-effort paths must not fail the admin action on error - log it loud
@@ -125,43 +206,11 @@ func auditImpersonationTx(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, a
 }
 
 // List returns admin_audit rows newest-first, optionally filtered by
-// action, actor, and tenant. Backs the (future) admin audit UI.
+// action, actor (id or email substring), target, tenant, and time range,
+// with limit/offset pagination. Backs the /admin/audit search UI.
 // in: ctx, filter. out: rows newest-first, error.
 func (s *AuditService) List(ctx context.Context, f AuditFilter) ([]AuditRecord, error) {
-	limit := f.Limit
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > auditListMaxLimit {
-		limit = auditListMaxLimit
-	}
-	query := `SELECT id, at, actor_user_id, actor_email, action, target_type, target_id, tenant_id, detail
-	            FROM admin_audit`
-	var (
-		args  []any
-		where string
-	)
-	and := func(clause string, v any) {
-		args = append(args, v)
-		if where == "" {
-			where = " WHERE "
-		} else {
-			where += " AND "
-		}
-		// Sprintf builds the bind index only; the value lives in args.
-		where += fmt.Sprintf(clause, len(args))
-	}
-	if f.Action != "" {
-		and("action = $%d", f.Action)
-	}
-	if f.ActorUserID != nil {
-		and("actor_user_id = $%d", *f.ActorUserID)
-	}
-	if f.TenantID != "" {
-		and("tenant_id = $%d", f.TenantID)
-	}
-	args = append(args, limit)
-	query += where + fmt.Sprintf(" ORDER BY at DESC, id DESC LIMIT $%d", len(args))
+	query, args := auditListQuery(f)
 
 	var out []AuditRecord
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "audit.list", func(tx pgx.Tx) error {
