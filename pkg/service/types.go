@@ -70,6 +70,8 @@ type device_alerts struct {
 
 // DeviceCertificate maps to the device_certificates table. Stores X.509
 // client certs issued by the app's CA for per-device mTLS authentication.
+// Status is the issue lifecycle ('pending'|'active'|'failed', 0027); only
+// revoked=false + status='active' is a live cert.
 type DeviceCertificate struct {
 	ID        int64      `json:"id"`
 	DevicePK  uuid.UUID  `json:"device_pk"`
@@ -80,6 +82,7 @@ type DeviceCertificate struct {
 	CertPEM   string     `json:"cert_pem"`
 	Revoked   bool       `json:"revoked"`
 	RevokedAt *time.Time `json:"revoked_at"`
+	Status    string     `json:"status"`
 	CreatedAt time.Time  `json:"created_at"`
 }
 

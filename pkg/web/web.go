@@ -114,6 +114,8 @@ func (s *Server) parseTemplates() {
 		"admin-device-secrets.html",
 		"admin-devices-pair.html",
 		"admin-debug.html",
+		"admin-audit.html",
+		"admin-observability.html",
 	}
 	s.templates = make(map[string]*template.Template, len(pages))
 	for _, page := range pages {
@@ -225,6 +227,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/impersonate/{slug}", authmw.RequireSuperAdmin(s.handleAdminImpersonate))
 	s.mux.HandleFunc("POST /admin/impersonate", authmw.RequireSuperAdmin(s.handleAdminImpersonateClear))
 	s.mux.HandleFunc("GET /admin/debug", authmw.RequireSuperAdmin(s.handleAdminDebug))
+	s.mux.HandleFunc("GET /admin/audit", authmw.RequireSuperAdmin(s.handleAdminAudit))
+	s.mux.HandleFunc("GET /admin/observability", authmw.RequireSuperAdmin(s.handleAdminObservability))
 }
 
 // render executes a parsed page template, injecting auth context into data.

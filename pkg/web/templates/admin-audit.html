@@ -1,0 +1,109 @@
+{{define "title"}}Admin - Audit trail - thesada{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-semibold">Audit trail</h1>
+  <a href="/admin" class="text-sm text-slate-500 hover:underline">back to admin</a>
+</div>
+<p class="text-sm text-slate-500 mb-4">
+  Durable record of privileged operator actions (<code class="text-xs bg-slate-100 px-1 rounded">admin_audit</code>). Append-only; newest first.
+</p>
+
+<form method="GET" action="/admin/audit" class="bg-white border border-slate-200 rounded-xl p-4 mb-4">
+  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
+    <label class="block">
+      <span class="text-xs uppercase text-slate-500 tracking-wide">Actor email contains</span>
+      <input type="text" name="actor" value="{{.Filter.Actor}}" placeholder="operator@"
+             class="mt-1 w-full border border-slate-300 rounded px-2 py-1">
+    </label>
+    <label class="block">
+      <span class="text-xs uppercase text-slate-500 tracking-wide">Action</span>
+      <select name="action" class="mt-1 w-full border border-slate-300 rounded px-2 py-1">
+        <option value="">any</option>
+        {{$sel := .Filter.Action}}
+        {{range .Actions}}
+        <option value="{{.}}" {{if eq (printf "%s" .) $sel}}selected{{end}}>{{.}}</option>
+        {{end}}
+      </select>
+    </label>
+    <label class="block">
+      <span class="text-xs uppercase text-slate-500 tracking-wide">Target type</span>
+      <input type="text" name="target_type" value="{{.Filter.TargetType}}" placeholder="device"
+             class="mt-1 w-full border border-slate-300 rounded px-2 py-1">
+    </label>
+    <label class="block">
+      <span class="text-xs uppercase text-slate-500 tracking-wide">Target id</span>
+      <input type="text" name="target_id" value="{{.Filter.TargetID}}"
+             class="mt-1 w-full border border-slate-300 rounded px-2 py-1 font-mono text-xs">
+    </label>
+    <label class="block">
+      <span class="text-xs uppercase text-slate-500 tracking-wide">From</span>
+      <input type="date" name="from" value="{{.Filter.From}}"
+             class="mt-1 w-full border border-slate-300 rounded px-2 py-1">
+    </label>
+    <label class="block">
+      <span class="text-xs uppercase text-slate-500 tracking-wide">To (inclusive)</span>
+      <input type="date" name="to" value="{{.Filter.To}}"
+             class="mt-1 w-full border border-slate-300 rounded px-2 py-1">
+    </label>
+  </div>
+  <div class="mt-3 flex gap-2">
+    <button type="submit" class="text-xs px-3 py-1.5 rounded bg-slate-900 hover:bg-slate-800 text-white">Filter</button>
+    <a href="/admin/audit" class="text-xs px-3 py-1.5 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Reset</a>
+  </div>
+</form>
+
+{{if .Rows}}
+<div class="bg-white border border-slate-200 rounded-xl overflow-x-auto">
+  <table class="min-w-full text-sm">
+    <thead class="bg-slate-50 text-slate-600 text-xs uppercase tracking-wide">
+      <tr>
+        <th class="text-left px-4 py-2">When</th>
+        <th class="text-left px-4 py-2">Actor</th>
+        <th class="text-left px-4 py-2">Action</th>
+        <th class="text-left px-4 py-2 hidden md:table-cell">Target</th>
+        <th class="text-left px-4 py-2 hidden lg:table-cell">Tenant</th>
+        <th class="text-left px-4 py-2 hidden sm:table-cell">Detail</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-100">
+      {{range .Rows}}
+      <tr>
+        <td class="px-4 py-2 text-xs text-slate-500 whitespace-nowrap">{{fmtTime .Rec.At}}</td>
+        <td class="px-4 py-2 truncate max-w-[180px]">{{.Rec.ActorEmail}}</td>
+        <td class="px-4 py-2 font-mono text-xs">{{.Rec.Action}}</td>
+        <td class="px-4 py-2 text-xs hidden md:table-cell">
+          {{if .Rec.TargetType}}<span class="text-slate-500">{{deref .Rec.TargetType}}</span>
+            <span class="font-mono text-slate-600 break-all">{{deref .Rec.TargetID}}</span>
+          {{else}}-{{end}}
+        </td>
+        <td class="px-4 py-2 font-mono text-xs hidden lg:table-cell">{{derefOrDash .Rec.TenantID}}</td>
+        <td class="px-4 py-2 text-xs hidden sm:table-cell">
+          {{if .DetailIsLong}}
+          <details>
+            <summary class="cursor-pointer font-mono text-slate-600" title="{{.Detail}}">{{.DetailShort}}</summary>
+            <pre class="mt-1 p-2 bg-slate-50 rounded text-xs whitespace-pre-wrap break-all">{{.Detail}}</pre>
+          </details>
+          {{else if .Detail}}
+          <span class="font-mono text-slate-600">{{.Detail}}</span>
+          {{else}}-{{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{else}}
+<div class="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500">
+  No audit entries match.
+</div>
+{{end}}
+
+<div class="mt-4 flex items-center justify-between text-sm">
+  <div>
+    {{if .PrevURL}}<a href="{{.PrevURL}}" class="text-sky-700 hover:underline">&larr; newer</a>{{end}}
+  </div>
+  <div>
+    {{if .NextURL}}<a href="{{.NextURL}}" class="text-sky-700 hover:underline">older &rarr;</a>{{end}}
+  </div>
+</div>
+{{end}}

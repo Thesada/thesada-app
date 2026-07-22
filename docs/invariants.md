@@ -135,15 +135,16 @@ Source: `pkg/web/admin_pair.go::dynsecSettingCrossTenantRead`,
 
 Every inbound MQTT message goes through a cross-tenant pairing gate
 in `Client.onMessage` before any handler runs: if the
-firmware-claimed `device_id` already has a paired (non-revoked)
-certificate under a different tenant, the message is dropped without
-side effects. Broker ACL drift therefore cannot trick the app into
-auto-creating a duplicate device row in the wrong tenant.
+firmware-claimed `device_id` already has a live (non-revoked,
+`status='active'`) certificate under a different tenant, the message
+is dropped without side effects. Broker ACL drift therefore cannot
+trick the app into auto-creating a duplicate device row in the wrong
+tenant.
 
-A device with no active pairing (never paired, or its last pairing
-was revoked) falls through; the topic tenant is treated as
-authoritative until a pairing locks the device into a specific
-tenant. Re-pairing into a different tenant goes through the admin
+A device with no live pairing (never paired, last pairing revoked,
+or an issue still mid-push / failed) falls through; the topic tenant
+is treated as authoritative until a pairing locks the device into a
+specific tenant. Re-pairing into a different tenant goes through the admin
 "Reassign tenant" flow which revokes the old cert before issuing
 the new one, so the check switches over atomically.
 

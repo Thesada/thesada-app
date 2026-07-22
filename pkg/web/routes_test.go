@@ -73,6 +73,8 @@ var gatedRoutes = []struct {
 	{http.MethodPost, "/admin/impersonate/acme"},
 	{http.MethodPost, "/admin/impersonate"},
 	{http.MethodGet, "/admin/debug"},
+	{http.MethodGet, "/admin/audit"},
+	{http.MethodGet, "/admin/observability"},
 }
 
 // newMuxOnlyServer builds a Server with just the mux + routes wired. No
