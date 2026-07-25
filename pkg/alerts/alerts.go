@@ -12,6 +12,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -438,16 +439,27 @@ func (n *Notifier) sendTelegram(ctx context.Context, chatID, body string) error 
 	url := "https://api.telegram.org/bot" + n.cfg.TelegramBotToken + "/sendMessage"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return redactToken(err, n.cfg.TelegramBotToken)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := n.http.Do(req)
 	if err != nil {
-		return err
+		return redactToken(err, n.cfg.TelegramBotToken)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("telegram api status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// redactToken masks the bot token anywhere in err's text. The request URL
+// embeds the token and *url.Error stringifies the URL on transport failure,
+// so a raw err would leak the token into slog at every failed send.
+// in: source error, token to mask. out: error with token replaced, or err as-is.
+func redactToken(err error, token string) error {
+	if err == nil || token == "" || !strings.Contains(err.Error(), token) {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), token, "[redacted]"))
 }
