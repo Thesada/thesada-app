@@ -64,10 +64,11 @@ func TestSendTelegram_TransportErrorNeverLeaksToken(t *testing.T) {
 
 func TestRedactToken_PassthroughWhenNoToken(t *testing.T) {
 	base := errors.New("plain failure")
-	if got := redactToken(base, ""); got != base {
+	// identity, not errors.Is: passthrough must return base itself, unwrapped
+	if got := redactToken(base, ""); got != base { //nolint:errorlint
 		t.Errorf("empty token: want passthrough, got %v", got)
 	}
-	if got := redactToken(base, "tok"); got != base {
+	if got := redactToken(base, "tok"); got != base { //nolint:errorlint
 		t.Errorf("token absent from text: want passthrough, got %v", got)
 	}
 	if got := redactToken(nil, "tok"); got != nil {
