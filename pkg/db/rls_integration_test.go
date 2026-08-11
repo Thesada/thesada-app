@@ -83,7 +83,7 @@ func roleURL(base, role string) (string, error) {
 //
 // in:  testing.T, superuser connection URL.
 // out: rlsPools; t.Fatal on any setup failure, t.Skip when a precondition
-//      (db name, TimescaleDB) is not met.
+// (db name, TimescaleDB) is not met.
 func setupRLSDatabase(t *testing.T, baseURL string) *rlsPools {
 	t.Helper()
 	ctx := context.Background()

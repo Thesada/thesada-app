@@ -16,13 +16,13 @@ import "github.com/jackc/pgx/v5/pgxpool"
 // Pools bundles the three role-scoped pools the service layer touches.
 //
 //   - App   : tenant-scoped reads/writes via thesada_app role. Most calls.
-//             Wrap each query in db.WithTenant so RLS receives app.tenant_id.
+//     Wrap each query in db.WithTenant so RLS receives app.tenant_id.
 //   - Admin : BYPASSRLS path via thesada_app_admin role. Cross-tenant
-//             admin reads. Wrap each call in db.WithAdminAudit so the
-//             bypass is logged.
+//     admin reads. Wrap each call in db.WithAdminAudit so the
+//     bypass is logged.
 //   - MQTT  : NOBYPASSRLS ingest path via thesada_app_mqtt role. Same RLS
-//             gate as App; separate pool so ingest connection budget is
-//             isolated from request traffic.
+//     gate as App; separate pool so ingest connection budget is
+//     isolated from request traffic.
 type Pools struct {
 	App   *pgxpool.Pool
 	Admin *pgxpool.Pool
