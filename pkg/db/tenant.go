@@ -34,8 +34,8 @@ var ErrNoTenant = errors.New("db.WithTenant: tenantID is required")
 
 // WithTenant opens a tx on pool, sets app.tenant_id, runs fn, commits.
 // in:  ctx, pool (any of app/admin/mqtt), tenantID (non-empty), fn callback.
-// out: error from BEGIN, SET LOCAL, fn, or COMMIT - all bubble up.
-//      On any error the tx is rolled back via pgx's deferred Rollback.
+// out: error from BEGIN, SET LOCAL, fn, or COMMIT - all bubble up. On any
+// error the tx is rolled back via pgx's deferred Rollback.
 func WithTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, fn func(pgx.Tx) error) error {
 	if tenantID == "" {
 		return ErrNoTenant
