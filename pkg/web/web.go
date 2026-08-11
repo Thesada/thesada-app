@@ -112,6 +112,7 @@ func (s *Server) parseTemplates() {
 		"admin-mqtt.html", "admin-waitlist.html",
 		"admin-device-config.html",
 		"admin-device-secrets.html",
+		"admin-tenant-secrets.html",
 		"admin-devices-pair.html",
 		"admin-debug.html",
 		"admin-audit.html",
@@ -223,7 +224,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /admin/devices/{id}/config/history", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigHistory))
 	s.mux.HandleFunc("GET /admin/devices/{id}/secrets", authmw.RequireSuperAdmin(s.handleAdminDeviceSecrets))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/set", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsSet))
+	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/clear", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsClear))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/provision", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsProvision))
+	s.mux.HandleFunc("GET /admin/tenants/{slug}/secrets", authmw.RequireSuperAdmin(s.handleAdminTenantSecrets))
+	s.mux.HandleFunc("POST /admin/tenants/{slug}/secrets/set", authmw.RequireSuperAdmin(s.handleAdminTenantSecretsSet))
+	s.mux.HandleFunc("POST /admin/tenants/{slug}/secrets/set-wifi", authmw.RequireSuperAdmin(s.handleAdminTenantSecretsSetWifi))
+	s.mux.HandleFunc("POST /admin/tenants/{slug}/secrets/clear", authmw.RequireSuperAdmin(s.handleAdminTenantSecretsClear))
+	s.mux.HandleFunc("POST /admin/tenants/{slug}/secrets/provision", authmw.RequireSuperAdmin(s.handleAdminTenantSecretsProvision))
 	s.mux.HandleFunc("POST /admin/impersonate/{slug}", authmw.RequireSuperAdmin(s.handleAdminImpersonate))
 	s.mux.HandleFunc("POST /admin/impersonate", authmw.RequireSuperAdmin(s.handleAdminImpersonateClear))
 	s.mux.HandleFunc("GET /admin/debug", authmw.RequireSuperAdmin(s.handleAdminDebug))

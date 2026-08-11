@@ -47,7 +47,11 @@ const (
 	DeviceDelete          Action = "device.delete"
 	DeviceReassign        Action = "device.reassign"
 	DeviceSecretSet       Action = "device_secret.set"
+	DeviceSecretClear     Action = "device_secret.clear"
 	DeviceSecretProvision Action = "device_secret.provision"
+	TenantSecretSet       Action = "tenant_secret.set"
+	TenantSecretClear     Action = "tenant_secret.clear"
+	TenantSecretProvision Action = "tenant_secret.provision"
 	OTADispatch           Action = "ota.dispatch"
 	MQTTShellPublish      Action = "mqtt.shell_publish"
 )
@@ -74,7 +78,11 @@ var superAdminActions = map[Action]bool{
 	DeviceDelete:            true,
 	DeviceReassign:          true,
 	DeviceSecretSet:         true,
+	DeviceSecretClear:       true,
 	DeviceSecretProvision:   true,
+	TenantSecretSet:         true,
+	TenantSecretClear:       true,
+	TenantSecretProvision:   true,
 	OTADispatch:             true,
 	MQTTShellPublish:        true,
 }

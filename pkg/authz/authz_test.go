@@ -28,7 +28,11 @@ var allActions = []Action{
 	DeviceDelete,
 	DeviceReassign,
 	DeviceSecretSet,
+	DeviceSecretClear,
 	DeviceSecretProvision,
+	TenantSecretSet,
+	TenantSecretClear,
+	TenantSecretProvision,
 	OTADispatch,
 	MQTTShellPublish,
 }

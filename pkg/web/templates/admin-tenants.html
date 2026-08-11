@@ -39,6 +39,7 @@
         <td class="px-4 py-2 text-right">
           <div class="flex flex-wrap gap-2 justify-end items-center">
             <a href="/admin/tenants/{{.Tenant.ID}}/users" class="text-xs px-2 py-1 rounded bg-slate-200 hover:bg-slate-300 text-slate-700">users</a>
+            <a href="/admin/tenants/{{.Tenant.ID}}/secrets" class="text-xs px-2 py-1 rounded bg-slate-200 hover:bg-slate-300 text-slate-700">secrets</a>
             {{if not .IsCurrent}}
             <form method="POST" action="/admin/impersonate/{{.Tenant.ID}}" class="inline">
               <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
