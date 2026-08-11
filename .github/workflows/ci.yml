@@ -59,7 +59,7 @@ jobs:
       - name: Run unit tests
         run: make test
 
-  # 80%+ coverage floor on the security packages (csrf, oauth, pki, authmw).
+  # 80%+ floor on csrf, oauth, pki, authmw + the file pkg/service/auth.go (#281).
   # Runs -tags integration; testcontainers uses ubuntu-latest's Docker daemon.
   coverage:
     runs-on: ubuntu-latest

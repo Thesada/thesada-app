@@ -190,8 +190,15 @@ The `coverage` job in ci.yml enforces 80 %+ statement coverage on
 `pkg/csrf`, `pkg/oauth`, `pkg/pki`, and `pkg/authmw` via
 `scripts/check-coverage.sh` (run it locally with `make cover`). It runs
 `-tags integration` so oauth's DB-backed paths count against a real
-Postgres (testcontainers, no mocked DB). `pkg/service/auth.go` is not in
-the gated set: larger surface, gated separately.
+Postgres (testcontainers, no mocked DB).
+
+`pkg/service/auth.go` is gated too, as a **file** rather than a package
+(the `FILES` list in the script). `pkg/service` as a whole sits around
+84 % over a wide surface, so gating the package would block PRs on code
+that has nothing to do with auth. Per-file coverage is summed off the
+coverprofile, merging duplicate blocks by span first - every test binary
+in the package emits its own copy, and summing raw lines halves the
+number.
 
 ---
 
@@ -346,7 +353,8 @@ it. Leaves the codebase cleaner than you found it.
 
 New auth code without tests = doesn't merge. New tenant-scoping code
 without tests = doesn't merge. Hard rule, not aspiration: the ci.yml
-`coverage` job blocks any security package that drops below 80 %.
+`coverage` job blocks any security package - or gated file - that drops
+below 80 %.
 
 ### Stop writing prose where a checklist would do
 
