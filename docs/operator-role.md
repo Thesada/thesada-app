@@ -32,7 +32,8 @@ Each capability lists where it lives. Each **gap** is an operation an operator w
 | Certs | Download the CA cert (PEM) | `/admin/ca.crt` |
 | MQTT | Live subscribe tap + publish (publish restricted to `root/<tenant>/`, rate-limited) | `/admin/mqtt` |
 | Device shell | Run arbitrary firmware CLI, read/write device config, snapshot, history over MQTT | `/admin/devices/{id}/...` (config/cmd, config/write, fs.write) |
-| Secrets | Set (write-only, no read-back) + provision a device-config secret to device NVS | `/admin/devices/{id}/secrets/set`, `/provision` |
+| Secrets | Set (write-only, no read-back) + provision a device-config secret to device NVS; clear an override so the device falls back to the tenant default | `/admin/devices/{id}/secrets/set`, `/provision`, `/clear` |
+| Secrets | Set / clear a **tenant-wide default** and fan it out to every paired device that has no override | `/admin/tenants/{slug}/secrets/set`, `/clear`, `/provision` |
 | Fleet | Bulk OTA check (`cli/ota.check --force`) to selected devices | `/admin/devices/bulk` (action=ota) |
 | Debug | Build info + **redacted** live config dump (sensitive keys masked) | `/admin/debug` |
 
@@ -60,6 +61,7 @@ These are operations an on-call operator would reach for and find no tool. Each 
 5. **Reassigning a device does not re-key the on-device topic prefix.** Reassign updates only the app-side row; the device's `mqtt.topic_prefix` must be changed out of band. No tool pushes the new prefix.
 6. **KEK rotation + CA-key encryption are CLI-only** - not doable by a UI-only operator.
 7. **Revocation is not broker-enforced (no CRL/OCSP).** Revoke flips the DB row and deletes the dynsec client; a still-valid cert is kept out by the dynsec delete, not by CRL/OCSP. Flagged for "is a revoked cert actually rejected."
+8. **A tenant-default fan-out does not survive an offline device.** There is no job queue in the app, so `/admin/tenants/{slug}/secrets/provision` pushes synchronously and counts what it could not reach. An offline device keeps its old value until someone runs the fan-out again or the device re-pairs; nothing retries on reconnect. The counts are logged and audited, so a partial rotation is visible - but it is the operator who has to notice and re-run.
 
 ---
 

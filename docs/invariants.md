@@ -377,10 +377,44 @@ decrypt.
 
 Write-only contract: `SetSecret` writes, `Status` returns set/unset
 booleans only, and there is no operator-facing read-back path. The
-server CAN decrypt (`SecretService.Reveal`) to provision a device at
-pair or rotate keys, but that method is server-side only and must never
-be wired to an operator-facing route - the whole contract depends on it
-staying off the request surface.
+server CAN decrypt (`SecretService.Reveal`, `RevealTenantSecret`,
+`Resolve`) to provision a device at pair or rotate keys, but those
+methods are server-side only and must never be wired to an
+operator-facing route - the whole contract depends on them staying off
+the request surface.
+
+Two levels, one table: a row with `device_pk` NULL is the **tenant
+default** for that field, a row with a `device_pk` is that device's
+**override**. Both live in `device_config_secrets` under one partial
+unique index each, so the level is a property of the row, not of a
+second table. The effective value is `device override ?? tenant
+default`, resolved by `SecretService.Resolve` in a single query whose
+`ORDER BY device_pk IS NULL LIMIT 1` makes precedence a SQL fact rather
+than a two-read race. `Reveal` stays exact-row and does NOT fall back,
+so a caller that means "this device's own value" still gets exactly
+that. Provisioning (pair-time and both provision buttons) reads through
+`Resolve`, which is what lets a device pair into a site whose secrets
+are already set without any per-device write.
+
+Tenant-default ciphertext is AAD-bound to `tenant/"tenant-default"/field`
+rather than to a nil device UUID, so a default's blob can never be
+relocated onto a device row (or the reverse) and still decrypt. Rotating
+a default is one write plus a fan-out; devices with an override are
+excluded from that fan-out by `ProvisionTargets`, so a pinned device is
+never quietly re-pointed by a tenant-level rotation.
+
+The legacy bare `wifi.password` is device-level only, on both sides:
+`SetTenantSecret` refuses to write it and `Resolve` refuses to inherit
+it, so a row planted by an older build or by direct SQL stays inert. The
+reason is that the bare key carries no SSID, so provisioning appends the
+DEVICE's primary SSID (`FirmwareSecretField`) - a tenant-level row would
+land on `wifi.password:<ssid>`, the same NVS key a device's own per-SSID
+override writes, and clobber it. The mirror case is handled in
+`ProvisionTargets` / `ProvisionTargetCounts`: a device holding a bare row
+counts as overridden for ANY per-SSID WiFi default, conservatively,
+because that row provisions onto the same key. Tenant WiFi defaults are
+therefore always per-SSID, and the operator names the network on the
+tenant page rather than typing a storage key.
 
 Config hygiene: the write path never persists plaintext secrets in
 `device_files` / `device_file_history` (legacy pre-backfill
@@ -447,12 +481,19 @@ idempotent), `pkg/service/secret_fields_test.go` (`FirmwareSecretField`
 mapping), `pkg/web/provision_test.go` (pair-time provision loop:
 ordering, skip-unset, no-SSID skip, reveal-error + push-fail abort),
 `pkg/web/admin_secrets_integration_test.go` (write-only POST stores +
-round-trips, rejects empty/unknown), and the web auth-gate + bad-UUID
-audits for the two secrets routes (`routes_test.go`,
+round-trips, rejects empty/unknown),
+`pkg/service/secret_tenant_integration_test.go` (precedence: inherit,
+override wins, override survives a default rotation, clear falls back,
+cross-tenant default isolation, tenant-vs-device AAD not interchangeable,
+`ProvisionTargets` excludes overridden and unpaired devices), and the web
+auth-gate + bad-UUID audits for the two secrets routes (`routes_test.go`,
 `handler_input_test.go`). Residual: the thin handler-to-MQTT adapter in
 `handleAdminDevicePairIssue` (the closures wiring Reveal/pushSecret into
 the tested loop) has no end-to-end pairing test - it needs an MQTT device
-sim.
+sim. The tenant-secret HTTP handlers
+(`pkg/web/admin_tenant_secrets.go`) are likewise untested at the handler
+level; the fan-out counting and the redirect messages rest on the
+service-level tests underneath them.
 
 Source: `pkg/secrets/secrets.go`, `pkg/service/secret.go`
 (`SecretFields`, `FirmwareSecretField`, `Reveal`, `RotateRootKEK`),

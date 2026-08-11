@@ -245,13 +245,16 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 		fields, primarySSID := secretProvisionFields(s.deviceWifiSSIDs(r.Context(), device))
 		outcome := provisionDeviceSecrets(fields, primarySSID,
 			func(field string) (string, bool, error) {
-				v, found, err := s.services.Secrets.Reveal(r.Context(), device.TenantID, device.ID, field)
+				// Resolve, not Reveal: a device with no row of its own inherits
+				// the tenant default, which is the whole point of pairing a
+				// device into a site that already has its wifi/mqtt secrets set.
+				v, origin, err := s.services.Secrets.Resolve(r.Context(), device.TenantID, device.ID, field)
 				if err != nil {
 					// Log the real cause (DB / decrypt / corruption) before it
 					// collapses into the canned AbortMsg below - never the value.
-					slog.Error("reveal device secret failed", "device", device.ID, "field", field, "err", err)
+					slog.Error("resolve device secret failed", "device", device.ID, "field", field, "err", err)
 				}
-				return v, found, err
+				return v, origin != service.OriginUnset, err
 			},
 			func(fwField, value string) (string, bool) {
 				return s.pushSecret(r.Context(), topicPrefix, fwField, value)
