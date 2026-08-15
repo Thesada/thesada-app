@@ -312,7 +312,7 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 	// (port=8884) + NVS cert -> mTLS engages on first connect. Mirrors
 	// the device-delete cascade pattern in preemptiveCertClear. Best-
 	// effort fire-and-forget: device reboots before any response.
-	restartTopic := topicPrefix + "/cli/restart"
+	restartTopic := mqtt.CLICommandTopic(topicPrefix, "restart")
 	if perr := s.mqtt.PublishRaw(restartTopic, []byte("{}"), 0, false); perr != nil {
 		slog.Warn("pair issue: cli/restart publish failed",
 			"device", device.ID, "topic", restartTopic, "err", perr)

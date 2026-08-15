@@ -158,7 +158,7 @@ func (c *Client) CLIRequest(ctx context.Context, topicPrefix, command, payload s
 		return nil, fmt.Errorf("marshal envelope: %w", err)
 	}
 
-	respTopic := topicPrefix + "/cli/response"
+	respTopic := CLIResponseTopic(topicPrefix)
 	// Buffered well past any realistic page count so the non-blocking
 	// tap send below never drops an intermediate page of a paginated
 	// response (firmware v1.4.6+).
@@ -186,7 +186,7 @@ func (c *Client) CLIRequest(ctx context.Context, topicPrefix, command, payload s
 	}
 	defer cancel()
 
-	cmdTopic := topicPrefix + "/cli/" + command
+	cmdTopic := CLICommandTopic(topicPrefix, command)
 	if err := c.PublishRaw(cmdTopic, env, 0, false); err != nil {
 		return nil, fmt.Errorf("publish: %w", err)
 	}
@@ -209,7 +209,7 @@ func (c *Client) CLIRequestRaw(ctx context.Context, topicPrefix, command string,
 	lock.Lock()
 	defer lock.Unlock()
 
-	respTopic := topicPrefix + "/cli/response"
+	respTopic := CLIResponseTopic(topicPrefix)
 	// Buffered well past any realistic page count so the non-blocking
 	// tap send below never drops an intermediate page of a paginated
 	// response (firmware v1.4.6+).
@@ -225,7 +225,7 @@ func (c *Client) CLIRequestRaw(ctx context.Context, topicPrefix, command string,
 	}
 	defer cancel()
 
-	cmdTopic := topicPrefix + "/cli/" + command
+	cmdTopic := CLICommandTopic(topicPrefix, command)
 	pubPayload := rawPayload
 	// SIM7080G modem-native MQTT silently drops +SMSUB: URCs for empty-
 	// payload publishes (verified 2026-05-08 against LilyGO vendor reference
