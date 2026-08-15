@@ -16,14 +16,15 @@ import (
 	"thesada.app/app/pkg/service/servicetest"
 )
 
-func TestCLITopicSplit_AllFleetStates(t *testing.T) {
+func TestCLITopicSplit_RespondsOnEitherTopic(t *testing.T) {
 	cases := []struct {
 		name string
 		mode mqtttest.CLIResponseMode
 	}{
 		{"new firmware, new topic only", mqtttest.RespondNewOnly},
 		{"old firmware, legacy topic only", mqtttest.RespondLegacyOnly},
-		{"migration window, both topics", mqtttest.RespondDual},
+		// Not a fleet state - a duplicate-response robustness case.
+		{"device answering on both topics", mqtttest.RespondDual},
 	}
 
 	for _, tc := range cases {
@@ -68,7 +69,7 @@ func TestCLITopicSplit_AllFleetStates(t *testing.T) {
 	}
 }
 
-// Back-to-back requests during dual-publish. CLIRequestRaw does no req_id
+// Back-to-back requests with a duplicate in flight. CLIRequestRaw does no req_id
 // filtering - its correlation rests on exactly one response per request - so a
 // duplicate left in flight by the first call gets consumed by the second as if
 // it were the second's reply. The visible damage is a device error read as the
@@ -117,8 +118,8 @@ func TestCLITopicSplit_DuplicateDoesNotLeakIntoNextRequest(t *testing.T) {
 	}
 }
 
-// A paged response during dual-publish is the case where a naive append would
-// corrupt the output: every page arrives twice.
+// A paged response with duplicates is where a naive append would corrupt the
+// output: every page arrives twice.
 func TestCLITopicSplit_PagedDuringDualPublish(t *testing.T) {
 	env := servicetest.Start(t)
 	broker := mqtttest.StartMosquitto(t)

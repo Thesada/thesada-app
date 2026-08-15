@@ -74,8 +74,8 @@ type Response struct {
 // to cli/response in order, req_id echoed when the request carried one.
 type Handler func(args string, raw []byte) []Response
 
-// CLIResponseMode selects which response topic(s) the fake device answers on,
-// so one helper covers every fleet state of the CLI topic split.
+// CLIResponseMode selects which response topic(s) the fake device answers on.
+// Two of the modes are real fleet states; RespondDual is not - see below.
 //
 // Topic literals here are deliberately NOT shared with pkg/mqtt. Partly they
 // cannot be - this package is imported by pkg/mqtt's own tests, so importing
@@ -85,11 +85,14 @@ type Handler func(args string, raw []byte) []Response
 type CLIResponseMode int
 
 const (
-	// RespondDual answers on both topics: firmware during the migration.
+	// RespondDual answers on both topics at once. No firmware does this - the
+	// split ships by deployment order, not dual-publish. It exists to
+	// manufacture a duplicate response cheaply, so tests can prove a straggler
+	// is not mistaken for the current request's reply.
 	RespondDual CLIResponseMode = iota
 	// RespondLegacyOnly answers on the old topic: firmware before the split.
 	RespondLegacyOnly
-	// RespondNewOnly answers on the new topic: firmware after legacy is dropped.
+	// RespondNewOnly answers on the new topic: firmware after the split.
 	RespondNewOnly
 )
 
