@@ -129,6 +129,50 @@ func (c *Client) cliLockFor(topicPrefix string) *sync.Mutex {
 	return m
 }
 
+// cliMatchesRequest reports whether a response payload answers this request.
+// Correlates on req_id when the firmware echoed one, else on the command name.
+// in: payload, reqID ("" when unenveloped), command. out: true when ours.
+func cliMatchesRequest(payload []byte, reqID, command string) bool {
+	var probe struct {
+		ReqID string `json:"req_id"`
+		Cmd   string `json:"cmd"`
+	}
+	// An unparseable frame is left for the caller to reject on its own terms.
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return true
+	}
+	if probe.ReqID != "" && reqID != "" {
+		return probe.ReqID == reqID
+	}
+	// Pre-req_id firmware, and the raw path, have only the command name: a
+	// binary handler reads the payload as bytes and never parses an envelope,
+	// so there is no id to echo. Without this a late reply to the PREVIOUS
+	// command is consumed as this one's - a device error read as success.
+	return probe.Cmd == "" || probe.Cmd == command
+}
+
+// tapCLIResponses feeds payloads from both CLI response topics to fn.
+// Reading both at once keeps a device on either side of the topic split
+// answering at full speed; a device only ever publishes on one of them.
+// in: topicPrefix, fn (called per payload). out: cancel func, error.
+func (c *Client) tapCLIResponses(topicPrefix string, fn func([]byte)) (func(), error) {
+	handler := func(_ string, p []byte, _ bool, _ byte) { fn(p) }
+
+	cancelNew, err := c.RegisterTap(CLIResponseTopic(topicPrefix), handler)
+	if err != nil {
+		return nil, err
+	}
+	cancelLegacy, err := c.RegisterTap(CLILegacyResponseTopic(topicPrefix), handler)
+	if err != nil {
+		cancelNew()
+		return nil, err
+	}
+	return func() {
+		cancelNew()
+		cancelLegacy()
+	}, nil
+}
+
 // CLIRequest sends a CLI command to a device via MQTT and waits for the
 // response. topicPrefix is the device's full MQTT prefix (e.g.
 // "thesada/acme/owb"). command is the CLI command name (e.g.
@@ -158,22 +202,12 @@ func (c *Client) CLIRequest(ctx context.Context, topicPrefix, command, payload s
 		return nil, fmt.Errorf("marshal envelope: %w", err)
 	}
 
-	respTopic := topicPrefix + "/cli/response"
 	// Buffered well past any realistic page count so the non-blocking
 	// tap send below never drops an intermediate page of a paginated
 	// response (firmware v1.4.6+).
 	ch := make(chan []byte, 64)
-	cancel, err := c.RegisterTap(respTopic, func(_ string, p []byte, _ bool, _ byte) {
-		// Filter on req_id when present. Firmware v1.4.5+ echoes req_id
-		// for every CLI envelope; older firmware omits it. Either is
-		// acceptable here - the per-device mutex already guarantees at
-		// most one outstanding request, so a response without req_id is
-		// always the response we just published.
-		var probe struct {
-			ReqID string `json:"req_id"`
-		}
-		_ = json.Unmarshal(p, &probe)
-		if probe.ReqID != "" && probe.ReqID != reqID {
+	cancel, err := c.tapCLIResponses(topicPrefix, func(p []byte) {
+		if !cliMatchesRequest(p, reqID, command) {
 			return
 		}
 		select {
@@ -186,7 +220,7 @@ func (c *Client) CLIRequest(ctx context.Context, topicPrefix, command, payload s
 	}
 	defer cancel()
 
-	cmdTopic := topicPrefix + "/cli/" + command
+	cmdTopic := CLICommandTopic(topicPrefix, command)
 	if err := c.PublishRaw(cmdTopic, env, 0, false); err != nil {
 		return nil, fmt.Errorf("publish: %w", err)
 	}
@@ -209,12 +243,15 @@ func (c *Client) CLIRequestRaw(ctx context.Context, topicPrefix, command string,
 	lock.Lock()
 	defer lock.Unlock()
 
-	respTopic := topicPrefix + "/cli/response"
 	// Buffered well past any realistic page count so the non-blocking
 	// tap send below never drops an intermediate page of a paginated
 	// response (firmware v1.4.6+).
 	ch := make(chan []byte, 64)
-	cancel, err := c.RegisterTap(respTopic, func(_ string, p []byte, _ bool, _ byte) {
+	cancel, err := c.tapCLIResponses(topicPrefix, func(p []byte) {
+		// No envelope on this path, so no req_id to correlate on.
+		if !cliMatchesRequest(p, "", command) {
+			return
+		}
 		select {
 		case ch <- append([]byte(nil), p...):
 		default:
@@ -225,7 +262,7 @@ func (c *Client) CLIRequestRaw(ctx context.Context, topicPrefix, command string,
 	}
 	defer cancel()
 
-	cmdTopic := topicPrefix + "/cli/" + command
+	cmdTopic := CLICommandTopic(topicPrefix, command)
 	pubPayload := rawPayload
 	// SIM7080G modem-native MQTT silently drops +SMSUB: URCs for empty-
 	// payload publishes (verified 2026-05-08 against LilyGO vendor reference

@@ -18,6 +18,7 @@ import (
 
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/authz"
+	"thesada.app/app/pkg/mqtt"
 	"thesada.app/app/pkg/service"
 )
 
@@ -126,7 +127,7 @@ func (s *Server) bulkOTACheck(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		topicPrefix := s.deviceTopicPrefix(device)
-		cmdTopic := topicPrefix + "/cli/ota.check"
+		cmdTopic := mqtt.CLICommandTopic(topicPrefix, "ota.check")
 		if err := s.mqtt.PublishRaw(cmdTopic, []byte("--force"), 0, false); err != nil {
 			slog.Warn("bulk ota: publish failed", "device", device.DeviceID, "topic", cmdTopic, "err", err)
 			failed++
@@ -290,7 +291,7 @@ func preemptiveCertClear(ctx context.Context, s *Server, device *service.Device,
 	prefix := *device.MQTTTopicPrefix
 
 	pub := func(cmd string, payload string) bool {
-		topic := prefix + "/cli/" + cmd
+		topic := mqtt.CLICommandTopic(prefix, cmd)
 		body := []byte(payload)
 		if len(body) == 0 {
 			body = []byte("{}")
