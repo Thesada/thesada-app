@@ -55,7 +55,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.25.12"
+          go-version: "1.25.13"
 
       # make build chains make css, so the embedded assets are populated.
       - run: CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} make build
