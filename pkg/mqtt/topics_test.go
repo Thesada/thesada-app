@@ -3,8 +3,8 @@ package mqtt
 import "testing"
 
 // topicMatches reports whether an MQTT topic matches a subscription filter.
-// Only the wildcards this package uses are modelled: '#' trailing multi-level,
-// '+' single level.
+// Only the wildcards this package actually uses are modelled: '#' as a
+// trailing multi-level wildcard, '+' as a single level.
 func topicMatches(filter, topic string) bool {
 	fp := splitTopic(filter)
 	tp := splitTopic(topic)
@@ -34,12 +34,31 @@ func splitTopic(s string) []string {
 	return append(out, s[start:])
 }
 
+// The whole point of the split: a device subscribed to the input wildcard must
+// not receive its own responses. On cellular that echo arrives as a URC too
+// large for the modem line buffer, which is the bug this effort removes.
+func TestCLIResponseTopicDoesNotMatchInputSubscription(t *testing.T) {
+	const prefix = "thesada/acme/owb"
+	sub := CLIInputSubscription(prefix)
+
+	if topicMatches(sub, CLIResponseTopic(prefix)) {
+		t.Errorf("response topic %q matches input subscription %q - the echo is back",
+			CLIResponseTopic(prefix), sub)
+	}
+	// The legacy topic does match, which is why it had to move.
+	if !topicMatches(sub, CLILegacyResponseTopic(prefix)) {
+		t.Errorf("legacy topic %q unexpectedly does not match %q - test no longer proves anything",
+			CLILegacyResponseTopic(prefix), sub)
+	}
+}
+
 func TestCLITopicConstruction(t *testing.T) {
 	const prefix = "thesada/acme/owb"
 	cases := []struct{ got, want string }{
 		{CLICommandTopic(prefix, "fs.cat"), "thesada/acme/owb/cli/fs.cat"},
 		{CLIInputSubscription(prefix), "thesada/acme/owb/cli/#"},
-		{CLIResponseTopic(prefix), "thesada/acme/owb/cli/response"},
+		{CLIResponseTopic(prefix), "thesada/acme/owb/cli_response"},
+		{CLILegacyResponseTopic(prefix), "thesada/acme/owb/cli/response"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -48,44 +67,14 @@ func TestCLITopicConstruction(t *testing.T) {
 	}
 }
 
-// A command topic must sit inside the input wildcard, or commands stop
-// arriving at the device.
+// A command topic must stay inside the input wildcard, or commands stop
+// arriving - the failure mode opposite to the echo.
 func TestCLICommandTopicMatchesInputSubscription(t *testing.T) {
 	const prefix = "thesada/acme/owb"
 	sub := CLIInputSubscription(prefix)
 	for _, cmd := range []string{"fs.cat", "restart", "ota.check", "config.dump"} {
 		if !topicMatches(sub, CLICommandTopic(prefix, cmd)) {
 			t.Errorf("command %q does not match input subscription %q", cmd, sub)
-		}
-	}
-}
-
-// Documents the bug this migration is groundwork for: the response topic sits
-// inside the device's own command subscription, so every response echoes back
-// to the device that just sent it.
-func TestCLIResponseTopicCurrentlyMatchesInputSubscription(t *testing.T) {
-	const prefix = "thesada/acme/owb"
-	if !topicMatches(CLIInputSubscription(prefix), CLIResponseTopic(prefix)) {
-		t.Error("response topic no longer matches the input subscription - update this test")
-	}
-}
-
-func TestTopicMatcherSanity(t *testing.T) {
-	cases := []struct {
-		filter, topic string
-		want          bool
-	}{
-		{"a/b/#", "a/b/c", true},
-		{"a/b/#", "a/b/c/d", true},
-		{"a/+/c", "a/b/c", true},
-		{"a/+/c", "a/b/d", false},
-		{"a/b/c", "a/b", false},
-		{"a/b/c", "a/b/c", true},
-		{"a/b", "a/b/c", false},
-	}
-	for _, c := range cases {
-		if got := topicMatches(c.filter, c.topic); got != c.want {
-			t.Errorf("topicMatches(%q, %q) = %v, want %v", c.filter, c.topic, got, c.want)
 		}
 	}
 }

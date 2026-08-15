@@ -74,6 +74,44 @@ type Response struct {
 // to cli/response in order, req_id echoed when the request carried one.
 type Handler func(args string, raw []byte) []Response
 
+// CLIResponseMode selects which response topic(s) the fake device answers on,
+// so one helper covers every fleet state of the CLI topic split.
+//
+// Topic literals here are deliberately NOT shared with pkg/mqtt. Partly they
+// cannot be - this package is imported by pkg/mqtt's own tests, so importing
+// back would cycle - but mostly a test double standing in for firmware should
+// carry its own copy of the wire contract. A typo in one side then fails the
+// test instead of agreeing with itself.
+type CLIResponseMode int
+
+const (
+	// RespondDual answers on both topics: firmware during the migration.
+	RespondDual CLIResponseMode = iota
+	// RespondLegacyOnly answers on the old topic: firmware before the split.
+	RespondLegacyOnly
+	// RespondNewOnly answers on the new topic: firmware after legacy is dropped.
+	RespondNewOnly
+)
+
+const (
+	fakeCLIInputWildcard = "/cli/#"
+	fakeCLIInputSegment  = "/cli/"
+	fakeCLIResponse      = "/cli_response"
+	fakeCLILegacyResp    = "/cli/response"
+)
+
+// respondTopics is the topic set for a mode, relative to the device prefix.
+func (m CLIResponseMode) respondTopics() []string {
+	switch m {
+	case RespondLegacyOnly:
+		return []string{fakeCLILegacyResp}
+	case RespondNewOnly:
+		return []string{fakeCLIResponse}
+	default:
+		return []string{fakeCLIResponse, fakeCLILegacyResp}
+	}
+}
+
 // FakeDevice is a paho client subscribed to <prefix>/cli/# that answers
 // registered commands the way firmware would. Unhandled commands get
 // {"ok":false} so a missing registration fails a test loudly, not by timeout.
@@ -85,6 +123,15 @@ type FakeDevice struct {
 	mu       sync.Mutex
 	handlers map[string]Handler
 	calls    map[string]int
+	respMode CLIResponseMode
+}
+
+// SetCLIResponseMode changes which response topic(s) this device answers on.
+// Default is RespondDual.
+func (fd *FakeDevice) SetCLIResponseMode(m CLIResponseMode) {
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	fd.respMode = m
 }
 
 // NewFakeDevice connects a fake device for topicPrefix (e.g. "thesada/t1/dev1")
@@ -113,7 +160,7 @@ func NewFakeDevice(t *testing.T, brokerURL, topicPrefix string) *FakeDevice {
 	}
 	t.Cleanup(func() { fd.c.Disconnect(250) })
 
-	cliTree := topicPrefix + "/cli/#"
+	cliTree := topicPrefix + fakeCLIInputWildcard
 	if tok := fd.c.Subscribe(cliTree, 0, fd.onCommand); !tok.WaitTimeout(10 * time.Second) {
 		t.Fatalf("fake device subscribe %s: timed out", cliTree)
 	} else if tok.Error() != nil {
@@ -179,7 +226,7 @@ func OK(output ...string) []Response {
 // app's CLIRequest/CLIRequestRaw correlation relies on.
 func (fd *FakeDevice) onCommand(_ paho.Client, msg paho.Message) {
 	topic := msg.Topic()
-	cmd := strings.TrimPrefix(topic, fd.prefix+"/cli/")
+	cmd := strings.TrimPrefix(topic, fd.prefix+fakeCLIInputSegment)
 	if cmd == "response" || strings.Contains(cmd, "/") {
 		return
 	}
@@ -240,10 +287,15 @@ func (fd *FakeDevice) onCommand(_ paho.Client, msg paho.Message) {
 		// Errorf, not Fatalf: this runs on a paho callback goroutine. A lost
 		// response must still be named - the caller otherwise just times out
 		// with no hint the fake device failed to answer.
-		if tok := fd.c.Publish(fd.prefix+"/cli/response", 0, false, payload); !tok.WaitTimeout(5 * time.Second) {
-			fd.t.Errorf("fake device response publish: timed out")
-		} else if tok.Error() != nil {
-			fd.t.Errorf("fake device response publish: %v", tok.Error())
+		fd.mu.Lock()
+		topics := fd.respMode.respondTopics()
+		fd.mu.Unlock()
+		for _, suffix := range topics {
+			if tok := fd.c.Publish(fd.prefix+suffix, 0, false, payload); !tok.WaitTimeout(5 * time.Second) {
+				fd.t.Errorf("fake device response publish %s: timed out", suffix)
+			} else if tok.Error() != nil {
+				fd.t.Errorf("fake device response publish %s: %v", suffix, tok.Error())
+			}
 		}
 	}
 }

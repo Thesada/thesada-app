@@ -753,28 +753,55 @@ multi-tenant rollout but mandatory for any device that has a cert.
 
 Source: `pkg/web/admin_pair.go`, `pkg/mqtt/dynsec.go`.
 
+### CLI responses are read from both topic generations
+
+Firmware publishes CLI responses to `<prefix>/cli_response`; firmware from
+before the topic split publishes to `<prefix>/cli/response`. `tapCLIResponses`
+subscribes to both for every request, so a device on either side answers at
+full speed and no fleet state needs a timeout to discover. A device publishes
+on exactly one of them - the firmware does not dual-publish.
+
+This is why the platform must be deployed BEFORE firmware carrying the split:
+old firmware works against a new platform, but new firmware against an old
+platform goes mute on CLI.
+
+How enforced: every CLI topic is built by `pkg/mqtt/topics.go`; no topic
+literal is assembled at a call site, in `pkg/mqtt` or in the web handlers.
+
+Source: `pkg/mqtt/mqtt_cli.go::tapCLIResponses`, `pkg/mqtt/topics.go`. Pairs
+with the thesada-fw invariant "CLI responses publish outside the command
+wildcard".
+
 ### CLI requests serialize per device + correlate by req_id
 
 `CLIRequest` / `CLIRequestRaw` hold `cliLockFor(topicPrefix)` for the
 full publish-then-await cycle. Two concurrent callers targeting the
 same device queue on that mutex; the second goroutine does not
 register a tap or publish until the first has consumed its response
-or timed out. Without the mutex both taps fire on every cli/response
+or timed out. Without the mutex both taps fire on every response
 message and the loser captures the winner's reply.
 
 Outgoing payloads (text path only) are wrapped as `{"req_id":<uuid>,
 "args":<original>}`. Firmware v1.4.5+ echoes req_id back on every
-cli/response; the receiver tap filters by req_id when present. Older
-firmware that ignores the envelope still works - the mutex alone
-makes the response unambiguous, and the tap accepts responses with
-no req_id field.
+response; `cliMatchesRequest` filters by req_id when both sides have
+one.
 
 Binary protocols (`fs.write`, `fs.append`, `cert.set` raw payloads)
 go through `CLIRequestRaw` which does not wrap - firmware binary
 handlers read raw bytes, not JSON. The mutex still serializes.
 
+Where there is no req_id to correlate on - the raw path, and firmware
+predating v1.4.5 - `cliMatchesRequest` falls back to the command name,
+which every response carries. The mutex alone is not sufficient: it
+guarantees one outstanding request, not that a late reply to the
+PREVIOUS command has stopped arriving. A straggler landing inside the
+next request's window is otherwise consumed as that request's reply,
+reading a device error as the previous command's success. A response
+naming no command at all is accepted rather than dropped, so an
+unknown-but-valid reply degrades instead of hanging.
+
 Multi-page consumption: firmware v1.4.6+ splits oversized command
-output across multiple `cli/response` messages, each carrying a
+output across multiple response messages, each carrying a
 0-indexed `page` and a `more` flag (final page `more:false`). Both
 `CLIRequest` and `CLIRequestRaw` await the assembled result via
 `awaitPagedCLIResponse`, which keys page output by index (arrival
@@ -788,11 +815,12 @@ returns immediately, so the path is mixed-fleet safe.
 
 How enforced: every CLI caller goes through `Client.CLIRequest` or
 `Client.CLIRequestRaw`. Reviewers reject direct `c.PublishRaw` calls
-to `*/cli/<cmd>` topics from outside `pkg/mqtt`.
+to `*/cli/<cmd>` topics from outside `pkg/mqtt`; the topic is built by
+`mqtt.CLICommandTopic`.
 
 Source: `pkg/mqtt/mqtt.go::CLIRequest`, `CLIRequestRaw`,
 `awaitPagedCLIResponse`, `cliLockFor`. Pairs with the thesada-fw
-`docs/invariants.md` invariant "cli/response paginates oversized
+`docs/invariants.md` invariant "cli_response paginates oversized
 command output".
 
 ### `/info` drift detection runs on every retained delivery
