@@ -3,6 +3,22 @@
 Short version: read `docs/invariants.md` first. The rules in that file
 are load-bearing - every PR has to keep them true.
 
+## Before you open a PR
+
+Claim the issue first. Comment on it and wait for me to assign it to you.
+I assign whoever asks first, and I write the scope into the issue when I
+do. A PR against an issue that is already assigned to someone else gets
+closed however good the code is. Unclaimed bugs are fair game for a
+drive-by patch; claimed ones are not.
+
+`dev` is where work lands and it is the default branch, so branch off
+`dev` and target `dev`. `main` is release-only: it moves when a version
+ships. If you open against `main` I will just retarget it, no drama.
+
+Workflow runs from a first-time contributor's fork sit at
+`action_required` until I approve them. If the checks look like they
+never ran, that is why - say so on the PR.
+
 ## Local development
 
 ```
@@ -26,14 +42,17 @@ database preconditions.
 
 ## CI gates
 
-Every PR has to pass four gates before merge.
+Every PR has to pass six gates before merge. All of them are jobs in
+`.github/workflows/ci.yml`.
 
-| Workflow | Job | What it checks |
-|---|---|---|
-| `lint.yml` | `golangci-lint` | The curated linter set in `.golangci.yml` (errcheck, staticcheck, govet, ineffassign, unused, bodyclose, errorlint, misspell, prealloc, unconvert). |
-| `lint.yml` | `pools-app-guard` | No new `pools.App.{Query,Exec,...}` callers outside the grandfathered allowlist. See **Tenant isolation guard** below. |
-| `security.yml` | `govulncheck` | Reachable-symbol vuln scan (`golang.org/x/vuln`). |
-| `security.yml` | `gosec` | HIGH-severity static security findings; full report uploaded as a workflow artifact. |
+| Job | What it checks |
+|---|---|
+| `lint` | The curated linter set in `.golangci.yml` (errcheck, staticcheck, govet, ineffassign, unused, bodyclose, errorlint, misspell, prealloc, unconvert). |
+| `pools-app-guard` | No new `pools.App.{Query,Exec,...}` callers outside the grandfathered allowlist. See **Tenant isolation guard** below. |
+| `unit` | `make test`, the non-integration lane. |
+| `coverage` | 80% statement floor on the security packages (csrf, oauth, pki, authmw) plus `pkg/service/auth.go` gated as a single file. Runs `-tags integration`, so it needs Docker for testcontainers. |
+| `govulncheck` | Reachable-symbol vuln scan (`golang.org/x/vuln`). |
+| `gosec` | HIGH-severity static security findings; full report uploaded as a workflow artifact. |
 
 ## Tenant isolation guard
 

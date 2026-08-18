@@ -1,5 +1,5 @@
-# PR gate + post-merge run on main: lint, pools-App guard, unit tests, and
-# Go security scanners. Go comes from go.mod via actions/setup-go.
+# PR gate + post-merge run on dev and main: lint, pools-App guard, unit tests,
+# and Go security scanners. Go comes from go.mod via actions/setup-go.
 name: ci
 
 on:
@@ -10,6 +10,7 @@ on:
   push:
     branches:
       - main
+      - dev
 
 # Cancel superseded runs on the same ref.
 concurrency:
