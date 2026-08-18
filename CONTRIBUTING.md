@@ -82,3 +82,14 @@ narrow-scope escape hatch.
 
 - Subject line under ~72 chars, imperative voice.
 - Body explains *why*, not *what* - the diff shows the what.
+
+## Licence and sign-off
+
+Contributions are AGPL-3.0-only, same as the rest. No CLA, no document
+to sign, no account to make.
+
+What I do ask for is a sign-off: `git commit -s` appends a
+`Signed-off-by` line asserting you wrote the patch, or otherwise have
+the right to send it under that licence. CI checks every non-merge
+commit in the PR for one. If you forget,
+`git rebase --signoff origin/dev` fixes the whole branch in one go.
