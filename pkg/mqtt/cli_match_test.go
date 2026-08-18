@@ -56,6 +56,38 @@ func TestCliMatchesRequest(t *testing.T) {
 			cmd:     "fs.ls",
 			want:    true,
 		},
+		// Caller has no id but the payload does: correlation falls back to
+		// the command name rather than dropping the reply.
+		{
+			name:    "payload carries req_id, caller has none",
+			payload: []byte(`{"req_id":"req-123","cmd":"version"}`),
+			reqID:   "",
+			cmd:     "version",
+			want:    true,
+		},
+		{
+			name:    "payload carries req_id, caller has none, cmd differs",
+			payload: []byte(`{"req_id":"req-123","cmd":"version"}`),
+			reqID:   "",
+			cmd:     "fs.ls",
+			want:    false,
+		},
+		// Same answer, different routes: empty fails to unmarshal and takes
+		// the raw path, null parses into a zero probe and takes the cmd path.
+		{
+			name:    "empty payload",
+			payload: []byte(``),
+			reqID:   "req-123",
+			cmd:     "version",
+			want:    true,
+		},
+		{
+			name:    "literal json null",
+			payload: []byte(`null`),
+			reqID:   "req-123",
+			cmd:     "version",
+			want:    true,
+		},
 	}
 
 	for _, tc := range cases {
