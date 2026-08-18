@@ -38,24 +38,18 @@ func main() {
 	rootCtx, cancel := newSignalContext()
 	defer cancel()
 
-	// Three role-scoped pools. Phase 0: admin/mqtt URLs default to
-	// DatabaseURL via config, so today every field of pools points at the
-	// same underlying connection (thesada_app role). Phase 1 swaps Admin
-	// to a BYPASSRLS connection string and MQTT to the dedicated ingest
-	// pool without rewiring the service layer.
+	// Two role-scoped pools. App is tenant-scoped, Admin is BYPASSRLS when
+	// a separate URL is configured. The thesada_app_mqtt role exists in the
+	// database and is provisioned, but ingest is not routed through it: it
+	// holds SELECT only on devices while ingest upserts them.
 	pool := mustOpenDB(rootCtx, cfg.DatabaseURL)
 	defer pool.Close()
 	adminPool := pool
-	mqttPool := pool
 	if cfg.DatabaseURLAdmin != "" && cfg.DatabaseURLAdmin != cfg.DatabaseURL {
 		adminPool = mustOpenDB(rootCtx, cfg.DatabaseURLAdmin)
 		defer adminPool.Close()
 	}
-	if cfg.DatabaseURLMQTT != "" && cfg.DatabaseURLMQTT != cfg.DatabaseURL {
-		mqttPool = mustOpenDB(rootCtx, cfg.DatabaseURLMQTT)
-		defer mqttPool.Close()
-	}
-	pools := db.Pools{App: pool, Admin: adminPool, MQTT: mqttPool}
+	pools := db.Pools{App: pool, Admin: adminPool}
 
 	// One-shot subcommands dispatch early and exit. The `migrate` subcommand
 	// runs the embedded schema migrations against the connected

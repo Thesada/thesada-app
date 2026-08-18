@@ -20,11 +20,10 @@ import "github.com/jackc/pgx/v5/pgxpool"
 //   - Admin : BYPASSRLS path via thesada_app_admin role. Cross-tenant
 //     admin reads. Wrap each call in db.WithAdminAudit so the
 //     bypass is logged.
-//   - MQTT  : NOBYPASSRLS ingest path via thesada_app_mqtt role. Same RLS
-//     gate as App; separate pool so ingest connection budget is
-//     isolated from request traffic.
+//
+// No MQTT pool: ingest runs on App. The thesada_app_mqtt role holds SELECT
+// only on devices, and ingest upserts them, so routing needs wider grants.
 type Pools struct {
 	App   *pgxpool.Pool
 	Admin *pgxpool.Pool
-	MQTT  *pgxpool.Pool
 }
