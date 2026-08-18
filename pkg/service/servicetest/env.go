@@ -19,7 +19,10 @@ import (
 type Env struct {
 	BaseURL  string   // superuser base connection URL
 	Super    *db.Pool // superuser pool - bypasses RLS, used for seeding
-	Pools    db.Pools // App / Admin / MQTT role-scoped pools
+	Pools    db.Pools // App / Admin role-scoped pools
+	// MQTTRole is the ingest role's pool. Not part of Pools because ingest is
+	// not routed through it; kept so its grants stay covered.
+	MQTTRole *db.Pool
 	Services *service.Services
 	Cfg      *config.Config
 }
@@ -52,6 +55,9 @@ func Start(t *testing.T) *Env {
 		t.Fatalf("finalize role logins + app grants: %v", err)
 	}
 
+	// Opened but not wired into Pools: proves the ingest role exists and can
+	// log in with its grants intact, which is what routing will need.
+	var mqttPool *db.Pool
 	pools := db.Pools{}
 	for _, p := range []struct {
 		role string
@@ -59,7 +65,7 @@ func Start(t *testing.T) *Env {
 	}{
 		{"thesada_app", &pools.App},
 		{"thesada_app_admin", &pools.Admin},
-		{"thesada_app_mqtt", &pools.MQTT},
+		{"thesada_app_mqtt", &mqttPool},
 	} {
 		dsn, err := roleURL(baseURL, p.role)
 		if err != nil {
@@ -96,6 +102,7 @@ func Start(t *testing.T) *Env {
 		BaseURL:  baseURL,
 		Super:    super,
 		Pools:    pools,
+		MQTTRole: mqttPool,
 		Services: services,
 		Cfg:      cfg,
 	}

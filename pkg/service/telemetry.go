@@ -26,9 +26,10 @@ type TelemetryService struct {
 // string-only metrics (IP, battery state, wifi SSID) land as value_text
 // with a NULL value_num instead of a misleading 0.
 //
-// Tenant-scoped through WithTenant: device_telemetry is RLS-policed
-// transitive via device_pk -> devices.tenant_id. Called from the MQTT
-// ingest path with the tenant pinned from the topic.
+// device_telemetry has NO RLS policy, and neither do its continuous
+// aggregates. Isolation is the app-level device_pk filter alone, so
+// device_pk must always come from a tenant-checked DeviceService lookup.
+// Called from the MQTT ingest path with the tenant pinned from the topic.
 // in: ctx, tenantID, device_pk, metric name, *value_num (nil for text), value_text, raw JSON.
 // out: telemetry id or error.
 func (s *TelemetryService) RecordTelemetry(ctx context.Context, tenantID string, devicePk uuid.UUID, metric string, valueNum *float64, valueText string, rawJSON []byte) (int64, error) {
@@ -139,14 +140,13 @@ var rangeDurationCagg = map[string]string{
 // Only numeric metrics return useful data (text-only rows are filtered at
 // ingest by storing value_num=NULL, and the caggs already exclude them).
 //
-// Tenant-scoped through WithTenant. RLS NOTE: the 1h/6h/24h ranges
-// hit device_telemetry which has a transitive RLS policy - the GUC enforces
-// isolation. The 7d/30d/90d ranges read the device_telemetry_hourly /
-// _daily continuous aggregates, which have NO RLS policy (0016 covers base
-// tables only; matview RLS is a separate question). For those ranges the
-// WHERE device_pk filter is the only isolation. Tracked as a gap to close
-// alongside the 0016 addendum. WithTenant is still applied
-// uniformly: harmless for the cagg path, load-bearing for the raw path.
+// RLS NOTE: neither path is RLS-protected. device_telemetry has no policy,
+// and neither do the device_telemetry_hourly / _daily continuous aggregates
+// the 7d/30d/90d ranges read. The WHERE device_pk filter is the only
+// isolation on every range, so device_pk must come from a tenant-checked
+// DeviceService lookup. WithTenant is applied for consistency and to scope
+// any joined table that does have a policy; it is not what isolates this
+// query. Tracked as a gap to close alongside the 0016 addendum.
 // in: ctx, tenantID, device_pk, metric, range label. out: *HistorySeries, error.
 func (s *TelemetryService) History(ctx context.Context, tenantID string, devicePk uuid.UUID, metric, rangeName string) (*HistorySeries, error) {
 	if metric == "" {

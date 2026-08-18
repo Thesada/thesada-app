@@ -19,10 +19,9 @@ type Config struct {
 	HTTPAddr    string
 	DatabaseURL string
 
-	// DatabaseURLAdmin (BYPASSRLS) and DatabaseURLMQTT (NOBYPASSRLS, ingest only)
-	// default to DatabaseURL so a single-role deployment still works.
+	// DatabaseURLAdmin (BYPASSRLS) defaults to DatabaseURL so a single-role
+	// deployment still works.
 	DatabaseURLAdmin string
-	DatabaseURLMQTT  string
 
 	MQTTBrokerURL string // e.g. tls://mqtt.thesada.app:8883
 	MQTTUsername  string
@@ -93,7 +92,6 @@ func Load() (*Config, error) {
 		HTTPAddr:                envOr("THESADA_HTTP_ADDR", ":8080"),
 		DatabaseURL:             os.Getenv("THESADA_DATABASE_URL"),
 		DatabaseURLAdmin:        envOr("THESADA_DATABASE_URL_ADMIN", os.Getenv("THESADA_DATABASE_URL")),
-		DatabaseURLMQTT:         envOr("THESADA_DATABASE_URL_MQTT", os.Getenv("THESADA_DATABASE_URL")),
 		MQTTBrokerURL:           os.Getenv("THESADA_MQTT_URL"),
 		MQTTUsername:            os.Getenv("THESADA_MQTT_USER"),
 		MQTTPassword:            os.Getenv("THESADA_MQTT_PASS"),

@@ -9,7 +9,8 @@ import (
 
 // TestStart_Smoke validates the harness end to end: a container comes up, every
 // migration applies, all three role pools connect, and a Services bundle is
-// wired. If this passes, per-service integration tests can rely on Start.
+// wired. The ingest role is on Env.MQTTRole, not Pools, since nothing routes
+// through it. If this passes, per-service integration tests can rely on Start.
 func TestStart_Smoke(t *testing.T) {
 	env := Start(t)
 	ctx := context.Background()
@@ -17,7 +18,7 @@ func TestStart_Smoke(t *testing.T) {
 	for name, pool := range map[string]interface{ Ping(context.Context) error }{
 		"app":   env.Pools.App,
 		"admin": env.Pools.Admin,
-		"mqtt":  env.Pools.MQTT,
+		"mqtt":  env.MQTTRole,
 		"super": env.Super,
 	} {
 		if err := pool.Ping(ctx); err != nil {
