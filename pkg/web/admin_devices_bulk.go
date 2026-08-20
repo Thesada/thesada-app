@@ -258,7 +258,8 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 //  2. cert.clear                - wipes the now-revoked client cert from
 //     NVS so the next connect attempt uses password auth via the global
 //     `mqtt` dynsec user (whose ACL is independent of per-device roles
-//     about to be dropped).
+//     about to be dropped). That user may be disabled at the broker, in
+//     which case recovery strands the device until it is re-enabled.
 //  3. restart                   - forces a reboot. Without this, the
 //     existing TLS session may stay alive even after broker-side revoke
 //     because mosquitto does not actively kick clients on dynsec

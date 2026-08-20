@@ -17,9 +17,9 @@ import (
 // wired to it. Service tests drive Services for the code under test and use
 // Super (the RLS-bypassing superuser pool) to seed and assert out-of-band.
 type Env struct {
-	BaseURL  string   // superuser base connection URL
-	Super    *db.Pool // superuser pool - bypasses RLS, used for seeding
-	Pools    db.Pools // App / Admin role-scoped pools
+	BaseURL string   // superuser base connection URL
+	Super   *db.Pool // superuser pool - bypasses RLS, used for seeding
+	Pools   db.Pools // App / Admin role-scoped pools
 	// MQTTRole is the ingest role's pool. Not part of Pools because ingest is
 	// not routed through it; kept so its grants stay covered.
 	MQTTRole *db.Pool

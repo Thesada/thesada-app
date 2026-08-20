@@ -74,7 +74,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	// before the cascade revokes broker-side state. Sends three MQTT CLI
 	// commands (config.set mqtt.port 8883, cert.clear, restart) so the
 	// device reboots back onto the password-auth port with no NVS cert,
-	// ready to re-pair through the normal admin UI flow. See
+	// ready to re-pair if the shared broker user is enabled. See
 	// preemptiveCertClear in admin_devices_bulk.go for the full rationale
 	// + ordering verified against sht31 on 2026-04-30.
 	preemptiveCertClear(r.Context(), s, device, "device delete")
