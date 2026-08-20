@@ -1,6 +1,6 @@
 //go:build integration
 
-// Tenant-default secret integration tests: the precedence contract (#450).
+// Tenant-default secret integration tests: the precedence contract.
 // A device resolves to its own override if it has one, otherwise to the tenant
 // default, otherwise to nothing - and rotating a default must not disturb a
 // device the operator has pinned.
