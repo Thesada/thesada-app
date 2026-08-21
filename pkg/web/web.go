@@ -61,7 +61,9 @@ type Server struct {
 	emailLimits    *ratelimit.Limiter
 	ipLimits       *ratelimit.Limiter
 	waitlistNotify *ratelimit.Limiter
-	cliRequests    *cliRequestStore
+	// claimLimits bounds self-service device claim attempts per user.
+	claimLimits *ratelimit.Limiter
+	cliRequests *cliRequestStore
 }
 
 // New constructs the HTMX server with all page routes wired up.
@@ -79,6 +81,7 @@ func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mq
 		emailLimits:    ratelimit.New(magicLinkWindow, magicLinkMaxPerHour),
 		ipLimits:       ratelimit.New(magicLinkWindow, magicLinkMaxPerHour),
 		waitlistNotify: ratelimit.New(24*time.Hour, 1),
+		claimLimits:    newClaimLimiter(cfg),
 		cliRequests:    newCLIRequestStore(cfg.CLIRequestTimeout + 60*time.Second),
 	}
 	s.parseTemplates()
@@ -90,6 +93,7 @@ func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mq
 	s.emailLimits.StartSweeper(context.Background())
 	s.ipLimits.StartSweeper(context.Background())
 	s.waitlistNotify.StartSweeper(context.Background())
+	s.claimLimits.StartSweeper(context.Background())
 
 	return s
 }
@@ -105,6 +109,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) parseTemplates() {
 	pages := []string{
 		"login.html", "devices.html", "device-detail.html", "alerts.html",
+		"device-claim.html",
 		"signup.html", "settings.html", "forgot.html", "reset.html",
 		"admin-index.html", "admin-tenants.html",
 		"admin-tenant-users.html", "admin-tenant-user-edit.html",
@@ -177,6 +182,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /signup", s.handleSignupForm)
 	s.mux.HandleFunc("POST /signup", s.handleSignupSubmit)
 	s.mux.HandleFunc("GET /devices", authmw.RequireAuth(s.handleDeviceList))
+	// Self-service claim. Authenticated, but the real authorisation is the
+	// claim token from the device's own QR - see device_claim.go.
+	s.mux.HandleFunc("GET /devices/claim", authmw.RequireAuth(s.handleDeviceClaimForm))
+	s.mux.HandleFunc("POST /devices/claim", authmw.RequireAuth(s.handleDeviceClaimSubmit))
 	s.mux.HandleFunc("GET /devices/{id}", authmw.RequireAuth(s.handleDeviceDetail))
 	s.mux.HandleFunc("GET /devices/{id}/chart.json", authmw.RequireAuth(s.handleDeviceChartJSON))
 	s.mux.HandleFunc("POST /devices/{id}/sensors/delete", authmw.RequireAuth(s.handleDeviceSensorDelete))

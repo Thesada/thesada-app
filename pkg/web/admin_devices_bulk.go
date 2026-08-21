@@ -291,6 +291,21 @@ func preemptiveCertClear(ctx context.Context, s *Server, device *service.Device,
 	}
 	prefix := *device.MQTTTopicPrefix
 
+	// The whole sequence below hands the device to the shared fallback
+	// credential. If that credential cannot connect, step 2 wipes the only
+	// cert the device has and step 3 reboots it into a broker that will
+	// refuse it - a stranded device needing serial recovery. Refuse loudly
+	// rather than proceeding blind.
+	probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+	enabled, probeErr := s.mqtt.DynsecClientEnabled(probeCtx, s.cfg.MQTTDeviceFallbackUser)
+	probeCancel()
+	if !mqtt.RecoveryPathUsable(enabled, probeErr) {
+		slog.Warn(op+": pre-emptive cert clear skipped, fallback credential unusable",
+			"device", device.ID, "fallback_user", s.cfg.MQTTDeviceFallbackUser,
+			"enabled", enabled, "err", probeErr)
+		return
+	}
+
 	pub := func(cmd string, payload string) bool {
 		topic := mqtt.CLICommandTopic(prefix, cmd)
 		body := []byte(payload)
@@ -393,6 +408,8 @@ func (s *Server) cascadeDeleteOne(ctx context.Context, opEmail string, device *s
 			"user", opEmail, "device", device.ID, "err", err)
 		return false
 	}
+	s.resetDeviceEnrollment(ctx, device.DeviceID, "bulk delete")
+
 	tombPrefix := ""
 	if device.MQTTTopicPrefix != nil {
 		tombPrefix = *device.MQTTTopicPrefix

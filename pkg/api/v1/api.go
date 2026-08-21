@@ -37,12 +37,16 @@ type Server struct {
 	// stays free of db/mqtt imports.
 	dbPing       func(context.Context) error
 	brokerStatus func() string
+
+	// Rate limiters for the unauthenticated device enrollment surface.
+	enroll *enrollLimiters
 }
 
 // New constructs the API server with all routes wired up.
 // in: cfg, services bundle, CA for pair endpoint. out: ready *Server.
 func New(cfg *config.Config, services *service.Services, ca *pki.CA) *Server {
-	s := &Server{cfg: cfg, services: services, ca: ca, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, services: services, ca: ca, mux: http.NewServeMux(),
+		enroll: newEnrollLimiters()}
 	s.routes()
 	return s
 }
@@ -72,6 +76,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /alert-subscriptions", authmw.RequireAuthJSON(s.handleSubsList))
 	s.mux.HandleFunc("POST /alert-subscriptions", authmw.RequireAuthJSON(s.handleSubsCreate))
 	s.mux.HandleFunc("DELETE /alert-subscriptions/{id}", authmw.RequireAuthJSON(s.handleSubsDelete))
+
+	// Device self-enrollment. Unauthenticated by necessity - a factory-fresh
+	// device has no credential to authenticate with. Guarded by rate limits,
+	// a claim token and an Ed25519 proof of key possession instead.
+	s.mux.HandleFunc("POST /devices/enroll", s.handleEnrollAnnounce)
+	s.mux.HandleFunc("POST /devices/enroll/verify", s.handleEnrollVerify)
+	s.mux.HandleFunc("POST /devices/enroll/cert", s.handleEnrollCert)
+	s.mux.HandleFunc("POST /devices/enroll/ack", s.handleEnrollAck)
 }
 
 // SetHealthProbes wires the dependency checks the health endpoints report.

@@ -26,6 +26,7 @@ type Services struct {
 	Secrets       *SecretService
 	Audit         *AuditService
 	Observability *ObservabilityService
+	Enrollments   *EnrollmentService
 }
 
 // New constructs all services on shared cfg + role-scoped pools (App=tenant reads, Admin=BYPASSRLS, MQTT=ingest).
@@ -52,5 +53,6 @@ func New(cfg *config.Config, pools db.Pools) (*Services, error) {
 		Secrets:       secretsSvc,
 		Audit:         &AuditService{cfg: cfg, pools: pools},
 		Observability: &ObservabilityService{cfg: cfg, pools: pools},
+		Enrollments:   &EnrollmentService{cfg: cfg, pools: pools},
 	}, nil
 }

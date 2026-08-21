@@ -83,6 +83,63 @@ func dynsecDeviceACLs(tenantID, topicPrefix string, broadRead bool) []mqtt.Dynse
 	return acls
 }
 
+// provisionDeviceDynsec creates the broker-side role and client for a device.
+//
+// This is what makes a certificate usable. Mosquitto's dynsec plugin maps the
+// TLS CN to a username via use_identity_as_username and authorises on the
+// roles attached to the client keyed on that name. Without this the broker
+// refuses the device on the mTLS listener even though its certificate is
+// cryptographically valid, and the failure is silent from the app side - the
+// pairing looks complete and the device simply never appears.
+//
+// Role first so the client create can attach it atomically. "already exists"
+// is tolerated on both, which is what makes the whole step safe to retry after
+// a partial failure.
+//
+// Shared by the operator pair flow and the self-service claim flow. Keeping it
+// in one place is the point: a second copy would drift, and the drift would be
+// an ACL that silently does not match what the device publishes.
+// in: ctx, tenant id, device id, topic prefix, TLS CN.
+// out: failing step name (for the caller's error path), error.
+func (s *Server) provisionDeviceDynsec(ctx context.Context, tenantID, deviceID, topicPrefix, cn string) (string, error) {
+	roleName := dynsecDeviceRoleName(tenantID, deviceID)
+	// Per-tenant broad-read policy. Default ON for "default" (homelab with
+	// legacy 3-tier topics where dashboards read across all devices), OFF for
+	// every other tenant. Operators can flip via SettingsService.
+	broadRead := s.services.Settings.GetBool(tenantID,
+		dynsecSettingCrossTenantRead, tenantID == "default")
+	if err := s.mqtt.CreateDynsecRole(ctx, roleName,
+		dynsecDeviceACLs(tenantID, topicPrefix, broadRead)); err != nil &&
+		!mqtt.IsDynsecAlreadyExists(err) {
+		return "dynsec_role_create", err
+	}
+	// Cert-only client: empty password, auth via TLS CN on the mTLS listener.
+	if err := s.mqtt.CreateDynsecClient(ctx, cn, "", []string{roleName}); err != nil &&
+		!mqtt.IsDynsecAlreadyExists(err) {
+		return "dynsec_client_create", err
+	}
+	return "", nil
+}
+
+// resetDeviceEnrollment clears every device_enrollments row for a device_id.
+//
+// Revoking tears down the certificate and the broker client but leaves the
+// enrollment row sealed - cert_delivered_at stays set, so the device can never
+// prove itself again and the hardware is bricked short of manual SQL. The spec
+// requires the opposite: "claim can be revoked by the owner; next POST starts
+// a fresh cycle". Best-effort and logged, like the dynsec teardown beside it:
+// the revoke itself is already committed and must not be undone by a failure
+// here.
+// in: ctx, device id, calling path (for slog). out: none.
+func (s *Server) resetDeviceEnrollment(ctx context.Context, deviceID, op string) {
+	n, err := s.services.Enrollments.Reset(ctx, deviceID)
+	if err != nil {
+		slog.Error("device.enroll.reset_failed", "op", op, "device_id", deviceID, "err", err)
+		return
+	}
+	slog.Info("device.enroll.reset", "op", op, "device_id", deviceID, "rows_deleted", n)
+}
+
 // deviceCertValidity is the lifetime of a device client cert. Short enough
 // to limit blast radius if a device is compromised, long enough to avoid
 // fleet-wide re-pair churn. Re-issue is a one-click operation on this page.
@@ -91,6 +148,11 @@ const deviceCertValidity = 365 * 24 * time.Hour
 // mTLS / password broker ports. Broker hostname is unchanged; only the
 // port swaps so HAProxy can route to the matching mosquitto listener
 // (1883 password, 1884 mTLS). See infrastructure docs/sop-mqtt-mtls.md.
+//
+// mqttPortMTLS is pinned on the firmware side too, as MQTT_MTLS_PORT in
+// src/thesada_config.h: a device only treats a session as mTLS-authenticated
+// when it dialled that port, so the two numbers must move together. Same
+// number again in THESADA_MQTT_DEVICE_MTLS_PORT (pkg/config/config.go).
 const (
 	mqttPortMTLS     = 8884
 	mqttPortPassword = 8883
@@ -271,26 +333,11 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Provision the dynsec role + client before the Activate flip.
-	// Role-first so the client create can attach it atomically. "already
-	// exists" is tolerated for retry safety: a prior pair attempt that
-	// succeeded here but failed later should be resumable.
 	dynsecCtx, dynsecCancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer dynsecCancel()
-	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
-	// Per-tenant broad-read policy. Default ON for "default" (homelab with
-	// legacy 3-tier topics where dashboards read across all devices), OFF
-	// for every other tenant. Operators can flip via SettingsService.
-	broadRead := s.services.Settings.GetBool(device.TenantID,
-		dynsecSettingCrossTenantRead, device.TenantID == "default")
-	if err := s.mqtt.CreateDynsecRole(dynsecCtx, roleName, dynsecDeviceACLs(device.TenantID, topicPrefix, broadRead)); err != nil && !mqtt.IsDynsecAlreadyExists(err) {
-		slog.Error("dynsec createRole failed", "device", device.ID, "role", roleName, "err", err)
-		s.failPairIssue(w, r, device, certID, cn, serialHex, "dynsec_role_create", "dynsec+role+create+failed")
-		return
-	}
-	// Cert-only client: empty password, auth via TLS CN on the mTLS listener.
-	if err := s.mqtt.CreateDynsecClient(dynsecCtx, cn, "", []string{roleName}); err != nil && !mqtt.IsDynsecAlreadyExists(err) {
-		slog.Error("dynsec createClient failed", "device", device.ID, "cn", cn, "err", err)
-		s.failPairIssue(w, r, device, certID, cn, serialHex, "dynsec_client_create", "dynsec+client+create+failed")
+	if step, err := s.provisionDeviceDynsec(dynsecCtx, device.TenantID, device.DeviceID, topicPrefix, cn); err != nil {
+		slog.Error("dynsec provisioning failed", "device", device.ID, "step", step, "err", err)
+		s.failPairIssue(w, r, device, certID, cn, serialHex, step, "dynsec+"+step+"+failed")
 		return
 	}
 
@@ -594,6 +641,9 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 	if derr := s.mqtt.DeleteDynsecRole(dynsecCtx, roleName); derr != nil {
 		slog.Warn("dynsec deleteRole failed", "device", device.ID, "role", roleName, "err", derr)
 	}
+
+	// Re-enrollment gate. Without this the device is revoked AND sealed.
+	s.resetDeviceEnrollment(r.Context(), device.DeviceID, "revoke")
 
 	user := authmw.CurrentUser(r)
 	if device.PairedAt != nil {

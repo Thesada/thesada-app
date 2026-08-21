@@ -30,6 +30,8 @@ import (
 //     revoked; the broker rejects the device on next auth check regardless.
 //  4. DELETE FROM devices (load-bearing) - the FK CASCADE handles every
 //     dependent table.
+//  5. Enrollment reset - device_enrollments has no FK to devices, so the
+//     cascade misses it and a sealed row would refuse re-enrollment forever.
 //
 // Retained MQTT topic clear (PR 3) consumes the firmware-published manifest
 // at <prefix>/info/retained_topics. Runs after dynsec teardown
@@ -144,7 +146,11 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Step 5: tombstone. Records the (tenant, device, prefix)
+	// Step 5: clear the enrollment rows so the hardware can enroll again. A
+	// deleted device that stays sealed is a device that needs manual SQL.
+	s.resetDeviceEnrollment(r.Context(), device.DeviceID, "device delete")
+
+	// Step 6: tombstone. Records the (tenant, device, prefix)
 	// so the MQTT ingest path drops retained replays at next app restart
 	// instead of recreating the device row from broker-side ghosts. No-op
 	// when the device row never carried a topic prefix.

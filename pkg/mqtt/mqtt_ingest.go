@@ -279,6 +279,14 @@ func (c *Client) handleInfo(tenant, device, topicPrefix string, payload []byte, 
 	c.hub.Publish(tenant, device, map[string]string{"type": "info", "device": device})
 	slog.Debug("info processed", "tenant", tenant, "device", device, "fw", fwVersion, "hw", hardwareType)
 
+	// Snapshotting talks to the device over the MQTT CLI, which an unpaired
+	// device refuses. Check before doing any drift work at all.
+	if !c.devicePaired(tenant, devicePk) {
+		slog.Debug("snapshot skipped, device not paired",
+			"tenant", tenant, "device", device, "device_pk", devicePk)
+		return
+	}
+
 	// Drift detection: compare device-reported hashes to latest snapshots.
 	// If a hash differs (or no snapshot exists), pull the file in a goroutine.
 	hashMap := map[string]string{

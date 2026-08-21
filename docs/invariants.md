@@ -4,7 +4,11 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-07-11 (X-Forwarded-Proto gated on trusted proxies; CSRF
+Dated 2026-08-20 (device CLI pulls gated on pairing state; hands-off
+recovery refuses to run when the shared fallback credential is not
+connectable; unauthenticated device enrollment surface; device-facing
+enrollment endpoints address the row by its primary key and the claim
+form refuses an ambiguous token). Previously 2026-07-11 (X-Forwarded-Proto gated on trusted proxies; CSRF
 cookie HttpOnly; WS hub binds the effective tenant; alert email channel
 fails loudly when SMTP is unconfigured). Previously 2026-07-10 (alert
 delivery lifecycle: retry with backoff,
@@ -30,6 +34,140 @@ Entries marked **WIP** describe target state that is not yet enforced
 end-to-end. They live here so the audit surface is visible.
 
 ---
+
+
+## Device CLI and recovery
+
+### Config pulls over the device CLI require a paired device
+
+Snapshotting talks to a device over the MQTT CLI. An unpaired device is
+connected on the shared onboarding credential, and firmware refuses
+`fs.ls` and `config.dump` on that connection, so a pull yields one
+timeout per file and no data. A device with no `paired_at` also has no
+operator-approved config worth storing.
+
+How enforced: `handleInfo` calls `devicePaired` before any drift work.
+The rule itself is the pure `snapshotAllowed(pairedAt)` in
+`pkg/mqtt/mqtt_snapshot.go`, tested in `snapshot_gate_test.go`. A
+lookup failure resolves to unpaired and logs the skip - not a silent
+fallback: guessing "paired" costs a burst of refused CLI requests.
+
+### The device enrollment surface is an oracle for nothing
+
+`POST /devices/enroll`, `/enroll/verify`, `/enroll/cert` and `/enroll/ack` are
+the four unauthenticated device-facing endpoints, and they answer from the
+public internet. A factory-fresh device has no credential to authenticate with, so
+the guards are rate limits, a claim token and an Ed25519 proof instead.
+
+| Rule | Why |
+|---|---|
+| every state-dependent refusal returns the same 403 body, rate limits and a missing CA included | otherwise a caller distinguishes a real device_id from a fabricated one. A 429 is device-id-keyed, so it reports that somebody else is enrolling that id; a 503 for a nil CA was the one answer available without spending a rate-limit token. Server-side failures are the exception and stay 500 with their own bodies (`sign failed`, `persist failed`, `seal failed`): none of them depends on which device_id was asked for, so a caller cannot pick which one it gets |
+| announce never refuses on enrollment state - any well-formed id gets 200 and a challenge | sealed, frozen and already-claimed are answers to "is this id real", and the ids are guessable. The refusal moves to `/enroll/verify`, behind the claim token and the signature; on the wire it is still the uniform body, so the state never leaves the process |
+| 204 "keep polling" is issued only after the claim token verifies | polling must reveal nothing the caller has not already proved it knows |
+| rate limited per source IP **and** per enrollment, where an enrollment is `(device_id, pubkey_hex)` | per-IP alone lets one host walk many ids; per-enrollment alone lets many hosts hammer one. Keyed on the id alone the bucket was shared between a real device and anyone who guessed its id, and every certificate poll spent from it, so one guess starved the hardware for the rest of the hour |
+| the per-device_id bucket survives but only announce spends it | announce is the only endpoint that creates rows, so that bucket bounds how much of the table one guessable id can occupy. Verify, cert and ack never touch it, so a flood cannot gate a device that has already announced. Residual, accepted: a sustained flood can still delay a first announce on that id by up to the window |
+| the per-IP token is spent before device_id and pubkey are validated, and both are validated before they are used as a map key | the `byPair` limiter keys a map on two body fields from an unauthenticated caller, so without a shape check the caller chooses how much memory the process uses. All three limiters run `StartSweeper` |
+| rate-limit key is `httpsec.ClientIP` with trusted proxies | `RemoteAddr` alone looks safer and is not: behind a reverse proxy every device shares one address, collapsing the per-IP limit into a single global bucket for the fleet |
+| request bodies capped via `MaxBytesReader` | an unauthenticated caller must not set the memory budget |
+| an enrollment is identified by `(device_id, pubkey_hex)`, never by `device_id` alone | MACs are sequential, so one unit reveals its neighbours' ids. Pinning a key on either arrival OR proof lets a squatter own the id: a signature proves possession of *a* private key, not of *the* device's, so the squatter can complete the proof with its own keypair and lock the real hardware out forever. Keyed on the pair, the squatter lands on its own row and the real device keeps its own |
+| every device-facing request names both halves of that identity, and the row is addressed by the primary key | the device always knows its own public key. `claim_token_hash` has no unique constraint, so a lookup by token alone returns whichever row sorts first: a squatter who photographed the QR could announce the SAME token under a keypair ground to sort ahead, and the real device's certificate poll would resolve to the squatter's claimed row and hand the hardware a certificate and private key for somebody else's tenant |
+| the signature at `/enroll/verify` is checked against the pubkey the caller named | selecting the row any other way lets a caller advance a row it cannot sign for. The claim token plays no part in verify: it does not identify a row and the signature already proves the key |
+| the claim token still has to match the row the caller named, at `/enroll/cert` and `/enroll/ack` | the pubkey is public - it is in the QR and on `chip.info` - so the primary key alone is not a credential. Without the token check anyone who read a key could collect a certificate or seal a row before the device does |
+| the human claim form is the one token-only lookup, and it refuses an ambiguous match | a person cannot supply a pubkey, so the token has to resolve alone. When several rows carry it, only a verified-and-unclaimed row can be claimed at all; if that leaves exactly one the user still gets their device, otherwise the claim is refused. Picking one by ordering shows a success page for a row the user did not mean |
+| a claim already held by the caller's tenant and user replays instead of refusing | the handler provisions the broker after the claim commits and tells the user to retry on failure. `ClaimAllowed` refused that retry, so the answer was "already claimed" for a device that held a certificate and had no broker client. The replay returns the same `devices` row and does not move `claimed_at`; another tenant or another user still loses to the first claim |
+| claim token is frozen once `verified_at` is set, silently | announce is unauthenticated and `device_id` is readable from the soft-AP BSSID, so a rotatable token on a verified row hands an attacker the certificate AND private key. Silently, because a distinguishable refusal is the oracle above |
+| challenge is burned before the signature is judged | a failed attempt must not leave a nonce to grind against |
+| stale unclaimed rows are pruned on a schedule (`EnrollmentService.StartPruner`, `THESADA_ENROLLMENT_PRUNE_INTERVAL`) | these rows are the only thing in the schema an unauthenticated caller can create, and nothing else removes them |
+| every revoke path calls `EnrollmentService.Reset` | `device_enrollments` has no FK to `devices`, so the delete cascade misses it. A sealed row refuses announce forever, which is a revoked device bricked short of manual SQL. The spec: "next POST starts a fresh cycle" |
+| the enrollment is sealed by the device's ack, never by the handler that returns the cert | sealing before the body is flushed bricks the device on any mid-flight failure; letting the device close the loop makes the failure mode a retry, and `Issue` revokes the superseded cert |
+| the cert response carries tenant, topic prefix, broker host and port | the CN, the broker ACL and ingest are all keyed on tenant, and the firmware default prefix belongs to no tenant - without these the device holds a valid cert it cannot use |
+| the response never carries the device CA | it is the broker's client-verification CA; a device that installed it over its own trust anchor loses MQTT and OTA |
+
+`device_enrollments` carries no tenant and no RLS, which is deliberate and
+justified in migration 0028: an unclaimed device belongs to nobody, and a
+nullable `tenant_id` with an `IS NULL OR` carve-out is the anti-pattern
+CODE-GUIDELINES names. Access is confined to `EnrollmentService`, which runs
+every statement through `db.WithAdminAudit` so each touch leaves an audit line.
+The table is granted to `thesada_app_admin` only, so on a two-role deployment
+the tenant-scoped role cannot reach an unscoped table. That separation is a
+deployment property, not a code one: `THESADA_DATABASE_URL_ADMIN` defaults to
+`THESADA_DATABASE_URL` (`pkg/config/config.go`), and `main.go` opens a second
+pool only when the two differ, so a single-role deployment runs both pools as
+the same role and the grant stops distinguishing them. The `WithAdminAudit`
+line is logged either way.
+
+Several rows per `device_id` are expected, not a fault - one per keypair that
+announced under it. They are bounded by the per-device_id rate limit and
+removed by the pruning sweep. There is deliberately no unique index over
+claimed rows per `device_id`: it would re-introduce the lockout above, with an
+authenticated squatter permanently blocking the real owner's claim. What is
+NOT closed by any of this: a caller with an account can claim a row it squatted
+into its own tenant. It gets a certificate for a phantom device in its own
+tenant, scoped to its own topic prefix, and the real hardware is unaffected -
+an operator clears the litter with a revoke, which calls `Reset`.
+
+A squatter who photographed the QR can go further and announce the SAME claim
+token under its own keypair. That is the accepted model - possession of the
+label is authority - and the device-facing endpoints are unaffected, because
+they address the row by its primary key. The visible cost is on the claim form:
+while both rows are claimable the owner's claim is refused as ambiguous. It
+resolves as soon as only one row can still be claimed, and the operator remedy
+is the same revoke, after which the device mints a fresh token on its next
+portal session and the photographed one is worthless.
+
+Claiming is a web-stack route (`authmw.RequireAuth` + `csrf.Middleware`),
+capped at `THESADA_DEVICE_CLAIM_MAX_PER_HOUR` claims per user (default 5, the
+figure the spec names), and writes `owner_user_id` and `mqtt_topic_prefix` in the
+same transaction as the enrollment flip.
+
+Source: `pkg/api/v1/enroll.go`, `pkg/service/enrollment.go`,
+`pkg/service/enrollment_policy.go`, `pkg/web/device_claim.go`,
+`migrations/0028_device_enrollments.sql`.
+
+### Claiming a device requires proof of key possession, not the QR alone
+
+A claim QR is a photograph. It survives on a shelf, a shipping box and a
+support-ticket screenshot, so possessing the code is not possessing the
+device. A device proves itself by signing a claim challenge with the
+Ed25519 key it minted on first boot; the public half travels in the QR.
+
+| Rule | Why |
+|---|---|
+| device id must match `thesada-` + 12 lowercase hex | operator labels from a hand-edited config are not unique across units |
+| public key hex must be lowercase, 32 bytes | the key is an identity, so it gets one spelling |
+| challenge must be non-empty | a signature over nothing proves possession but not participation in this claim |
+| signature must be 64 bytes and verify | fail closed |
+
+`VerifyDeviceProof` is deliberately stateless. Challenge freshness and
+single-use belong to the caller, which owns the storage that makes a
+challenge one-shot - without that, a captured signature replays forever.
+
+Interop with the firmware signer is pinned by an RFC 8032 known-answer
+vector rather than a live signing oracle. A command that signs
+attacker-chosen bytes with the device key would be the claim attack.
+
+Source: `pkg/pki/deviceproof.go`, `deviceproof_test.go`.
+
+### Hands-off recovery never runs on an unusable fallback credential
+
+`preemptiveCertClear` flips a device to the password listener, wipes its
+client cert and reboots it. That leaves the device dependent on the
+shared fallback credential. If that credential is disabled at the
+broker, the device reboots into a broker that refuses it and needs
+physical serial recovery.
+
+How enforced: the sequence probes `getClient` for the configured
+fallback user first and aborts unless it is enabled. A probe error
+counts as unusable - an unreachable broker is not evidence the
+credential works. Decision is `mqtt.RecoveryPathUsable(enabled, err)`,
+tested in `recovery_guard_test.go`. A disabled client stays listed by
+`listClients` and keeps its password, so presence is not evidence it
+can connect; only the `disabled` flag is.
+
+Fallback username is `THESADA_MQTT_DEVICE_FALLBACK_USER` (default
+`mqtt`), not the application's own broker user.
+
+Source: `pkg/mqtt/dynsec.go`, `pkg/web/admin_devices_bulk.go`.
 
 ## Tenant isolation
 
