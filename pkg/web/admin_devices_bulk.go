@@ -258,7 +258,8 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 //  2. cert.clear                - wipes the now-revoked client cert from
 //     NVS so the next connect attempt uses password auth via the global
 //     `mqtt` dynsec user (whose ACL is independent of per-device roles
-//     about to be dropped).
+//     about to be dropped). That user may be disabled at the broker, in
+//     which case recovery strands the device until it is re-enabled.
 //  3. restart                   - forces a reboot. Without this, the
 //     existing TLS session may stay alive even after broker-side revoke
 //     because mosquitto does not actively kick clients on dynsec
@@ -290,6 +291,21 @@ func preemptiveCertClear(ctx context.Context, s *Server, device *service.Device,
 	}
 	prefix := *device.MQTTTopicPrefix
 
+	// The whole sequence below hands the device to the shared fallback
+	// credential. If that credential cannot connect, step 2 wipes the only
+	// cert the device has and step 3 reboots it into a broker that will
+	// refuse it - a stranded device needing serial recovery. Refuse loudly
+	// rather than proceeding blind.
+	probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+	enabled, probeErr := s.mqtt.DynsecClientEnabled(probeCtx, s.cfg.MQTTDeviceFallbackUser)
+	probeCancel()
+	if !mqtt.RecoveryPathUsable(enabled, probeErr) {
+		slog.Warn(op+": pre-emptive cert clear skipped, fallback credential unusable",
+			"device", device.ID, "fallback_user", s.cfg.MQTTDeviceFallbackUser,
+			"enabled", enabled, "err", probeErr)
+		return
+	}
+
 	pub := func(cmd string, payload string) bool {
 		topic := mqtt.CLICommandTopic(prefix, cmd)
 		body := []byte(payload)
@@ -317,11 +333,22 @@ func preemptiveCertClear(ctx context.Context, s *Server, device *service.Device,
 		}
 	}
 
-	// Step 1: flip MQTT port from 8884 (mTLS) back to 8883 (password)
-	pub("config.set", "mqtt.port 8883")
+	// Each step is a precondition for the next, so a failed publish stops the
+	// sequence. Clearing the cert after the port flip did not land leaves the
+	// device dialling the mTLS listener with nothing to present.
+	// Step 1: flip MQTT port from the mTLS listener back to password
+	if !pub("config.set", fmt.Sprintf("mqtt.port %d", mqttPortPassword)) {
+		slog.Warn(op+": pre-emptive sequence aborted at port flip",
+			"device", device.ID)
+		return
+	}
 	step()
 	// Step 2: clear NVS client cert
-	pub("cert.clear", "")
+	if !pub("cert.clear", "") {
+		slog.Warn(op+": pre-emptive sequence aborted at cert clear",
+			"device", device.ID)
+		return
+	}
 	step()
 	// Step 3: force reboot so the new port + missing cert take effect
 	pub("restart", "")
@@ -351,7 +378,7 @@ func (s *Server) cascadeDeleteOne(ctx context.Context, opEmail string, device *s
 		logPairStateChange(device, "paired", "revoked", opEmail, "bulk_delete")
 	}
 
-	cn := fmt.Sprintf("thesada-%s-%s", device.TenantID, device.DeviceID)
+	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
 	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
 	dynsecCtx, dynsecCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer dynsecCancel()
@@ -392,6 +419,8 @@ func (s *Server) cascadeDeleteOne(ctx context.Context, opEmail string, device *s
 			"user", opEmail, "device", device.ID, "err", err)
 		return false
 	}
+	s.resetDeviceEnrollment(ctx, device.DeviceID, "bulk delete")
+
 	tombPrefix := ""
 	if device.MQTTTopicPrefix != nil {
 		tombPrefix = *device.MQTTTopicPrefix

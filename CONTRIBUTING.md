@@ -9,7 +9,10 @@ Claim the issue first. Comment on it and wait for me to assign it to you.
 I assign whoever asks first, and I write the scope into the issue when I
 do. A PR against an issue that is already assigned to someone else gets
 closed however good the code is. Unclaimed bugs are fair game for a
-drive-by patch; claimed ones are not.
+drive-by patch; claimed ones are not. That covers agents as well as
+people: machine-generated patches are welcome, but whatever opens the
+PR has to claim the issue and answer on it, and one that will not hold
+a conversation does not get assigned.
 
 `dev` is where work lands and it is the default branch, so branch off
 `dev` and target `dev`. `main` is release-only: it moves when a version

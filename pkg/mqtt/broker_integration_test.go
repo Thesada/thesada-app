@@ -104,6 +104,19 @@ func TestBrokerHandleInfo_DriftPullChain(t *testing.T) {
 	// Small chunks force the multi-chunk fs.cat loop, not the happy single read.
 	fd.ServeChunkedFile("/scripts/custom.lua", luaContent, 16)
 
+	// Seed the device paired. handleInfo gates the drift pull on paired_at
+	// (snapshotAllowed) because an unpaired device is on the shared onboarding
+	// credential, which the firmware refuses CLI commands on. The info publish
+	// below upserts over this row and leaves paired_at alone.
+	if _, err := env.Services.Devices.Upsert(tenant, "dev1", "", "", "", prefix); err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	if _, err := env.Super.Exec(ctx,
+		`UPDATE devices SET paired_at = now() WHERE tenant_id = $1 AND device_id = 'dev1'`,
+		tenant); err != nil {
+		t.Fatalf("mark device paired: %v", err)
+	}
+
 	info := map[string]any{
 		"firmware_version": "26.06.1",
 		"hardware_type":    "esp32-s3",

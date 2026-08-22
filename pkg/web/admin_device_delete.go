@@ -6,7 +6,6 @@ package web
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -30,6 +29,8 @@ import (
 //     revoked; the broker rejects the device on next auth check regardless.
 //  4. DELETE FROM devices (load-bearing) - the FK CASCADE handles every
 //     dependent table.
+//  5. Enrollment reset - device_enrollments has no FK to devices, so the
+//     cascade misses it and a sealed row would refuse re-enrollment forever.
 //
 // Retained MQTT topic clear (PR 3) consumes the firmware-published manifest
 // at <prefix>/info/retained_topics. Runs after dynsec teardown
@@ -74,7 +75,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	// before the cascade revokes broker-side state. Sends three MQTT CLI
 	// commands (config.set mqtt.port 8883, cert.clear, restart) so the
 	// device reboots back onto the password-auth port with no NVS cert,
-	// ready to re-pair through the normal admin UI flow. See
+	// ready to re-pair if the shared broker user is enabled. See
 	// preemptiveCertClear in admin_devices_bulk.go for the full rationale
 	// + ordering verified against sht31 on 2026-04-30.
 	preemptiveCertClear(r.Context(), s, device, "device delete")
@@ -94,7 +95,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 
 	// Step 2: dynsec teardown. Best-effort. Bound the time we wait so a
 	// broker outage can't pin the request handler.
-	cn := fmt.Sprintf("thesada-%s-%s", device.TenantID, device.DeviceID)
+	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
 	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
 	dynsecCtx, dynsecCancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer dynsecCancel()
@@ -144,7 +145,11 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Step 5: tombstone. Records the (tenant, device, prefix)
+	// Step 5: clear the enrollment rows so the hardware can enroll again. A
+	// deleted device that stays sealed is a device that needs manual SQL.
+	s.resetDeviceEnrollment(r.Context(), device.DeviceID, "device delete")
+
+	// Step 6: tombstone. Records the (tenant, device, prefix)
 	// so the MQTT ingest path drops retained replays at next app restart
 	// instead of recreating the device row from broker-side ghosts. No-op
 	// when the device row never carried a topic prefix.

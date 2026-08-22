@@ -13,6 +13,36 @@ import (
 	"github.com/google/uuid"
 )
 
+// snapshotAllowed reports whether a device's config may be pulled over the
+// MQTT CLI. Pure so the rule is testable without a device or a database.
+//
+// An unpaired device is connected on the shared onboarding credential, and
+// firmware refuses fs.ls and config.dump on that connection - the pull would
+// time out per file and log an error per attempt. It is also the wrong thing
+// to want: a device with no paired_at has no operator-approved config yet.
+// in: paired_at (nil when the device has never completed pairing).
+// out: true when snapshotting is appropriate.
+func snapshotAllowed(pairedAt *time.Time) bool {
+	return pairedAt != nil
+}
+
+// devicePaired resolves the pairing state for a device.
+//
+// A lookup failure returns false deliberately, and is NOT a silent fallback:
+// the consequence of guessing "paired" is a burst of CLI requests the
+// firmware will refuse, so an unresolvable device is treated as unpaired and
+// the caller logs the skip.
+// in: tenant id, device pk. out: true only when the row says paired.
+func (c *Client) devicePaired(tenant string, devicePk uuid.UUID) bool {
+	d, err := c.services.Devices.GetByID(devicePk, tenant)
+	if err != nil || d == nil {
+		slog.Debug("pairing state unresolved, treating as unpaired",
+			"tenant", tenant, "device_pk", devicePk, "err", err)
+		return false
+	}
+	return snapshotAllowed(d.PairedAt)
+}
+
 // discoverAndSnapshotScripts lists /scripts/ on the device and snapshots
 // any .lua files that don't have a stored snapshot yet. Catches custom
 // scripts beyond main.lua and rules.lua.

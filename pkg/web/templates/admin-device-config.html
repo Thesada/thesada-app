@@ -156,7 +156,7 @@
      responses instead of letting r.json() throw a bare SyntaxError. Reverse
      proxies / Cloudflare can swap a JSON 504 for an HTML error page on long-
      running upstream calls; without this, the browser sees only "SyntaxError:
-     The string did not match the expected pattern." (#221 / #222). */
+     The string did not match the expected pattern." */
   function readJSON(r) {
     return r.text().then(function(text) {
       var ct = r.headers.get("content-type") || "";
