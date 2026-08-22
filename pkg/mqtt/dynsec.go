@@ -196,3 +196,38 @@ func (c *Client) DeleteDynsecClient(ctx context.Context, username string) error 
 	})
 	return err
 }
+
+// dynsecClientInfo is the subset of a getClient response this code needs.
+// The broker returns more fields; ignoring them keeps this tolerant to
+// mosquitto adding to the payload.
+type dynsecClientInfo struct {
+	Client struct {
+		Username string `json:"username"`
+		Disabled bool   `json:"disabled"`
+	} `json:"client"`
+}
+
+// DynsecClientEnabled reports whether a dynsec client can currently connect.
+// A disabled client stays listed by listClients and keeps its password, so
+// presence is not evidence it works - only the disabled flag is.
+// in: ctx, username. out: enabled, error.
+func (c *Client) DynsecClientEnabled(ctx context.Context, username string) (bool, error) {
+	data, err := c.sendDynsec(ctx, dynsecCommand{Command: "getClient", Username: username})
+	if err != nil {
+		return false, err
+	}
+	var info dynsecClientInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return false, fmt.Errorf("parse getClient response: %w", err)
+	}
+	return !info.Client.Disabled, nil
+}
+
+// RecoveryPathUsable decides whether the hands-off recovery sequence may run.
+// It depends entirely on the shared fallback credential being connectable, so
+// an error is treated exactly like "disabled": running the sequence blind
+// wipes a device's cert and leaves it with no way back onto the broker.
+// in: enabled flag and error from DynsecClientEnabled. out: safe to proceed.
+func RecoveryPathUsable(enabled bool, err error) bool {
+	return err == nil && enabled
+}

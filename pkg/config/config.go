@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -25,9 +26,18 @@ type Config struct {
 
 	MQTTBrokerURL string // e.g. tls://mqtt.thesada.app:8883
 	MQTTUsername  string
-	MQTTPassword  string
-	MQTTClientID  string
-	MQTTTopicRoot string // default "thesada"
+	// Shared credential a device falls back to when it has no client cert.
+	// Named here so the recovery path can ask the broker whether it is
+	// currently connectable before relying on it.
+	MQTTDeviceFallbackUser string
+	MQTTPassword           string
+	MQTTClientID           string
+	MQTTTopicRoot          string // default "thesada"
+
+	// MQTTDeviceMTLSPort is the listener a provisioned device connects to with
+	// its own client certificate. Distinct from the port this app uses: the
+	// app authenticates with a password, devices with mTLS.
+	MQTTDeviceMTLSPort int
 
 	SMTPHost     string
 	SMTPPort     string
@@ -83,6 +93,15 @@ type Config struct {
 	// AlertRedispatchInterval is the sweep cadence for pending-and-due alerts
 	// (startup redispatch runs one sweep immediately). Default 1m.
 	AlertRedispatchInterval time.Duration
+
+	// DeviceClaimMaxPerHour caps self-service device claims per user per hour.
+	// The claim spec sets 5. Tunable because a fleet rollout claims in batches and
+	// an operator should not need a rebuild to raise it for an afternoon.
+	DeviceClaimMaxPerHour int
+
+	// EnrollmentPruneInterval is the sweep cadence for stale unclaimed
+	// enrollment rows (one sweep runs immediately at startup). Default 1h.
+	EnrollmentPruneInterval time.Duration
 }
 
 // Load reads all THESADA_* environment variables into a Config.
@@ -94,9 +113,11 @@ func Load() (*Config, error) {
 		DatabaseURLAdmin:        envOr("THESADA_DATABASE_URL_ADMIN", os.Getenv("THESADA_DATABASE_URL")),
 		MQTTBrokerURL:           os.Getenv("THESADA_MQTT_URL"),
 		MQTTUsername:            os.Getenv("THESADA_MQTT_USER"),
+		MQTTDeviceFallbackUser:  envOr("THESADA_MQTT_DEVICE_FALLBACK_USER", "mqtt"),
 		MQTTPassword:            os.Getenv("THESADA_MQTT_PASS"),
 		MQTTClientID:            envOr("THESADA_MQTT_CLIENT_ID", "thesada-app"),
 		MQTTTopicRoot:           envOr("THESADA_MQTT_TOPIC_ROOT", "thesada"),
+		MQTTDeviceMTLSPort:      envOrInt("THESADA_MQTT_DEVICE_MTLS_PORT", 8884),
 		SMTPHost:                os.Getenv("THESADA_SMTP_HOST"),
 		SMTPPort:                envOr("THESADA_SMTP_PORT", "587"),
 		SMTPUsername:            os.Getenv("THESADA_SMTP_USER"),
@@ -115,6 +136,8 @@ func Load() (*Config, error) {
 		AlertMaxAttempts:        envOrInt("THESADA_ALERT_MAX_ATTEMPTS", 5),
 		AlertRetryBase:          envOrDuration("THESADA_ALERT_RETRY_BASE", time.Minute),
 		AlertRedispatchInterval: envOrDuration("THESADA_ALERT_REDISPATCH_INTERVAL", time.Minute),
+		DeviceClaimMaxPerHour:   envOrInt("THESADA_DEVICE_CLAIM_MAX_PER_HOUR", 5),
+		EnrollmentPruneInterval: envOrDuration("THESADA_ENROLLMENT_PRUNE_INTERVAL", time.Hour),
 	}
 	tp, err := parseTrustedProxies(os.Getenv("THESADA_TRUSTED_PROXIES"))
 	if err != nil {
@@ -231,4 +254,28 @@ func envOrDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// BrokerHost extracts the bare hostname from MQTTBrokerURL, which is written
+// as a URL ("tls://mqtt.example.com:8883") because the app's own client needs
+// the scheme and port. A device is told the host separately: it connects to
+// the mTLS listener on a different port, so reusing the app's URL verbatim
+// would point it at the password listener.
+// in: receiver. out: hostname, or "" when the URL is unset or unparseable.
+func (c *Config) BrokerHost() string {
+	raw := strings.TrimSpace(c.MQTTBrokerURL)
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "tls://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if h := u.Hostname(); h != "" {
+		return h
+	}
+	return ""
 }
