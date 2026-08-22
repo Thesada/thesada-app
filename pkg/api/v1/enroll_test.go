@@ -2,6 +2,7 @@ package v1
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,14 +21,11 @@ func newEnrollTestServer() *Server {
 const enrollTestPubkey = "abababababababababababababababababababababababababababababababab"
 
 // enrollTestPubkeyN returns a distinct well-formed key per index, for tests
-// that need several enrollments under one device_id.
+// that need several enrollments under one device_id. Distinct per i, not
+// merely per i mod 16 - a repeating key makes a per-key limit test pass on
+// some other limiter.
 func enrollTestPubkeyN(i int) string {
-	const hexd = "0123456789abcdef"
-	out := make([]byte, 64)
-	for j := range out {
-		out[j] = hexd[(i+j)%16]
-	}
-	return string(out)
+	return fmt.Sprintf("%064x", i)
 }
 
 // --- enrollClientIP ---------------------------------------------------------
@@ -164,7 +162,7 @@ func TestEnrollGateRateLimitsPerEnrollment(t *testing.T) {
 
 	for i := 0; i < enrollPerPairMax; i++ {
 		r := httptest.NewRequest(http.MethodPost, "/devices/enroll", nil)
-		r.RemoteAddr = "203.0.113." + pad2(i) + ":1"
+		r.RemoteAddr = testIP(i)
 		w := httptest.NewRecorder()
 		if !s.enrollGate(w, r, dev, enrollTestPubkey) {
 			t.Fatalf("request %d should be allowed", i)
@@ -190,7 +188,7 @@ func TestEnrollGateBudgetIsPerEnrollmentNotPerDeviceID(t *testing.T) {
 
 	for i := 0; i < enrollPerPairMax; i++ {
 		r := httptest.NewRequest(http.MethodPost, "/devices/enroll/cert", nil)
-		r.RemoteAddr = "203.0.113." + pad2(i) + ":1"
+		r.RemoteAddr = testIP(i)
 		w := httptest.NewRecorder()
 		if !s.enrollGate(w, r, dev, attacker) {
 			t.Fatalf("attacker request %d should be allowed", i)
@@ -220,7 +218,7 @@ func TestEnrollAnnounceGateCapsRowsPerDeviceID(t *testing.T) {
 
 	for i := 0; i < enrollPerIDMax; i++ {
 		r := httptest.NewRequest(http.MethodPost, "/devices/enroll", nil)
-		r.RemoteAddr = "203.0.113." + pad2(i) + ":1"
+		r.RemoteAddr = testIP(i)
 		w := httptest.NewRecorder()
 		if !s.enrollAnnounceGate(w, r, dev, enrollTestPubkeyN(i)) {
 			t.Fatalf("announce %d should be allowed", i)
@@ -331,15 +329,15 @@ func TestEnrollCertWithoutCAIsUniformlyRefused(t *testing.T) {
 	assertUniformRefusal(t, w)
 }
 
+// pad is the 12-hex-digit tail of a device id, distinct per index.
 func pad(i int) string {
-	const hexd = "0123456789abcdef"
-	out := make([]byte, 12)
-	for j := range out {
-		out[j] = hexd[(i+j)%16]
-	}
-	return string(out)
+	return fmt.Sprintf("%012x", i)
 }
 
-func pad2(i int) string {
-	return string(rune('0'+(i/100)%10)) + string(rune('0'+(i/10)%10)) + string(rune('0'+i%10))
+// testIP is a distinct, parseable client address per index. Zero-padded octets
+// ("203.0.113.007") are not valid IPv4: net.ParseIP rejects them, enrollClientIP
+// falls through to its RemoteAddr branch, and the test never exercises the
+// parsed-IP path it means to.
+func testIP(i int) string {
+	return fmt.Sprintf("203.0.%d.%d:1", 113+i/254, 1+i%254)
 }

@@ -114,6 +114,43 @@ func TestEnrollmentHappyPath(t *testing.T) {
 	}
 }
 
+// TestEnrollmentFailedVerifyBurnsTheChallenge - the burn must COMMIT on a bad
+// proof. Rolled into the verify transaction it would be undone by the error,
+// handing the nonce back to grind signatures against.
+func TestEnrollmentFailedVerifyBurnsTheChallenge(t *testing.T) {
+	env := servicetest.Start(t)
+	enroll := env.Services.Enrollments
+	ctx := context.Background()
+
+	pubHex, priv := newDeviceKey(t)
+	challenge, err := enroll.Announce(ctx, enrollDeviceID, pubHex, "burn-token")
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+
+	if err := enroll.Verify(ctx, enrollDeviceID, pubHex,
+		[]byte("not a signature")); !errors.Is(err, service.ErrEnrollBadProof) {
+		t.Fatalf("bad-proof Verify = %v, want ErrEnrollBadProof", err)
+	}
+	var gone *string
+	if err := env.Super.QueryRow(ctx,
+		`SELECT challenge FROM device_enrollments
+		  WHERE device_id = $1 AND pubkey_hex = $2`,
+		enrollDeviceID, pubHex).Scan(&gone); err != nil {
+		t.Fatalf("read challenge: %v", err)
+	}
+	if gone != nil {
+		t.Fatal("challenge survived a failed verify - the burn rolled back")
+	}
+	// The spent nonce must not be redeemable, even with a now-valid signature.
+	if err := enroll.Verify(ctx, enrollDeviceID, pubHex,
+		ed25519.Sign(priv, []byte(challenge))); !errors.Is(err, service.ErrEnrollBadProof) {
+		t.Fatalf("replayed challenge Verify = %v, want ErrEnrollBadProof", err)
+	}
+	// A fresh announce recovers the device.
+	announceAndVerify(t, enroll, enrollDeviceID, pubHex, priv, "burn-token")
+}
+
 // TestEnrollmentClaimIntoRequiresOwner - the spec makes the claiming user the
 // owner. A claim with no user must fail rather than write a NULL that nothing
 // later fills in.

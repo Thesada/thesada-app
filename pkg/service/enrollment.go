@@ -84,8 +84,7 @@ func scanEnrollment(row pgx.Row) (*Enrollment, error) {
 	return &e, nil
 }
 
-// newNonce returns n random bytes as lowercase hex. Used for both the
-// challenge and any server-side token material.
+// newNonce returns n random bytes as lowercase hex.
 func newNonce(n int) (string, error) {
 	buf := make([]byte, n)
 	if _, err := rand.Read(buf); err != nil {
@@ -126,22 +125,8 @@ func claimTokenMatches(rows []Enrollment, token string) []*Enrollment {
 }
 
 // Announce records an announcement for (device_id, pubkey) and issues a fresh
-// challenge to sign.
-//
-// It succeeds for any well-formed pair, always. That is the whole point: an
-// announce that could be refused would tell the caller which device_ids are
-// real, sealed or already claimed, and the ids are guessable. Sealed, frozen
-// and already-claimed are revealed at /enroll/verify instead, to a caller that
-// has already proved it holds the private key.
-//
-// Re-announcing is expected - a device that reboots mid-provisioning starts
-// over - and each attempt replaces the challenge, so an old one cannot be
-// answered later. The claim token is re-hashed on every announce because the
-// device rotates it per portal session, but only until the row is verified:
-// after that the stored hash stands, silently, because an attacker who has
-// learned the pubkey must not be able to swap in a token of their choosing and
-// redeem the certificate with it.
-//
+// challenge to sign. Succeeds for any well-formed pair - refusal would be a
+// device-id oracle; the token hash freezes once verified (docs/invariants.md).
 // in: ctx, device id, lowercase-hex pubkey, plaintext claim token.
 // out: challenge to be signed, error.
 func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, claimToken string) (string, error) {
@@ -209,8 +194,9 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 }
 
 // Verify consumes the challenge on (device_id, pubkey) if sig is a valid
-// signature over it by that same pubkey. The primary key addresses the row, so
-// a caller can only ever advance its own; the nonce burns either way.
+// signature over it by that same pubkey. The burn commits in its own
+// transaction before the signature is judged: one tx would roll the burn
+// back on a bad proof and hand the nonce back to the caller.
 // in: ctx, device id, lowercase-hex pubkey, signature bytes. out: error.
 func (s *EnrollmentService) Verify(ctx context.Context, deviceID, pubkeyHex string, sig []byte) error {
 	if !pki.ValidDeviceID(deviceID) {
@@ -219,7 +205,8 @@ func (s *EnrollmentService) Verify(ctx context.Context, deviceID, pubkeyHex stri
 	if _, err := pki.ParseDevicePublicKey(pubkeyHex); err != nil {
 		return ErrEnrollBadProof
 	}
-	return db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment verify", func(tx pgx.Tx) error {
+	challenge := ""
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment verify", func(tx pgx.Tx) error {
 		e, err := scanEnrollment(tx.QueryRow(ctx,
 			`SELECT `+enrollmentColumns+` FROM device_enrollments
 			  WHERE device_id = $1 AND pubkey_hex = $2 FOR UPDATE`,
@@ -235,24 +222,28 @@ func (s *EnrollmentService) Verify(ctx context.Context, deviceID, pubkeyHex stri
 		if !ProofAllowed(e.CertDeliveredAt) {
 			return ErrEnrollSealed
 		}
-		challenge := ""
 		if e.Challenge != nil {
 			challenge = *e.Challenge
 		}
 		if !ChallengeUsable(challenge, e.ChallengeExpiresAt, time.Now()) {
 			return ErrEnrollBadProof
 		}
-		// Burn the nonce before judging the signature.
-		if _, err := tx.Exec(ctx,
+		_, err = tx.Exec(ctx,
 			`UPDATE device_enrollments
 			    SET challenge = NULL, challenge_expires_at = NULL, last_seen_at = now()
-			  WHERE device_id = $1 AND pubkey_hex = $2`, deviceID, pubkeyHex); err != nil {
-			return err
-		}
-		if err := pki.VerifyDeviceProof(deviceID, pubkeyHex, []byte(challenge), sig); err != nil {
-			return ErrEnrollBadProof
-		}
-		_, err = tx.Exec(ctx,
+			  WHERE device_id = $1 AND pubkey_hex = $2`, deviceID, pubkeyHex)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if err := pki.VerifyDeviceProof(deviceID, pubkeyHex, []byte(challenge), sig); err != nil {
+		return ErrEnrollBadProof
+	}
+	// A crash here loses a valid proof but never the burn: the device
+	// re-announces for a fresh challenge, single-use holds.
+	return db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment verified", func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
 			`UPDATE device_enrollments SET verified_at = now()
 			  WHERE device_id = $1 AND pubkey_hex = $2`, deviceID, pubkeyHex)
 		return err
@@ -343,20 +334,9 @@ func (s *EnrollmentService) FindForClaim(ctx context.Context, deviceID, claimTok
 	return out, nil
 }
 
-// MarkDelivered seals one enrollment row. Called ONLY from the device's
-// explicit acknowledgement, never from the handler that returns the
-// certificate.
-//
-// Sealing at hand-over time looks natural and is wrong: the seal would commit
-// before a single byte reached the socket, so a dropped TLS session, a proxy
-// timeout or a reset mid-write would leave the app believing the device is
-// provisioned while the device has nothing. The cert endpoint would then
-// refuse forever and the device is bricked short of an operator re-pair.
-//
-// Letting the device close the loop makes the failure mode retry instead:
-// until the ack arrives the cert endpoint re-signs, and CertificateService
-// .Issue revokes the superseded cert, so the cost of a retry is a wasted
-// certificate rather than dead hardware.
+// MarkDelivered seals one enrollment row, ONLY from the device's explicit
+// acknowledgement: sealing at hand-over would brick a device that never got
+// the bytes, ack-seal makes that a retried re-sign (docs/invariants.md).
 // in: ctx, device id, row pubkey, presented token. out: claimed tenant, error.
 func (s *EnrollmentService) MarkDelivered(ctx context.Context, deviceID, pubkeyHex, claimToken string) (string, error) {
 	var tenant string
@@ -391,27 +371,9 @@ func (s *EnrollmentService) MarkDelivered(ctx context.Context, deviceID, pubkeyH
 }
 
 // ClaimInto binds a verified enrollment to a tenant AND creates the devices
-// row, in ONE transaction.
-//
-// Splitting these is not an option, and the reason is structural rather than
-// stylistic: db.WithTenant runs on pools.App and db.WithAdminAudit runs on
-// pools.Admin, two separate pgxpool instances bound to different database
-// roles. No caller can wrap both in a single transaction. If the claim
-// committed and the devices INSERT then failed, no retry could rebuild the
-// missing devices row, Prune would skip the row (it only deletes unclaimed),
-// and the device would poll for a certificate forever against a tenant with no
-// device row. There is no recovery from that short of manual
-// SQL, so both writes go through the admin pool together.
-//
-// The admin pool is BYPASSRLS, so the devices INSERT needs no tenant GUC.
-//
-// Dynsec provisioning is deliberately NOT in here: it is a network call to the
-// broker, it is idempotent, and holding a transaction open across it would
-// mean a slow broker blocks a row lock. The caller runs it after this returns
-// and may retry it independently.
-// A claim already held by this tenant and this user replays instead of being
-// refused: the broker provisioning that runs after this returns is the step
-// that fails, and the user is told to retry the claim.
+// row in ONE admin-pool transaction - a split has no recovery when the second
+// half fails (docs/invariants.md). Dynsec runs after, idempotent, by the
+// caller; a claim already held by this tenant and user replays, not refuses.
 // in: ctx, device id, row pubkey, tenant id, claiming user, mqtt topic prefix.
 // out: device pk, error.
 func (s *EnrollmentService) ClaimInto(ctx context.Context, deviceID, pubkeyHex, tenantID string, ownerUserID uuid.UUID, topicPrefix string) (uuid.UUID, error) {

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"fmt"
 	"time"
 )
 
@@ -71,24 +72,10 @@ func ProofAllowed(certDeliveredAt *time.Time) bool {
 	return certDeliveredAt == nil
 }
 
-// PubkeyStable reports whether a presented pubkey belongs to the row it was
-// loaded against.
-//
-// What this guarantees: the key on an enrollment row never changes. It cannot
-// - (device_id, pubkey_hex) is the row identity, so a different key is a
-// different row, not an overwrite. This function is the assertion that catches
-// a lookup which returned somebody else's row before a challenge is issued
-// against the wrong key.
-//
-// What it does NOT guarantee, and what an earlier version of this comment
-// wrongly claimed: that the holder of a device_id is the unit on the label.
-// Nothing binds an id to a key before first boot, and device_id is derived
-// from a sequentially assigned factory MAC, so it is guessable. A remote
-// caller who guesses one can announce, sign its own challenge with its own
-// keypair and be "verified" - it just lands on its own row and gets nothing.
-// Claiming needs the claim token from the device's portal QR, and the pubkey
-// is not derivable from anything the device broadcasts over the air, so the
-// squatter can neither reach the real device's row nor have its own claimed.
+// PubkeyStable asserts a presented pubkey belongs to the row it was loaded
+// against - the check that catches a lookup returning somebody else's row.
+// It does NOT bind a device_id to a unit; guessed-id squatters land on their
+// own row and get nothing (docs/invariants.md, enrollment oracle table).
 // in: stored pubkey (empty when new), presented pubkey.
 // out: true when the presented key is the row's key.
 func PubkeyStable(stored, presented string) bool {
@@ -149,16 +136,6 @@ func ClaimRetryAllowed(claimedAt *time.Time, claimedByTenant *string, tenantID s
 	return *claimedByTenant == tenantID
 }
 
-// EnrollmentExpired reports whether a row has aged out and may be pruned. A
-// claimed row is never pruned by age: it is the record of a real device.
-// in: last_seen_at, claimed_at, now. out: true when prunable.
-func EnrollmentExpired(lastSeenAt time.Time, claimedAt *time.Time, now time.Time) bool {
-	if claimedAt != nil {
-		return false
-	}
-	return now.Sub(lastSeenAt) > EnrollmentTTL
-}
-
 // DeviceTopicPrefix builds the MQTT topic prefix for a claimed device.
 //
 // One function, two callers that MUST agree: the claim path writes this into
@@ -173,4 +150,11 @@ func DeviceTopicPrefix(root, tenantID, deviceID string) string {
 		root = "thesada"
 	}
 	return root + "/" + tenantID + "/" + deviceID
+}
+
+// DeviceCertCN builds the certificate CN, which is also the dynsec username
+// via use_identity_as_username - same drift argument as DeviceTopicPrefix.
+// in: tenant id, device id. out: CN.
+func DeviceCertCN(tenantID, deviceID string) string {
+	return fmt.Sprintf("thesada-%s-%s", tenantID, deviceID)
 }

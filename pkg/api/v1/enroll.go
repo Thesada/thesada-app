@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -75,18 +74,10 @@ func enrollPairKey(deviceID, pubkeyHex string) string {
 	return deviceID + "|" + pubkeyHex
 }
 
-// enrollClientIP extracts a rate-limit key from the request.
-//
-// It must honour X-Forwarded-For, but only from a peer inside
-// THESADA_TRUSTED_PROXIES. Reading RemoteAddr alone is not the safe choice it
-// appears to be: this app runs behind a reverse proxy with no PROXY protocol,
-// so RemoteAddr is the proxy for every device on earth and the "per-IP" limit
-// collapses into one global bucket for the entire fleet - one device polling
-// would rate-limit every other device.
-//
-// httpsec.ClientIP walks the header right-to-left, skips trusted hops, and
-// re-serialises a parsed IP rather than echoing a raw header token, so a
-// spoofed prefix cannot reach the rate-limit key.
+// enrollClientIP extracts a rate-limit key: X-Forwarded-For via trusted
+// proxies only (behind our proxy, RemoteAddr alone is one global bucket for
+// the whole fleet), nil-cfg safe for tests, never empty.
+// in: request. out: rate-limit key.
 func (s *Server) enrollClientIP(r *http.Request) string {
 	var trusted []*net.IPNet
 	if s.cfg != nil {
@@ -127,25 +118,11 @@ func enrollReject(w http.ResponseWriter) {
 	writeJSON(w, http.StatusForbidden, map[string]string{"error": "enrollment refused"})
 }
 
-// enrollGate applies the per-IP and per-enrollment limits. Returns false when
-// the caller has already been answered.
-//
-// Order is load-bearing. The per-IP bucket is spent first, so a flood of
-// malformed bodies still costs the sender its own budget. Only then are the id
-// and the key validated, because byPair keys a map on both: unvalidated body
-// fields as a map key mean an unauthenticated caller picks how much memory
-// this process uses.
-//
-// The per-enrollment bucket is keyed on (device_id, pubkey) rather than on the
-// id alone. That is what stops a caller who guessed an id from spending the
-// budget of the device that owns it: the id comes off a sequential MAC, the
-// key does not.
-//
-// A rate-limited caller gets the same 403 as every other refusal, not a 429. A
-// distinguishable answer would report that somebody else is enrolling that id
-// right now - the enumeration oracle the ledger forbids. Operators keep the
-// signal in slog.
-// in: writer, request, device id, lowercase-hex pubkey. out: true to proceed.
+// enrollGate applies the per-IP and per-enrollment limits. Order is
+// load-bearing: the IP budget is spent before body fields are validated or
+// used as map keys, and every refusal is the same 403 (docs/invariants.md).
+// in: writer, request, device id, lowercase-hex pubkey. out: true to proceed,
+// false when the caller has already been answered.
 func (s *Server) enrollGate(w http.ResponseWriter, r *http.Request, deviceID, pubkeyHex string) bool {
 	if !s.enroll.byIP.Allow(s.enrollClientIP(r)) {
 		slog.Info("device.enroll.rate_limited", "scope", "ip", "ip", s.enrollClientIP(r))
@@ -242,6 +219,9 @@ func (s *Server) handleEnrollVerify(w http.ResponseWriter, r *http.Request) {
 		enrollReject(w)
 		return
 	}
+	slog.Info("device.enroll.state_change",
+		"from", "announced", "to", "verified",
+		"device_id", req.DeviceID, "reason", "device_proof")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "verified"})
 }
 
@@ -309,7 +289,7 @@ func (s *Server) handleEnrollCert(w http.ResponseWriter, r *http.Request) {
 	// The two failures below stay 500. Neither depends on which device_id was
 	// asked for, so neither distinguishes a real id from a fabricated one, and
 	// a signing CA that cannot sign should look broken rather than picky.
-	cn := fmt.Sprintf("thesada-%s-%s", tenant, device.DeviceID)
+	cn := service.DeviceCertCN(tenant, device.DeviceID)
 	certPEM, keyPEM, serialHex, err := s.ca.SignDeviceCert(cn, deviceCertValidity)
 	if err != nil {
 		slog.Error("device.enroll.cert_sign_failed", "device_id", req.DeviceID, "err", err)
@@ -333,6 +313,16 @@ func (s *Server) handleEnrollCert(w http.ResponseWriter, r *http.Request) {
 	// the broker uses to verify CLIENT certs; the device verifies the BROKER
 	// against public roots it already carries. Returning it invites the
 	// firmware to overwrite its own trust anchor and lose MQTT and OTA.
+	// A cert with no broker to present it to is a device that fails silently at
+	// its next connect, with nothing on the server side to see. Refuse loudly
+	// instead - same posture as a signing CA that cannot sign.
+	brokerHost, mtlsPort := s.enrollBrokerEndpoint()
+	if brokerHost == "" {
+		slog.Error("device.enroll.broker_host_missing", "device_id", req.DeviceID, "tenant", tenant)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "broker unconfigured"})
+		return
+	}
+
 	slog.Info("device.enroll.cert_issued", "device_id", req.DeviceID, "tenant", tenant, "cn", cn)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"cert_pem": certPEM,
@@ -343,9 +333,20 @@ func (s *Server) handleEnrollCert(w http.ResponseWriter, r *http.Request) {
 		"tenant":       tenant,
 		"device_id":    device.DeviceID,
 		"topic_prefix": s.enrollTopicPrefix(tenant, device.DeviceID),
-		"mqtt_host":    s.cfg.BrokerHost(),
-		"mqtt_port":    s.cfg.MQTTDeviceMTLSPort,
+		"mqtt_host":    brokerHost,
+		"mqtt_port":    mtlsPort,
 	})
+}
+
+// enrollBrokerEndpoint is the broker host + mTLS port handed to the device.
+// Nil-guarded like enrollTopicPrefix below: a Server built without cfg must
+// refuse, not panic.
+// in: receiver. out: hostname ("" when unconfigured), mTLS port.
+func (s *Server) enrollBrokerEndpoint() (string, int) {
+	if s.cfg == nil {
+		return "", 0
+	}
+	return s.cfg.BrokerHost(), s.cfg.MQTTDeviceMTLSPort
 }
 
 // enrollTopicPrefix delegates to the shared builder the claim path also uses.

@@ -3,7 +3,6 @@ package web
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -128,7 +127,7 @@ func (s *Server) handleDeviceClaimSubmit(w http.ResponseWriter, r *http.Request)
 	// claim is what fixes it, and the retry works: ClaimInto replays a row
 	// already claimed by this tenant and owner instead of refusing it, and the
 	// dynsec calls tolerate "already exists".
-	cn := fmt.Sprintf("thesada-%s-%s", tenantID, deviceID)
+	cn := service.DeviceCertCN(tenantID, deviceID)
 	dynsecCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	if step, err := s.provisionDeviceDynsec(dynsecCtx, tenantID, deviceID, topicPrefix, cn); err != nil {

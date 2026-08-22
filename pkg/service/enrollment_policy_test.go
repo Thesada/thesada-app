@@ -302,26 +302,6 @@ func TestClaimAllowedIsFirstClaimWins(t *testing.T) {
 	}
 }
 
-// --- EnrollmentExpired ------------------------------------------------------
-
-func TestEnrollmentExpiredPrunesStaleUnclaimed(t *testing.T) {
-	now := time.Now()
-	if !EnrollmentExpired(now.Add(-EnrollmentTTL-time.Minute), nil, now) {
-		t.Fatal("stale unclaimed row must be prunable")
-	}
-	if EnrollmentExpired(now.Add(-time.Minute), nil, now) {
-		t.Fatal("fresh unclaimed row must not be pruned")
-	}
-}
-
-// A claimed row is the record of a real device, not litter.
-func TestEnrollmentExpiredKeepsClaimedRows(t *testing.T) {
-	now := time.Now()
-	if EnrollmentExpired(now.Add(-10*EnrollmentTTL), ptr(now), now) {
-		t.Fatal("a claimed row must never be pruned by age")
-	}
-}
-
 // --- DeviceTopicPrefix ------------------------------------------------------
 
 // The claim path writes this into the broker ACL and the enrollment API hands

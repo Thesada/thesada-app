@@ -6,7 +6,6 @@ package web
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -96,7 +95,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 
 	// Step 2: dynsec teardown. Best-effort. Bound the time we wait so a
 	// broker outage can't pin the request handler.
-	cn := fmt.Sprintf("thesada-%s-%s", device.TenantID, device.DeviceID)
+	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
 	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
 	dynsecCtx, dynsecCancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer dynsecCancel()

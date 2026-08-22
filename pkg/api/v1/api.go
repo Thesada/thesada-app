@@ -8,7 +8,6 @@ package v1
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -179,7 +178,7 @@ func (s *Server) handleDevicePair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cn := fmt.Sprintf("thesada-%s-%s", device.TenantID, device.DeviceID)
+	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
 	certPEM, keyPEM, serialHex, err := s.ca.SignDeviceCert(cn, deviceCertValidity)
 	if err != nil {
 		slog.Error("api pair: sign failed", "device", device.ID, "err", err)

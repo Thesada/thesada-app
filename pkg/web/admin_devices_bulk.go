@@ -333,8 +333,8 @@ func preemptiveCertClear(ctx context.Context, s *Server, device *service.Device,
 		}
 	}
 
-	// Step 1: flip MQTT port from 8884 (mTLS) back to 8883 (password)
-	pub("config.set", "mqtt.port 8883")
+	// Step 1: flip MQTT port from the mTLS listener back to password
+	pub("config.set", fmt.Sprintf("mqtt.port %d", mqttPortPassword))
 	step()
 	// Step 2: clear NVS client cert
 	pub("cert.clear", "")
@@ -367,7 +367,7 @@ func (s *Server) cascadeDeleteOne(ctx context.Context, opEmail string, device *s
 		logPairStateChange(device, "paired", "revoked", opEmail, "bulk_delete")
 	}
 
-	cn := fmt.Sprintf("thesada-%s-%s", device.TenantID, device.DeviceID)
+	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
 	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
 	dynsecCtx, dynsecCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer dynsecCancel()

@@ -145,18 +145,12 @@ func (s *Server) resetDeviceEnrollment(ctx context.Context, deviceID, op string)
 // fleet-wide re-pair churn. Re-issue is a one-click operation on this page.
 const deviceCertValidity = 365 * 24 * time.Hour
 
-// mTLS / password broker ports. Broker hostname is unchanged; only the
-// port swaps so HAProxy can route to the matching mosquitto listener
-// (1883 password, 1884 mTLS). See infrastructure docs/sop-mqtt-mtls.md.
-//
-// mqttPortMTLS is pinned on the firmware side too, as MQTT_MTLS_PORT in
-// src/thesada_config.h: a device only treats a session as mTLS-authenticated
-// when it dialled that port, so the two numbers must move together. Same
-// number again in THESADA_MQTT_DEVICE_MTLS_PORT (pkg/config/config.go).
-const (
-	mqttPortMTLS     = 8884
-	mqttPortPassword = 8883
-)
+// mTLS / password broker ports. Broker hostname is unchanged; only the port
+// swaps so the proxy can route to the matching listener. The mTLS port comes
+// from cfg.MQTTDeviceMTLSPort so the pair flow and the enroll response cannot
+// diverge; the firmware pins the same number as MQTT_MTLS_PORT and only
+// treats a session dialled on it as mTLS-authenticated.
+const mqttPortPassword = 8883
 
 // adminPairRow is the view-model for one row on the pairing page.
 type adminPairRow struct {
@@ -243,7 +237,7 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	cn := fmt.Sprintf("thesada-%s-%s", device.TenantID, device.DeviceID)
+	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
 	certPEM, keyPEM, serialHex, err := s.ca.SignDeviceCert(cn, deviceCertValidity)
 	if err != nil {
 		slog.Error("sign device cert failed", "device", device.ID, "cn", cn, "err", err)
@@ -288,7 +282,7 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if msg, ok := s.runCLI(r.Context(), topicPrefix, "config.set",
-		fmt.Sprintf("mqtt.port %d", mqttPortMTLS)); !ok {
+		fmt.Sprintf("mqtt.port %d", s.cfg.MQTTDeviceMTLSPort)); !ok {
 		slog.Error("config.set mqtt.port failed", "device", device.ID, "err", msg)
 		s.failPairIssue(w, r, device, certID, cn, serialHex, "config_set_port", msg)
 		return
@@ -631,7 +625,7 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 	// if the cert somehow re-appears in NVS. Role delete is best-effort -
 	// a failure here is logged but does not block the revoke since the
 	// cert revocation in the db is already done.
-	cn := fmt.Sprintf("thesada-%s-%s", device.TenantID, device.DeviceID)
+	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
 	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
 	dynsecCtx, dynsecCancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer dynsecCancel()
