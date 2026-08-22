@@ -193,6 +193,11 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 	return challenge, nil
 }
 
+// testHookAfterBurn runs in the window between the burn commit and the
+// verified update. Nil in production; the race there has no other seam a test
+// can reach, because the row is locked for the whole burn transaction.
+var testHookAfterBurn func()
+
 // Verify consumes the challenge on (device_id, pubkey) if sig is a valid
 // signature over it by that same pubkey. The burn commits in its own
 // transaction before the signature is judged: one tx would roll the burn
@@ -206,6 +211,7 @@ func (s *EnrollmentService) Verify(ctx context.Context, deviceID, pubkeyHex stri
 		return ErrEnrollBadProof
 	}
 	challenge := ""
+	burnedTokenHash := ""
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment verify", func(tx pgx.Tx) error {
 		e, err := scanEnrollment(tx.QueryRow(ctx,
 			`SELECT `+enrollmentColumns+` FROM device_enrollments
@@ -228,6 +234,7 @@ func (s *EnrollmentService) Verify(ctx context.Context, deviceID, pubkeyHex stri
 		if !ChallengeUsable(challenge, e.ChallengeExpiresAt, time.Now()) {
 			return ErrEnrollBadProof
 		}
+		burnedTokenHash = e.ClaimTokenHash
 		_, err = tx.Exec(ctx,
 			`UPDATE device_enrollments
 			    SET challenge = NULL, challenge_expires_at = NULL, last_seen_at = now()
@@ -240,13 +247,33 @@ func (s *EnrollmentService) Verify(ctx context.Context, deviceID, pubkeyHex stri
 	if err := pki.VerifyDeviceProof(deviceID, pubkeyHex, []byte(challenge), sig); err != nil {
 		return ErrEnrollBadProof
 	}
+	if testHookAfterBurn != nil {
+		testHookAfterBurn()
+	}
 	// A crash here loses a valid proof but never the burn: the device
 	// re-announces for a fresh challenge, single-use holds.
+	//
+	// The row is re-qualified rather than addressed by identity alone. Burning
+	// in its own transaction opens a window an unauthenticated Announce can
+	// use: rotation is legal until verified_at is set, so a caller that guessed
+	// the id could swap in its own claim token and have this update freeze it.
+	// Both conditions below are what the burn left behind.
 	return db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment verified", func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+		tag, err := tx.Exec(ctx,
 			`UPDATE device_enrollments SET verified_at = now()
-			  WHERE device_id = $1 AND pubkey_hex = $2`, deviceID, pubkeyHex)
-		return err
+			  WHERE device_id = $1 AND pubkey_hex = $2
+			    AND claim_token_hash = $3
+			    AND challenge IS NULL`, deviceID, pubkeyHex, burnedTokenHash)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			// Something re-announced between the burn and here. The proof was
+			// good, but it was good for a row that no longer exists in that
+			// shape - the device re-announces and tries again.
+			return ErrEnrollBadProof
+		}
+		return nil
 	})
 }
 

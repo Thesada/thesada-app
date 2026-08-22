@@ -333,11 +333,22 @@ func preemptiveCertClear(ctx context.Context, s *Server, device *service.Device,
 		}
 	}
 
+	// Each step is a precondition for the next, so a failed publish stops the
+	// sequence. Clearing the cert after the port flip did not land leaves the
+	// device dialling the mTLS listener with nothing to present.
 	// Step 1: flip MQTT port from the mTLS listener back to password
-	pub("config.set", fmt.Sprintf("mqtt.port %d", mqttPortPassword))
+	if !pub("config.set", fmt.Sprintf("mqtt.port %d", mqttPortPassword)) {
+		slog.Warn(op+": pre-emptive sequence aborted at port flip",
+			"device", device.ID)
+		return
+	}
 	step()
 	// Step 2: clear NVS client cert
-	pub("cert.clear", "")
+	if !pub("cert.clear", "") {
+		slog.Warn(op+": pre-emptive sequence aborted at cert clear",
+			"device", device.ID)
+		return
+	}
 	step()
 	// Step 3: force reboot so the new port + missing cert take effect
 	pub("restart", "")

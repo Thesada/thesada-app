@@ -151,6 +151,54 @@ func TestEnrollmentFailedVerifyBurnsTheChallenge(t *testing.T) {
 	announceAndVerify(t, enroll, enrollDeviceID, pubHex, priv, "burn-token")
 }
 
+// TestEnrollmentVerifyIgnoresARotatedToken - the burn commits in its own
+// transaction, so an Announce can land between it and the verified update.
+// Rotation is legal until verified_at is set, so without re-qualifying the row
+// a caller that guessed the id gets its own claim token frozen by somebody
+// else's proof, and can then claim the device.
+func TestEnrollmentVerifyIgnoresARotatedToken(t *testing.T) {
+	env := servicetest.Start(t)
+	enroll := env.Services.Enrollments
+	ctx := context.Background()
+
+	pubHex, priv := newDeviceKey(t)
+	challenge, err := enroll.Announce(ctx, enrollDeviceID, pubHex, "real-token")
+	if err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+
+	// Stand in for the racing Announce, in the one window it can land: after
+	// the burn commits, before the row is marked verified.
+	restore := service.SetVerifyBurnHook(func() {
+		if _, err := env.Super.Exec(ctx,
+			`UPDATE device_enrollments
+			    SET claim_token_hash = $3, challenge = $4,
+			        challenge_expires_at = now() + interval '5 minutes'
+			  WHERE device_id = $1 AND pubkey_hex = $2`,
+			enrollDeviceID, pubHex, service.HashClaimToken("attacker-token"),
+			"a-different-challenge"); err != nil {
+			t.Errorf("simulate racing announce: %v", err)
+		}
+	})
+	defer restore()
+
+	if err := enroll.Verify(ctx, enrollDeviceID, pubHex,
+		ed25519.Sign(priv, []byte(challenge))); !errors.Is(err, service.ErrEnrollBadProof) {
+		t.Fatalf("Verify across a rotation = %v, want ErrEnrollBadProof", err)
+	}
+
+	var verifiedAt *time.Time
+	if err := env.Super.QueryRow(ctx,
+		`SELECT verified_at FROM device_enrollments
+		  WHERE device_id = $1 AND pubkey_hex = $2`,
+		enrollDeviceID, pubHex).Scan(&verifiedAt); err != nil {
+		t.Fatalf("read verified_at: %v", err)
+	}
+	if verifiedAt != nil {
+		t.Fatal("a rotated claim token was frozen by somebody else's proof")
+	}
+}
+
 // TestEnrollmentClaimIntoRequiresOwner - the spec makes the claiming user the
 // owner. A claim with no user must fail rather than write a NULL that nothing
 // later fills in.
