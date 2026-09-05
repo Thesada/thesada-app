@@ -1,4 +1,4 @@
-// Unit tests for awaitPagedCLIResponse - the multi-page cli/response
+// Unit tests for awaitPagedCLIResponse - the multi-page cli_response
 // accumulator. Pure logic over an in-memory channel; no broker / DB.
 package mqtt
 

@@ -4,7 +4,7 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-08-20 (device CLI pulls gated on pairing state; hands-off
+Dated 2026-09-05 (legacy cli/response tap removed. Prior: device CLI pulls gated on pairing state; hands-off
 recovery refuses to run when the shared fallback credential is not
 connectable; unauthenticated device enrollment surface; device-facing
 enrollment endpoints address the row by its primary key and the claim
@@ -891,17 +891,14 @@ multi-tenant rollout but mandatory for any device that has a cert.
 
 Source: `pkg/web/admin_pair.go`, `pkg/mqtt/dynsec.go`.
 
-### CLI responses are read from both topic generations
+### CLI responses are read from `cli_response` only
 
-Firmware publishes CLI responses to `<prefix>/cli_response`; firmware from
-before the topic split publishes to `<prefix>/cli/response`. `tapCLIResponses`
-subscribes to both for every request, so a device on either side answers at
-full speed and no fleet state needs a timeout to discover. A device publishes
-on exactly one of them - the firmware does not dual-publish.
-
-This is why the platform must be deployed BEFORE firmware carrying the split:
-old firmware works against a new platform, but new firmware against an old
-platform goes mute on CLI.
+Firmware publishes CLI responses to `<prefix>/cli_response`, outside the
+`<prefix>/cli/#` wildcard a device subscribes to, so a device never receives
+its own responses. `tapCLIResponses` subscribes to that one topic. The
+pre-split `<prefix>/cli/response` is no longer read: every fielded device runs
+firmware at or past the split (26.08.0), and a device on older firmware would
+go mute on CLI against this platform.
 
 How enforced: every CLI topic is built by `pkg/mqtt/topics.go`; no topic
 literal is assembled at a call site, in `pkg/mqtt` or in the web handlers.

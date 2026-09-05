@@ -8,10 +8,9 @@ package mqtt
 // would forward every response the device just published straight back to it.
 // Over cellular that echo arrives as a URC too large for the modem line buffer.
 const (
-	cliInputSegment     = "/cli/"
-	cliInputWildcard    = "/cli/#"
-	cliResponseSuffix   = "/cli_response"
-	cliLegacyRespSuffix = "/cli/response"
+	cliInputSegment   = "/cli/"
+	cliInputWildcard  = "/cli/#"
+	cliResponseSuffix = "/cli_response"
 )
 
 // CLICommandTopic is the topic a CLI command is published to.
@@ -28,11 +27,4 @@ func CLIInputSubscription(prefix string) string {
 // it cannot match CLIInputSubscription.
 func CLIResponseTopic(prefix string) string {
 	return prefix + cliResponseSuffix
-}
-
-// CLILegacyResponseTopic is the pre-split response topic. Still read so a
-// device on older firmware keeps answering; drop once no fielded device
-// publishes here.
-func CLILegacyResponseTopic(prefix string) string {
-	return prefix + cliLegacyRespSuffix
 }
