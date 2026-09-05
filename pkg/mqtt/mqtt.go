@@ -57,7 +57,7 @@ type Client struct {
 	retainedTopics map[string][]string
 
 	// Per-device CLI request serialization. Two concurrent CLIRequests
-	// against the same device share the cli/response topic and race for
+	// against the same device share the cli_response topic and race for
 	// the next published payload; the loser sees the wrong response.
 	// Hold cliLockFor(topicPrefix) for the duration of every CLI call so
 	// only one is in flight per device at a time. req_id correlation

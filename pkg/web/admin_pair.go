@@ -418,7 +418,7 @@ func pairIssueDetail(deviceID, cn, serial, status, stage string) map[string]any 
 }
 
 // pushCertPart sends one cert.set call with the "<type>\n<PEM>" payload and
-// waits for the device cli/response. Returns (status_query_param, ok).
+// waits for the device cli_response. Returns (status_query_param, ok).
 // in: ctx, topic prefix, part type ("client_cert"|"client_key"), PEM text.
 // out: user-facing short message (if !ok), ok flag.
 func (s *Server) pushCertPart(ctx context.Context, topicPrefix, partType, pem string) (string, bool) {

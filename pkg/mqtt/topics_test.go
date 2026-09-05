@@ -45,10 +45,11 @@ func TestCLIResponseTopicDoesNotMatchInputSubscription(t *testing.T) {
 		t.Errorf("response topic %q matches input subscription %q - the echo is back",
 			CLIResponseTopic(prefix), sub)
 	}
-	// The legacy topic does match, which is why it had to move.
-	if !topicMatches(sub, CLILegacyResponseTopic(prefix)) {
-		t.Errorf("legacy topic %q unexpectedly does not match %q - test no longer proves anything",
-			CLILegacyResponseTopic(prefix), sub)
+	// The pre-split topic did match, which is why it had to move. Kept as a
+	// literal so this test still proves the wildcard would catch a response
+	// that lives under cli/.
+	if !topicMatches(sub, prefix+"/cli/response") {
+		t.Errorf("a cli/-prefixed response unexpectedly does not match %q - test no longer proves anything", sub)
 	}
 }
 
@@ -58,7 +59,6 @@ func TestCLITopicConstruction(t *testing.T) {
 		{CLICommandTopic(prefix, "fs.cat"), "thesada/acme/owb/cli/fs.cat"},
 		{CLIInputSubscription(prefix), "thesada/acme/owb/cli/#"},
 		{CLIResponseTopic(prefix), "thesada/acme/owb/cli_response"},
-		{CLILegacyResponseTopic(prefix), "thesada/acme/owb/cli/response"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {

@@ -2,7 +2,7 @@
 
 // Package mqtttest provides the shared broker-path integration harness: a
 // throwaway mosquitto container and a FakeDevice that answers the firmware
-// CLI protocol (envelope unwrap, req_id echo, cli/response publish) so tests
+// CLI protocol (envelope unwrap, req_id echo, cli_response publish) so tests
 // can drive the full app -> broker -> device -> DB chain without hardware.
 // Used by pkg/mqtt and pkg/web integration tests.
 package mqtttest
@@ -54,7 +54,7 @@ func StartMosquitto(t *testing.T) string {
 	return fmt.Sprintf("tcp://%s:%s", host, port.Port())
 }
 
-// Response is one cli/response message a Handler wants published. Fields
+// Response is one cli_response message a Handler wants published. Fields
 // mirror the firmware's CLIResponse JSON; zero-value fields are omitted.
 type Response struct {
 	OK     bool     `json:"ok"`
@@ -71,11 +71,11 @@ type Response struct {
 // Handler answers one CLI command. args is the unwrapped envelope args (or ""
 // for a raw binary payload); raw is the exact payload bytes for binary
 // protocols (fs.write: "path\ncontent"). Every returned Response is published
-// to cli/response in order, req_id echoed when the request carried one.
+// to cli_response in order, req_id echoed when the request carried one.
 type Handler func(args string, raw []byte) []Response
 
-// CLIResponseMode selects which response topic(s) the fake device answers on.
-// Two of the modes are real fleet states; RespondDual is not - see below.
+// CLIResponseMode selects how the fake device answers. RespondOnce is
+// the one real fleet state; RespondDual is not - see below.
 //
 // Topic literals here are deliberately NOT shared with pkg/mqtt. Partly they
 // cannot be - this package is imported by pkg/mqtt's own tests, so importing
@@ -85,34 +85,27 @@ type Handler func(args string, raw []byte) []Response
 type CLIResponseMode int
 
 const (
-	// RespondDual answers on both topics at once. No firmware does this - the
-	// split ships by deployment order, not dual-publish. It exists to
-	// manufacture a duplicate response cheaply, so tests can prove a straggler
-	// is not mistaken for the current request's reply.
+	// RespondDual publishes every response twice. No firmware does this. It
+	// exists to manufacture a duplicate response cheaply, so tests can prove a
+	// straggler is not mistaken for the current request's reply.
 	RespondDual CLIResponseMode = iota
-	// RespondLegacyOnly answers on the old topic: firmware before the split.
-	RespondLegacyOnly
-	// RespondNewOnly answers on the new topic: firmware after the split.
-	RespondNewOnly
+	// RespondOnce answers once, the way firmware does.
+	RespondOnce
 )
 
 const (
 	fakeCLIInputWildcard = "/cli/#"
 	fakeCLIInputSegment  = "/cli/"
 	fakeCLIResponse      = "/cli_response"
-	fakeCLILegacyResp    = "/cli/response"
 )
 
-// respondTopics is the topic set for a mode, relative to the device prefix.
-func (m CLIResponseMode) respondTopics() []string {
-	switch m {
-	case RespondLegacyOnly:
-		return []string{fakeCLILegacyResp}
-	case RespondNewOnly:
-		return []string{fakeCLIResponse}
-	default:
-		return []string{fakeCLIResponse, fakeCLILegacyResp}
+// publishList is the topics a response goes out on, relative to the device
+// prefix. Dual lists the one topic twice so each response goes out twice.
+func (m CLIResponseMode) publishList() []string {
+	if m == RespondDual {
+		return []string{fakeCLIResponse, fakeCLIResponse}
 	}
+	return []string{fakeCLIResponse}
 }
 
 // FakeDevice is a paho client subscribed to <prefix>/cli/# that answers
@@ -291,7 +284,7 @@ func (fd *FakeDevice) onCommand(_ paho.Client, msg paho.Message) {
 		// response must still be named - the caller otherwise just times out
 		// with no hint the fake device failed to answer.
 		fd.mu.Lock()
-		topics := fd.respMode.respondTopics()
+		topics := fd.respMode.publishList()
 		fd.mu.Unlock()
 		for _, suffix := range topics {
 			if tok := fd.c.Publish(fd.prefix+suffix, 0, false, payload); !tok.WaitTimeout(5 * time.Second) {

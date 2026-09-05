@@ -306,7 +306,7 @@ func (c *Client) handleInfo(tenant, device, topicPrefix string, payload []byte, 
 
 	// Collect paths that need pulling, then process sequentially in one
 	// goroutine. Running concurrent CLIRequests against the same device
-	// causes response cross-contamination (all taps match cli/response).
+	// causes response cross-contamination (all taps match cli_response).
 	var driftPaths []string
 	for path, deviceHash := range hashMap {
 		if deviceHash == "" {

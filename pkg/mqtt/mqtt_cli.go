@@ -18,7 +18,7 @@ type CLIResponse struct {
 	Output []string `json:"output,omitempty"`
 	// Pagination fields (firmware v1.4.6+). A command whose output
 	// overflows the device publish buffer is split across multiple
-	// cli/response messages, each with a 0-indexed Page and a More flag;
+	// cli_response messages, each with a 0-indexed Page and a More flag;
 	// the final page carries More=false. Pre-1.4.6 firmware omits both
 	// and the single message is the whole response. CLIRequest /
 	// CLIRequestRaw accumulate pages transparently, so a CLIResponse
@@ -34,7 +34,7 @@ type CLIResponse struct {
 	Data   *string `json:"data,omitempty"`
 }
 
-// awaitPagedCLIResponse reads cli/response payloads off ch and assembles a
+// awaitPagedCLIResponse reads cli_response payloads off ch and assembles a
 // complete CLIResponse. Firmware v1.4.6+ paginates oversized output across
 // multiple messages (0-indexed Page, More flag; the final page carries
 // More=false). This concatenates each page's Output in Page order and
@@ -43,7 +43,7 @@ type CLIResponse struct {
 // the first message. Pages may arrive out of order - the assembly is
 // keyed by Page index, not arrival order. The returned CLIResponse has
 // Page/More cleared.
-// in: ctx, ch (raw cli/response payload bytes). out: assembled *CLIResponse, error.
+// in: ctx, ch (raw cli_response payload bytes). out: assembled *CLIResponse, error.
 func awaitPagedCLIResponse(ctx context.Context, ch <-chan []byte) (*CLIResponse, error) {
 	pages := make(map[int][]string)
 	var (
@@ -100,7 +100,7 @@ func awaitPagedCLIResponse(ctx context.Context, ch <-chan []byte) (*CLIResponse,
 }
 
 // cliEnvelope wraps a CLI command payload so the firmware (v1.4.5+) can
-// echo req_id back on cli/response for correlation. Older firmware ignores
+// echo req_id back on cli_response for correlation. Older firmware ignores
 // unknown fields and runs the command with the envelope JSON as a literal
 // arg - so on a mixed-version fleet, the per-device mutex remains the
 // load-bearing defence. The firmware unwraps `args` and runs the command
@@ -151,26 +151,11 @@ func cliMatchesRequest(payload []byte, reqID, command string) bool {
 	return probe.Cmd == "" || probe.Cmd == command
 }
 
-// tapCLIResponses feeds payloads from both CLI response topics to fn.
-// Reading both at once keeps a device on either side of the topic split
-// answering at full speed; a device only ever publishes on one of them.
+// tapCLIResponses feeds payloads from the CLI response topic to fn.
 // in: topicPrefix, fn (called per payload). out: cancel func, error.
 func (c *Client) tapCLIResponses(topicPrefix string, fn func([]byte)) (func(), error) {
 	handler := func(_ string, p []byte, _ bool, _ byte) { fn(p) }
-
-	cancelNew, err := c.RegisterTap(CLIResponseTopic(topicPrefix), handler)
-	if err != nil {
-		return nil, err
-	}
-	cancelLegacy, err := c.RegisterTap(CLILegacyResponseTopic(topicPrefix), handler)
-	if err != nil {
-		cancelNew()
-		return nil, err
-	}
-	return func() {
-		cancelNew()
-		cancelLegacy()
-	}, nil
+	return c.RegisterTap(CLIResponseTopic(topicPrefix), handler)
 }
 
 // CLIRequest sends a CLI command to a device via MQTT and waits for the
@@ -181,7 +166,7 @@ func (c *Client) tapCLIResponses(topicPrefix string, fn func([]byte)) (func(), e
 //
 // Per-device serialization: holds cliLockFor(topicPrefix) for the duration
 // of the call so two concurrent CLIRequests against the same device do not
-// race on the shared cli/response topic. req_id correlation (firmware
+// race on the shared cli_response topic. req_id correlation (firmware
 // v1.4.5+) filters out late or retained-replay responses with a different
 // id so the second call cannot accidentally consume the first call's
 // late reply. Older firmware that ignores req_id still works - the mutex
