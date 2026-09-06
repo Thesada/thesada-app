@@ -110,3 +110,26 @@ func TestAdminDevicesBulk_Delete_NoSelection(t *testing.T) {
 		t.Errorf("Location = %q, want error=no+devices+selected", loc)
 	}
 }
+
+// The recovery gate refuses exactly one shape: a paired device, no usable
+// path back onto the broker, and no operator override.
+func TestDestructiveAllowed_RefusesOnlyPairedUnusableNoOverride(t *testing.T) {
+	cases := []struct {
+		paired, usable, override, want bool
+	}{
+		{false, false, false, true},
+		{false, false, true, true},
+		{false, true, false, true},
+		{false, true, true, true},
+		{true, false, false, false},
+		{true, false, true, true},
+		{true, true, false, true},
+		{true, true, true, true},
+	}
+	for _, c := range cases {
+		if got := destructiveAllowed(c.paired, c.usable, c.override); got != c.want {
+			t.Errorf("destructiveAllowed(paired=%v usable=%v override=%v) = %v, want %v",
+				c.paired, c.usable, c.override, got, c.want)
+		}
+	}
+}
