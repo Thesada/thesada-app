@@ -9,8 +9,10 @@ package service_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"thesada.app/app/pkg/service"
 	"thesada.app/app/pkg/service/servicetest"
 )
 
@@ -24,10 +26,37 @@ func TestAlertService(t *testing.T) {
 	env.SeedTenant(t, tA)
 	env.SeedTenant(t, tB)
 
+	// At-least-once delivery: the same bytes from the same device inside the
+	// window are one alert, a different payload is a new one.
+	t.Run("duplicate_payload_within_window_rejected", func(t *testing.T) {
+		pk := mustUpsert(t, dev, tA, "alert-dev-dup", "", "", "", "")
+		raw := []byte(`{"severity":"warn","code":"soil_dry","message":"bed1 at 12%"}`)
+		if _, err := al.InsertAlert(ctx, tA, pk, "warn", "soil_dry", "bed1 at 12%", raw); err != nil {
+			t.Fatalf("first insert: %v", err)
+		}
+		if _, err := al.InsertAlert(ctx, tA, pk, "warn", "soil_dry", "bed1 at 12%", raw); !errors.Is(err, service.ErrDuplicateAlert) {
+			t.Fatalf("second insert err = %v, want ErrDuplicateAlert", err)
+		}
+		other := []byte(`{"severity":"warn","code":"soil_dry","message":"bed1 at 11%"}`)
+		if _, err := al.InsertAlert(ctx, tA, pk, "warn", "soil_dry", "bed1 at 11%", other); err != nil {
+			t.Fatalf("different payload rejected: %v", err)
+		}
+		got, err := al.RecentAlerts(ctx, tA, pk, "", 10)
+		if err != nil {
+			t.Fatalf("RecentAlerts: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("stored %d alerts, want 2", len(got))
+		}
+	})
+
 	t.Run("Insert_and_RecentAlerts_filter_limit", func(t *testing.T) {
 		pk := mustUpsert(t, dev, tA, "alert-dev-1", "", "", "", "")
+		// Distinct payloads: identical bytes on one device inside the dedup
+		// window are one alert, and the ingest path derives every column
+		// from the payload, so three alerts with one payload cannot happen.
 		for _, sev := range []string{"info", "warn", "crit"} {
-			if _, err := al.InsertAlert(ctx, tA, pk, sev, sev+"-code", "msg", []byte("{}")); err != nil {
+			if _, err := al.InsertAlert(ctx, tA, pk, sev, sev+"-code", "msg", []byte(`{"severity":"`+sev+`"}`)); err != nil {
 				t.Fatalf("InsertAlert %s: %v", sev, err)
 			}
 		}

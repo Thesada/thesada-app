@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -30,13 +31,28 @@ type AlertService struct {
 	pools db.Pools
 }
 
-// InsertAlert inserts a new alert and returns its id.
+// ErrDuplicateAlert: the device already stored the same JSON payload inside
+// alertDedupWindow. Carries the existing row id alongside.
+var ErrDuplicateAlert = errors.New("duplicate alert within window")
+
+// alertDedupWindow sits under the 15 minute rule cooldown the firmware
+// examples ship, so at-least-once redelivery collapses and a repeat does not.
+const alertDedupWindow = 10 * time.Minute
+
+// InsertAlert inserts a new alert and returns its id, or the existing id with
+// ErrDuplicateAlert when the same payload from this device is inside the
+// window. A nil raw never dedups (nothing to compare).
 // Tenant-scoped through WithTenant: device_alerts is RLS-policed transitive
 // via device_pk -> devices.tenant_id. Called from the MQTT ingest path with
 // the tenant pinned from the topic.
 // in: ctx, tenantID, device_pk, severity, code, message, raw JSON.
-// out: alert id or error.
+// out: alert id, or existing id + ErrDuplicateAlert, or error.
 func (s *AlertService) InsertAlert(ctx context.Context, tenantID string, devicePk uuid.UUID, severity, code, message string, rawJSON []byte) (int64, error) {
+	const dupQuery = `
+		SELECT id FROM device_alerts
+		WHERE device_pk = $1 AND raw = $2::jsonb
+		  AND received_at > now() - $3::interval
+		LIMIT 1`
 	const query = `
 		INSERT INTO device_alerts (device_pk, received_at, severity, code, message, raw, delivered_email, delivered_telegram)
 		VALUES ($1, NOW(), $2, $3, $4, $5, false, false)
@@ -44,6 +60,12 @@ func (s *AlertService) InsertAlert(ctx context.Context, tenantID string, deviceP
 
 	var id int64
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		switch err := tx.QueryRow(ctx, dupQuery, devicePk, rawJSON, alertDedupWindow.String()).Scan(&id); {
+		case err == nil:
+			return ErrDuplicateAlert
+		case !errors.Is(err, pgx.ErrNoRows):
+			return err
+		}
 		return tx.QueryRow(ctx, query, devicePk, severity, code, message, rawJSON).Scan(&id)
 	})
 	return id, err

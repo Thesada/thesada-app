@@ -154,7 +154,13 @@ func cliMatchesRequest(payload []byte, reqID, command string) bool {
 // tapCLIResponses feeds payloads from the CLI response topic to fn.
 // in: topicPrefix, fn (called per payload). out: cancel func, error.
 func (c *Client) tapCLIResponses(topicPrefix string, fn func([]byte)) (func(), error) {
-	handler := func(_ string, p []byte, _ bool, _ byte) { fn(p) }
+	// A retained reply predates this subscription; never this request's answer.
+	handler := func(_ string, p []byte, retained bool, _ byte) {
+		if retained {
+			return
+		}
+		fn(p)
+	}
 	return c.RegisterTap(CLIResponseTopic(topicPrefix), handler)
 }
 

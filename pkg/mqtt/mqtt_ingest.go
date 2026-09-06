@@ -3,12 +3,15 @@ package mqtt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"thesada.app/app/pkg/service"
 )
 
 // parseTopic splits an MQTT topic into tenant, device, kind, sub.
@@ -124,6 +127,12 @@ func (c *Client) upsertDevice(tenant, device, displayName, fwVersion, hardwareTy
 // pollute device_alerts with half-formed rows that fail the db CHECK.
 // in: tenant id, device id, raw JSON payload, retained flag. out: none (logs on error).
 func (c *Client) handleAlert(tenant, device string, payload []byte, retained bool) {
+	// Retained = the broker replaying the last publish to a fresh subscriber
+	// (every app restart). Not a new event: neither stored nor notified.
+	if retained {
+		slog.Debug("alert ignored, retained replay", "tenant", tenant, "device", device)
+		return
+	}
 	var alert map[string]interface{}
 	if err := json.Unmarshal(payload, &alert); err != nil {
 		slog.Warn("alert parse failed (non-JSON payload - firmware contract mismatch)",
@@ -154,9 +163,14 @@ func (c *Client) handleAlert(tenant, device string, payload []byte, retained boo
 			"tenant", tenant, "device", device)
 		return
 	}
-	_ = retained
 
 	alertID, err := c.services.Alerts.InsertAlert(context.Background(), tenant, devicePk, severity, code, message, payload)
+	if errors.Is(err, service.ErrDuplicateAlert) {
+		// At-least-once redelivery: already stored, already notified.
+		slog.Debug("alert dropped, duplicate within window",
+			"tenant", tenant, "device", device, "code", code, "alert_id", alertID)
+		return
+	}
 	if err != nil {
 		c.retryAlertInsert(tenant, device, devicePk, severity, code, message, payload, err)
 		return
@@ -199,6 +213,13 @@ func (c *Client) retryAlertInsert(tenant, device string, devicePk uuid.UUID, sev
 			if err == nil {
 				slog.Info("alert insert retry succeeded", "tenant", tenant, "device", device, "attempt", attempt)
 				c.finishAlert(tenant, device, devicePk, alertID)
+				return
+			}
+			if errors.Is(err, service.ErrDuplicateAlert) {
+				// The first insert committed and only its ack was lost. The row
+				// exists; delivery is the redispatch sweeper's job, not a retry.
+				slog.Info("alert insert retry: row already stored",
+					"tenant", tenant, "device", device, "attempt", attempt, "alert_id", alertID)
 				return
 			}
 			slog.Warn("alert insert retry failed",
@@ -278,6 +299,13 @@ func (c *Client) handleInfo(tenant, device, topicPrefix string, payload []byte, 
 	}
 	c.hub.Publish(tenant, device, map[string]string{"type": "info", "device": device})
 	slog.Debug("info processed", "tenant", tenant, "device", device, "fw", fwVersion, "hw", hardwareType)
+
+	// Retained info is a replay, not the device talking. Drift work needs a
+	// live device on the CLI, so it waits for the next live publish.
+	if retained {
+		slog.Debug("drift check skipped, retained info", "tenant", tenant, "device", device)
+		return
+	}
 
 	// Snapshotting talks to the device over the MQTT CLI, which an unpaired
 	// device refuses. Check before doing any drift work at all.

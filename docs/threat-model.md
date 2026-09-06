@@ -111,7 +111,7 @@ network MITM, **device** = malicious/compromised device.
 | Attacker | Vector | Control | Known residual |
 |---|---|---|---|
 | MITM / misconfig | Channel down or SMTP unconfigured -> silent drop | Lifecycle `pending -> delivered/none/dead` with backed-off retry + dead-letter; unconfigured SMTP now **fails loud** instead of a silent no-op; startup redispatch recovers process-death mid-alert | `dead` is operator-visible only (no end-user UI). Channel success is per-alert not per-recipient. The redispatch claim is in-process - a second instance double-sends. |
-| device | Spoofed / duplicate / flooded alerts | Severity validated against the DB CHECK; cross-tenant pairing gate; bounded insert-retry then dead-letter | No dedup key (retained `/alert` re-ingests and re-notifies on every reconnect); no ingest-rate limit, so a compromised device can spam its own tenant. The Telegram bot token can leak into an error log on a send failure (URL-path token; correction tracked separately). |
+| device | Spoofed / duplicate / flooded alerts | Severity validated against the DB CHECK; cross-tenant pairing gate; bounded insert-retry then dead-letter | Dedup is a 10 minute same-payload window, not a key (an identical repeat inside it is dropped); retained `/alert` is ignored; no ingest-rate limit, so a compromised device can spam its own tenant. The Telegram bot token can leak into an error log on a send failure (URL-path token; correction tracked separately). |
 
 ### Operator power (cross-tenant accountability)
 
