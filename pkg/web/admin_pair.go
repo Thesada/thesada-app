@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"time"
 
@@ -129,15 +130,20 @@ func (s *Server) provisionDeviceDynsec(ctx context.Context, tenantID, deviceID, 
 // requires the opposite: "claim can be revoked by the owner; next POST starts
 // a fresh cycle". Best-effort and logged, like the dynsec teardown beside it:
 // the revoke itself is already committed and must not be undone by a failure
-// here.
-// in: ctx, device id, calling path (for slog). out: none.
-func (s *Server) resetDeviceEnrollment(ctx context.Context, deviceID, op string) {
+// here. It runs free of request cancellation: the caller's commit has already
+// happened, so a browser that disconnects now must not leave the rows sealed.
+// in: ctx, device id, calling path (for slog). out: error when the rows may
+// still be sealed, for the caller to surface.
+func (s *Server) resetDeviceEnrollment(ctx context.Context, deviceID, op string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	n, err := s.services.Enrollments.Reset(ctx, deviceID)
 	if err != nil {
 		slog.Error("device.enroll.reset_failed", "op", op, "device_id", deviceID, "err", err)
-		return
+		return err
 	}
 	slog.Info("device.enroll.reset", "op", op, "device_id", deviceID, "rows_deleted", n)
+	return nil
 }
 
 // deviceCertValidity is the lifetime of a device client cert. Short enough
@@ -600,14 +606,23 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 		http.NotFound(w, r)
 		return
 	}
+	// Recovery gate, same rule as delete.
+	v, accepted, proceed := s.recoveryGate(w, r, device, "revoke", "/admin/devices/pair")
+	if !proceed {
+		return
+	}
 	if err := s.services.Certificates.Revoke(r.Context(), device.TenantID, device.ID); err != nil {
 		slog.Error("revoke device cert failed", "device", device.ID, "err", err)
 		http.Redirect(w, r, "/admin/devices/pair?error=revoke+failed", http.StatusFound)
 		return
 	}
-	s.audit(r.Context(), authmw.CurrentUser(r), authz.CertRevoke, service.AuditEntry{
+	// Committed. The rest must survive a disconnecting browser.
+	ctx := context.WithoutCancel(r.Context())
+	auditCtx, auditCancel := context.WithTimeout(ctx, auditTimeout)
+	defer auditCancel()
+	s.audit(auditCtx, authmw.CurrentUser(r), authz.CertRevoke, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
-		Detail: map[string]any{"device_id": device.DeviceID},
+		Detail: auditDetail(map[string]any{"device_id": device.DeviceID}, accepted),
 	})
 
 	// Best-effort transition the online device into password-mode recovery
@@ -619,7 +634,7 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 	// + restart as spaced fire-and-forget instead, matching the device-
 	// delete cascade pattern shipped 2026-04-30. Same physical effect,
 	// no ordering race, recovery in ~10s.
-	preemptiveCertClear(r.Context(), s, device, "revoke")
+	preemptiveCertClear(ctx, s, device, "revoke", v.usable)
 
 	// Tear down dynsec client + role so the broker refuses the old CN even
 	// if the cert somehow re-appears in NVS. Role delete is best-effort -
@@ -627,7 +642,7 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 	// cert revocation in the db is already done.
 	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
 	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
-	dynsecCtx, dynsecCancel := context.WithTimeout(r.Context(), 10*time.Second)
+	dynsecCtx, dynsecCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer dynsecCancel()
 	if derr := s.mqtt.DeleteDynsecClient(dynsecCtx, cn); derr != nil {
 		slog.Warn("dynsec deleteClient failed", "device", device.ID, "cn", cn, "err", derr)
@@ -636,12 +651,17 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 		slog.Warn("dynsec deleteRole failed", "device", device.ID, "role", roleName, "err", derr)
 	}
 
-	// Re-enrollment gate. Without this the device is revoked AND sealed.
-	s.resetDeviceEnrollment(r.Context(), device.DeviceID, "revoke")
-
 	user := authmw.CurrentUser(r)
 	if device.PairedAt != nil {
 		logPairStateChange(device, "paired", "revoked", user.Email, "admin_revoke")
+	}
+	// Re-enrollment gate. Without this the device is revoked AND sealed, and
+	// a success message would be a lie.
+	if err := s.resetDeviceEnrollment(ctx, device.DeviceID, "revoke"); err != nil {
+		http.Redirect(w, r, "/admin/devices/pair?error="+url.QueryEscape(
+			"revoked "+device.DeviceID+" but enrollment reset failed, re-enrollment stays blocked"),
+			http.StatusFound)
+		return
 	}
 	http.Redirect(w, r, "/admin/devices/pair?ok=revoked+"+device.DeviceID, http.StatusFound)
 }

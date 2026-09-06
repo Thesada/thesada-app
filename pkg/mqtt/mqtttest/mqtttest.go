@@ -123,7 +123,7 @@ type FakeDevice struct {
 }
 
 // SetCLIResponseMode changes which response topic(s) this device answers on.
-// Default is RespondDual.
+// Default is RespondOnce, the way firmware answers.
 func (fd *FakeDevice) SetCLIResponseMode(m CLIResponseMode) {
 	fd.mu.Lock()
 	defer fd.mu.Unlock()
@@ -140,6 +140,7 @@ func NewFakeDevice(t *testing.T, brokerURL, topicPrefix string) *FakeDevice {
 		prefix:   topicPrefix,
 		handlers: make(map[string]Handler),
 		calls:    make(map[string]int),
+		respMode: RespondOnce,
 	}
 
 	opts := paho.NewClientOptions().

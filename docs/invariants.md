@@ -4,7 +4,7 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-09-05 (legacy cli/response tap removed. Prior: device CLI pulls gated on pairing state; hands-off
+Dated 2026-09-05 (revoke and delete gate on the recovery path; legacy cli/response tap removed. Prior: device CLI pulls gated on pairing state; hands-off
 recovery refuses to run when the shared fallback credential is not
 connectable; unauthenticated device enrollment surface; device-facing
 enrollment endpoints address the row by its primary key and the claim
@@ -156,11 +156,13 @@ shared fallback credential. If that credential is disabled at the
 broker, the device reboots into a broker that refuses it and needs
 physical serial recovery.
 
-How enforced: the sequence probes `getClient` for the configured
-fallback user first and aborts unless it is enabled. A probe error
-counts as unusable - an unreachable broker is not evidence the
+How enforced: the handler probes `getClient` for the configured
+fallback user once per request (`recoveryPath`) and hands the verdict to
+`preemptiveCertClear`, which skips the sequence when it is not usable. A
+probe error counts as unusable - an unreachable broker is not evidence the
 credential works. Decision is `mqtt.RecoveryPathUsable(enabled, err)`,
-tested in `recovery_guard_test.go`. A disabled client stays listed by
+tested in `recovery_guard_test.go`. The same verdict feeds the refusal
+gate in the next section. A disabled client stays listed by
 `listClients` and keeps its password, so presence is not evidence it
 can connect; only the `disabled` flag is.
 
@@ -890,6 +892,26 @@ listener (port 8883). The split keeps mTLS optional during the
 multi-tenant rollout but mandatory for any device that has a cert.
 
 Source: `pkg/web/admin_pair.go`, `pkg/mqtt/dynsec.go`.
+
+### Revoke and delete refuse to strand a paired device
+
+A paired device walked off mTLS needs the shared fallback credential to get
+back onto the broker. Single delete, bulk delete and revoke all probe that
+credential first (`recoveryPath`) and, for a paired device with
+an unusable path, refuses before the certificate is touched. The operator
+can override with `accept_serial_recovery=true`, which is logged; the
+override exists because the fallback credential was removed from the broker
+and portal re-enrollment is not shipped yet, so serial recovery is the only
+route back. Everything after the committed revoke runs on
+`context.WithoutCancel` with a timeout per step, the audit row included,
+and an enrollment reset that fails is surfaced on the redirect (a `sealed`
+count on bulk), never reported as success. `serial_recovery_accepted` is
+recorded only when the override did the work: a paired device, no usable
+path, box ticked. An unpaired device passes the gate with nothing recorded.
+
+How enforced: `destructiveAllowed` (`pkg/web/admin_devices_bulk.go`) is the
+one gate, unit-tested for all eight input shapes; `recoveryGate` is the
+only way a single-device handler reaches it.
 
 ### CLI responses are read from `cli_response` only
 
