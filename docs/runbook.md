@@ -75,7 +75,7 @@ Assume broker credentials and/or the dynsec store are untrusted.
    - Re-poke (works for `dead` and `none`): `UPDATE device_alerts SET delivery_status='pending', delivery_attempts=0, next_attempt_at=now() WHERE id = <alert-id>;` - the sweeper (every `THESADA_ALERT_REDISPATCH_INTERVAL`, default 1m) picks it up.
    - `delivered` but nothing arrived - the send was handed off (SMTP accepted / Telegram 200); chase the provider side (spam folder, greylisting).
 3. Alert row missing entirely: search logs for `alert.ingest.dead_letter` - the insert failed after retries and the line carries the full payload for manual replay; also check the firmware side published at all.
-4. Delivery works but repeats: retained alert replay on reconnect is a known gap (no dedup key) - see [`failure-modes/alerts.md`](failure-modes/alerts.md).
+4. Delivery works but repeats: retained alerts are dropped and the same payload inside 10 minutes is refused (`alert dropped, duplicate within window` at debug). A repeat past that is the device publishing again; check its rule cooldown. See [`failure-modes/alerts.md`](failure-modes/alerts.md).
 
 ---
 

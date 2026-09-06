@@ -4,7 +4,7 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-09-05 (revoke and delete gate on the recovery path; legacy cli/response tap removed. Prior: device CLI pulls gated on pairing state; hands-off
+Dated 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
 recovery refuses to run when the shared fallback credential is not
 connectable; unauthenticated device enrollment surface; device-facing
 enrollment endpoints address the row by its primary key and the claim
@@ -912,6 +912,22 @@ path, box ticked. An unpaired device passes the gate with nothing recorded.
 How enforced: `destructiveAllowed` (`pkg/web/admin_devices_bulk.go`) is the
 one gate, unit-tested for all eight input shapes; `recoveryGate` is the
 only way a single-device handler reaches it.
+### Retained MQTT deliveries are never acted on as live
+
+A retained flag on delivery means the broker replayed a device's last
+publish to a fresh subscription, which is every app restart. Nothing treats
+that as the device talking: `handleInfo` skips drift work on a retained
+`info` (the pull would race a device that has not reconnected yet),
+`handleAlert` neither stores nor notifies a retained alert, and the CLI
+response tap drops a retained reply. Separately, `InsertAlert` refuses the
+same JSON payload from the same device inside a 10 minute window, so QoS 1
+redelivery after a reconnect cannot notify twice; the insert retry treats
+that refusal as "already stored" and leaves delivery to the redispatch
+sweeper.
+
+How enforced: the retained flag is checked at the top of each handler in
+`pkg/mqtt/mqtt_ingest.go` and in `tapCLIResponses`; the dedup window is an
+integration test on `AlertService`.
 
 ### CLI responses are read from `cli_response` only
 
