@@ -133,3 +133,27 @@ func TestDestructiveAllowed_RefusesOnlyPairedUnusableNoOverride(t *testing.T) {
 		}
 	}
 }
+
+// Acceptance is recorded only when the override was what let the operation
+// through: paired, unusable, ticked. Nothing else counts.
+func TestSerialRecoveryAccepted_OnlyWhenOverrideDidTheWork(t *testing.T) {
+	usable := recoveryVerdict{usable: true}
+	broken := recoveryVerdict{reason: "disabled"}
+	cases := []struct {
+		name     string
+		paired   bool
+		v        recoveryVerdict
+		override bool
+		want     bool
+	}{
+		{"unpaired, broken path, no tick", false, broken, false, false},
+		{"unpaired, broken path, ticked anyway", false, broken, true, false},
+		{"paired, usable path, ticked anyway", true, usable, true, false},
+		{"paired, broken path, ticked", true, broken, true, true},
+	}
+	for _, c := range cases {
+		if got := serialRecoveryAccepted(c.paired, c.v, c.override); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}

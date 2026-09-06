@@ -243,10 +243,13 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 		case cascadeOKSealed:
 			sealed++
 		}
-		s.audit(auditCtx, user, authz.DeviceDelete, service.AuditEntry{
+		rowCtx, rowCancel := context.WithTimeout(auditCtx, auditTimeout)
+		s.audit(rowCtx, user, authz.DeviceDelete, service.AuditEntry{
 			TargetType: "device", TargetID: p.device.ID.String(), TenantID: p.device.TenantID,
-			Detail: auditDetail(map[string]any{"device_id": p.device.DeviceID, "bulk": true}, v),
+			Detail: auditDetail(map[string]any{"device_id": p.device.DeviceID, "bulk": true},
+				serialRecoveryAccepted(p.device.PairedAt != nil, v, override)),
 		})
+		rowCancel()
 		ok++
 	}
 	slog.Info("admin bulk delete dispatched",
@@ -305,37 +308,51 @@ func acceptSerialRecovery(r *http.Request) bool {
 	return r.PostFormValue("accept_serial_recovery") == "true"
 }
 
+// serialRecoveryAccepted is true only when the override did the work: a
+// paired device, no usable path, and the operator ticked the box. An unpaired
+// device passes the gate without any acceptance, so nothing is recorded.
+// in: device is paired, verdict, override. out: accepted.
+func serialRecoveryAccepted(paired bool, v recoveryVerdict, override bool) bool {
+	return paired && !v.usable && override
+}
+
 // recoveryGate runs the probe and the gate for one device on a single-device
 // handler, writes the refusal redirect itself, and logs an accepted override.
 // in: writer, request, device, op ("delete"|"revoke"), redirect base on
-// refusal. out: verdict for the caller's later steps, proceed.
-func (s *Server) recoveryGate(w http.ResponseWriter, r *http.Request, device *service.Device, op, dest string) (recoveryVerdict, bool) {
+// refusal. out: verdict, override accepted, proceed.
+func (s *Server) recoveryGate(w http.ResponseWriter, r *http.Request, device *service.Device, op, dest string) (recoveryVerdict, bool, bool) {
 	v := s.recoveryPath(r.Context())
 	override := acceptSerialRecovery(r)
 	user := authmw.CurrentUser(r)
-	if !destructiveAllowed(device.PairedAt != nil, v.usable, override) {
+	paired := device.PairedAt != nil
+	if !destructiveAllowed(paired, v.usable, override) {
 		slog.Warn("device."+op+".refused", "reason", "recovery_path_unusable",
 			"user", user.Email, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason)
 		http.Redirect(w, r, dest+"?error="+url.QueryEscape(
 			op+" refused: "+v.reason+". Tick accept serial recovery to "+op+" anyway"),
 			http.StatusFound)
-		return v, false
+		return v, false, false
 	}
-	if !v.usable {
+	accepted := serialRecoveryAccepted(paired, v, override)
+	if accepted {
 		slog.Warn("device."+op+".serial_recovery_accepted",
 			"user", user.Email, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason)
 	}
-	return v, true
+	return v, accepted, true
 }
 
-// auditDetail adds the override marker to an audit row when it was used.
-// in: base detail, verdict. out: detail.
-func auditDetail(detail map[string]any, v recoveryVerdict) map[string]any {
-	if !v.usable {
+// auditDetail marks an audit row when the override did the work.
+// in: base detail, accepted. out: detail.
+func auditDetail(detail map[string]any, accepted bool) map[string]any {
+	if accepted {
 		detail["serial_recovery_accepted"] = true
 	}
 	return detail
 }
+
+// auditTimeout bounds one audit write after a committed mutation: the row
+// must outlive the request, not a database outage.
+const auditTimeout = 10 * time.Second
 
 // preemptiveCertClear walks an online paired device through a hands-off
 // recovery state before the delete cascade revokes broker-side state.
@@ -462,12 +479,13 @@ const (
 // cancellation. Mirrors handleAdminDeviceDelete minus the confirm gate.
 // in: ctx, operator email, device, probe verdict, operator override. out: verdict.
 func (s *Server) cascadeDeleteOne(ctx context.Context, opEmail string, device *service.Device, v recoveryVerdict, override bool) cascadeVerdict {
-	if !destructiveAllowed(device.PairedAt != nil, v.usable, override) {
+	paired := device.PairedAt != nil
+	if !destructiveAllowed(paired, v.usable, override) {
 		slog.Warn("device.delete.refused", "reason", "recovery_path_unusable",
 			"user", opEmail, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason, "bulk", true)
 		return cascadeRefused
 	}
-	if !v.usable {
+	if serialRecoveryAccepted(paired, v, override) {
 		slog.Warn("device.delete.serial_recovery_accepted",
 			"user", opEmail, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason, "bulk", true)
 	}

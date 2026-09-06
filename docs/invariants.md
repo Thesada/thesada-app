@@ -903,9 +903,11 @@ can override with `accept_serial_recovery=true`, which is logged; the
 override exists because the fallback credential was removed from the broker
 and portal re-enrollment is not shipped yet, so serial recovery is the only
 route back. Everything after the committed revoke runs on
-`context.WithoutCancel`, including the audit row, and an enrollment reset
-that fails is surfaced on the redirect (a `sealed` count on bulk), never
-reported as success.
+`context.WithoutCancel` with a timeout per step, the audit row included,
+and an enrollment reset that fails is surfaced on the redirect (a `sealed`
+count on bulk), never reported as success. `serial_recovery_accepted` is
+recorded only when the override did the work: a paired device, no usable
+path, box ticked. An unpaired device passes the gate with nothing recorded.
 
 How enforced: `destructiveAllowed` (`pkg/web/admin_devices_bulk.go`) is the
 one gate, unit-tested for all eight input shapes; `recoveryGate` is the

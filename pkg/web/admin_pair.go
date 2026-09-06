@@ -607,7 +607,7 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	// Recovery gate, same rule as delete.
-	v, proceed := s.recoveryGate(w, r, device, "revoke", "/admin/devices/pair")
+	v, accepted, proceed := s.recoveryGate(w, r, device, "revoke", "/admin/devices/pair")
 	if !proceed {
 		return
 	}
@@ -618,9 +618,11 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 	}
 	// Committed. The rest must survive a disconnecting browser.
 	ctx := context.WithoutCancel(r.Context())
-	s.audit(ctx, authmw.CurrentUser(r), authz.CertRevoke, service.AuditEntry{
+	auditCtx, auditCancel := context.WithTimeout(ctx, auditTimeout)
+	defer auditCancel()
+	s.audit(auditCtx, authmw.CurrentUser(r), authz.CertRevoke, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
-		Detail: auditDetail(map[string]any{"device_id": device.DeviceID}, v),
+		Detail: auditDetail(map[string]any{"device_id": device.DeviceID}, accepted),
 	})
 
 	// Best-effort transition the online device into password-mode recovery

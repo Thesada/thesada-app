@@ -74,7 +74,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 
 	// Recovery gate: no stranding a paired device unless the operator takes
 	// the serial recovery on themselves.
-	v, proceed := s.recoveryGate(w, r, device, "delete", "/admin/devices")
+	v, accepted, proceed := s.recoveryGate(w, r, device, "delete", "/admin/devices")
 	if !proceed {
 		return
 	}
@@ -178,9 +178,11 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 
 	slog.Info("device deleted",
 		"user", user.Email, "device", device.DeviceID, "tenant", device.TenantID, "pk", device.ID)
-	s.audit(ctx, user, authz.DeviceDelete, service.AuditEntry{
+	auditCtx, auditCancel := context.WithTimeout(ctx, auditTimeout)
+	defer auditCancel()
+	s.audit(auditCtx, user, authz.DeviceDelete, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
-		Detail: auditDetail(map[string]any{"device_id": device.DeviceID}, v),
+		Detail: auditDetail(map[string]any{"device_id": device.DeviceID}, accepted),
 	})
 
 	if enrollErr != nil {
