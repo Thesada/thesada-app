@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -217,6 +218,13 @@ func validSnapshotContent(path, content string) bool {
 func truncForLog(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	if n <= 0 {
+		return "..."
+	}
+	// Truncate on a rune boundary so multi-byte UTF-8 is never split.
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "..."
 }
