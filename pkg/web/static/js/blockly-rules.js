@@ -76,7 +76,7 @@ var ThesadaRules = (function () {
       },
     };
     Blockly.Lua["thesada_rules_root"] = function (block) {
-      return PREAMBLE + (Blockly.Lua.statementToCode(block, "BODY") || "");
+      return Blockly.Lua.statementToCode(block, "BODY") || "";
     };
 
     Blockly.Blocks["thesada_on_sensor"] = {
@@ -283,23 +283,18 @@ var ThesadaRules = (function () {
       init: function () {
         this.appendDummyInput()
           .appendField("notify")
-          .appendField(new Blockly.FieldTextInput("alert"), "MSG")
-          .appendField("key")
-          .appendField(new Blockly.FieldTextInput("alert"), "KEY");
+          .appendField(new Blockly.FieldTextInput("alert"), "MSG");
         this.setPreviousStatement(true, null);
         this.setNextStatement(true, null);
         this.setColour(0);
-        this.setTooltip("Log + Telegram + MQTT alert (starts cooldown)");
+        this.setTooltip(
+          "Log + Telegram + MQTT alert; uses enclosing condition key for cooldown"
+        );
       },
     };
     Blockly.Lua["thesada_notify"] = function (block) {
-      return (
-        'notify("' +
-        esc(block.getFieldValue("MSG")) +
-        '", "' +
-        esc(block.getFieldValue("KEY")) +
-        '")\n'
-      );
+      // Ambient `key` from the enclosing condition (same as can_alert/set_cooldown).
+      return 'notify("' + esc(block.getFieldValue("MSG")) + '", key)\n';
     };
 
     Blockly.Blocks["thesada_notify_temp"] = {
@@ -310,13 +305,13 @@ var ThesadaRules = (function () {
         this.setPreviousStatement(true, null);
         this.setNextStatement(true, null);
         this.setColour(0);
-        this.setTooltip("Uses s.name / s.temp / unit from the temperature loop");
+        this.setTooltip("Uses s.name / s.temp_c / unit from the temperature loop");
       },
     };
     Blockly.Lua["thesada_notify_temp"] = function (block) {
       var suffix = esc(block.getFieldValue("SUFFIX"));
       return (
-        'notify(s.name .. ": " .. s.temp .. unit .. " - ' +
+        'notify(s.name .. ": " .. s.temp_c .. unit .. " - ' +
         suffix +
         '", key)\n'
       );
@@ -368,7 +363,6 @@ var ThesadaRules = (function () {
 
     var nBatt = workspace.newBlock("thesada_notify");
     nBatt.setFieldValue("Battery low", "MSG");
-    nBatt.setFieldValue("battery_low", "KEY");
     nBatt.initSvg();
     nBatt.render();
     ifBatt.getInput("DO").connection.connect(nBatt.previousConnection);
@@ -403,7 +397,7 @@ var ThesadaRules = (function () {
       if (Array.isArray(code)) code = code[0];
       if (code) out.push(code);
     }
-    return out.join("\n").replace(/\n+$/, "\n");
+    return (PREAMBLE + out.join("\n")).replace(/\n+$/, "\n");
   }
 
   return { init: init, generateLua: generateLua, seedWorkspace: seedWorkspace };

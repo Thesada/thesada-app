@@ -52,7 +52,6 @@
   <category name="Actions" colour="0">
     <block type="thesada_notify">
       <field name="MSG">alert</field>
-      <field name="KEY">alert</field>
     </block>
     <block type="thesada_notify_temp">
       <field name="SUFFIX">Overheat!</field>
@@ -126,12 +125,21 @@
       return fetch("/admin/devices/" + deviceID + "/config/cmd/result?id=" + encodeURIComponent(requestID), {
         headers: {"X-CSRF-Token": csrfToken}
       }).then(parseJSON).then(function(res) {
-        if (res.status === "done" || res.status === "error" || res.status === "timeout") return res;
+        if (res.status === "done" || res.status === "error" ||
+            res.status === "timeout" || res.status === "expired") return res;
         if (Date.now() > deadline) throw new Error("poll timeout");
         return new Promise(function(r) { setTimeout(r, 500); }).then(once);
       });
     }
     return once();
+  }
+
+  function assertDeviceOK(res, fallback) {
+    if (res.status === "done" && res.response && res.response.ok === true) return;
+    throw new Error(
+      (res.response && res.response.output && res.response.output.join(" ")) ||
+      res.error || res.status || fallback
+    );
   }
 
   var workspace = ThesadaRules.init({
@@ -158,9 +166,7 @@
     postWrite("/scripts/rules.lua", lua).then(function(enq) {
       return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds);
     }).then(function(res) {
-      if (res.status !== "done" || res.ok === false) {
-        throw new Error((res.output && res.output.join(" ")) || res.status || "write failed");
-      }
+      assertDeviceOK(res, "write failed");
       if (!thenReload) {
         status("rules.lua pushed — run lua.reload to apply", true);
         return null;
@@ -171,7 +177,7 @@
       });
     }).then(function(res) {
       if (!res) return;
-      if (res.status !== "done") throw new Error(res.status || "reload failed");
+      assertDeviceOK(res, "reload failed");
       status("rules.lua pushed and reloaded", true);
     }).catch(function(err) {
       status(String(err.message || err), false);
@@ -190,7 +196,7 @@
     postCmd("lua.reload", "").then(function(enq) {
       return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds);
     }).then(function(res) {
-      if (res.status !== "done") throw new Error(res.status || "reload failed");
+      assertDeviceOK(res, "reload failed");
       status("lua.reload ok", true);
     }).catch(function(err) {
       status(String(err.message || err), false);
