@@ -164,6 +164,9 @@
     if (!lua || !lua.trim()) { status("nothing to push", false); return; }
     statusPending("pushing /scripts/rules.lua…");
     postWrite("/scripts/rules.lua", lua).then(function(enq) {
+      if (!enq.request_id) {
+        throw new Error("enqueue failed: " + JSON.stringify(enq));
+      }
       return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds);
     }).then(function(res) {
       assertDeviceOK(res, "write failed");
@@ -173,6 +176,9 @@
       }
       statusPending("lua.reload…");
       return postCmd("lua.reload", "").then(function(enq2) {
+        if (!enq2.request_id) {
+          throw new Error("enqueue failed: " + JSON.stringify(enq2));
+        }
         return pollResult(enq2.request_id, enq2.timeout_seconds || cliTimeoutSeconds);
       });
     }).then(function(res) {
@@ -194,6 +200,9 @@
   document.getElementById("btn-reload").addEventListener("click", function() {
     statusPending("lua.reload…");
     postCmd("lua.reload", "").then(function(enq) {
+      if (!enq.request_id) {
+        throw new Error("enqueue failed: " + JSON.stringify(enq));
+      }
       return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds);
     }).then(function(res) {
       assertDeviceOK(res, "reload failed");

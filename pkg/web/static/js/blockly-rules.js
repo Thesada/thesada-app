@@ -92,7 +92,7 @@ var ThesadaRules = (function () {
             "EVENT"
           )
           .appendField("updates");
-        this.appendStatementInput("DO").setCheck(null);
+        this.appendStatementInput("DO").setCheck("ThesadaCondition");
         this.setPreviousStatement(true, null);
         this.setNextStatement(true, null);
         this.setColour(20);
@@ -140,9 +140,12 @@ var ThesadaRules = (function () {
             ]),
             "SUSTAIN"
           );
-        this.appendStatementInput("DO").setCheck(null);
-        this.setPreviousStatement(true, null);
-        this.setNextStatement(true, null);
+        this.appendStatementInput("DO").setCheck([
+          "ThesadaTempAction",
+          "ThesadaAction",
+        ]);
+        this.setPreviousStatement(true, "ThesadaCondition");
+        this.setNextStatement(true, "ThesadaCondition");
         this.setColour(210);
         this.setTooltip("Named temperature threshold; optional sustain + clear");
       },
@@ -153,17 +156,15 @@ var ThesadaRules = (function () {
       var thresh = Number(block.getFieldValue("THRESH"));
       var sustain = block.getFieldValue("SUSTAIN") === "YES";
       var branch = Blockly.Lua.statementToCode(block, "DO") || "";
+      var keyLit = "temp:" + sensor + ":" + op + thresh;
       if (sustain) {
         return (
           "for _, s in ipairs(data.sensors) do\n" +
           '  if s.name == "' +
           sensor +
           '" then\n' +
-          '    local key = "temp:' +
-          sensor +
-          ":" +
-          op +
-          thresh +
+          '    local key = "' +
+          keyLit +
           '"\n' +
           "    if s.temp_c ~= nil and s.temp_c " +
           op +
@@ -189,6 +190,9 @@ var ThesadaRules = (function () {
         " " +
         thresh +
         " then\n" +
+        '    local key = "' +
+        keyLit +
+        '"\n' +
         branch +
         "  end\n" +
         "end\n"
@@ -211,9 +215,9 @@ var ThesadaRules = (function () {
           .appendField("A for")
           .appendField(new Blockly.FieldNumber(5, 1, 60, 1), "COUNT")
           .appendField("readings");
-        this.appendStatementInput("DO").setCheck(null);
-        this.setPreviousStatement(true, null);
-        this.setNextStatement(true, null);
+        this.appendStatementInput("DO").setCheck("ThesadaAction");
+        this.setPreviousStatement(true, "ThesadaCondition");
+        this.setNextStatement(true, "ThesadaCondition");
         this.setColour(160);
       },
     };
@@ -223,27 +227,30 @@ var ThesadaRules = (function () {
       var thresh = Number(block.getFieldValue("THRESH"));
       var count = Number(block.getFieldValue("COUNT")) || 5;
       var branch = Blockly.Lua.statementToCode(block, "DO") || "";
+      var keyLit = "current:" + ch + ":" + op + thresh + ":" + count;
       return (
         "for _, ch in ipairs(data.channels) do\n" +
-        '  local key = "current:" .. ch.name\n' +
         '  if ch.name == "' +
         ch +
-        '" and ch.current_a ~= nil and ch.current_a ' +
+        '" then\n' +
+        '    local key = "' +
+        keyLit +
+        '"\n' +
+        "    if ch.current_a ~= nil and ch.current_a " +
         op +
         " " +
         thresh +
         " then\n" +
-        "    sustain[key] = (sustain[key] or 0) + 1\n" +
-        "    if sustain[key] >= " +
+        "      sustain[key] = (sustain[key] or 0) + 1\n" +
+        "      if sustain[key] >= " +
         count +
         " and can_alert(key) then\n" +
         branch +
+        "        sustain[key] = 0\n" +
+        "      end\n" +
+        "    else\n" +
         "      sustain[key] = 0\n" +
         "    end\n" +
-        "  else\n" +
-        '    if ch.name == "' +
-        ch +
-        '" then sustain[key] = 0 end\n' +
         "  end\n" +
         "end\n"
       );
@@ -255,9 +262,9 @@ var ThesadaRules = (function () {
           .appendField("if battery ≤")
           .appendField(new Blockly.FieldNumber(20, 0, 100, 1), "PCT")
           .appendField("% and not charging");
-        this.appendStatementInput("DO").setCheck(null);
-        this.setPreviousStatement(true, null);
-        this.setNextStatement(true, null);
+        this.appendStatementInput("DO").setCheck("ThesadaAction");
+        this.setPreviousStatement(true, "ThesadaCondition");
+        this.setNextStatement(true, "ThesadaCondition");
         this.setColour(45);
       },
     };
@@ -284,8 +291,8 @@ var ThesadaRules = (function () {
         this.appendDummyInput()
           .appendField("notify")
           .appendField(new Blockly.FieldTextInput("alert"), "MSG");
-        this.setPreviousStatement(true, null);
-        this.setNextStatement(true, null);
+        this.setPreviousStatement(true, "ThesadaAction");
+        this.setNextStatement(true, "ThesadaAction");
         this.setColour(0);
         this.setTooltip(
           "Log + Telegram + MQTT alert; uses enclosing condition key for cooldown"
@@ -302,16 +309,19 @@ var ThesadaRules = (function () {
         this.appendDummyInput()
           .appendField("notify sensor reading +")
           .appendField(new Blockly.FieldTextInput("Overheat!"), "SUFFIX");
-        this.setPreviousStatement(true, null);
-        this.setNextStatement(true, null);
+        this.setPreviousStatement(true, "ThesadaTempAction");
+        this.setNextStatement(true, ["ThesadaTempAction", "ThesadaAction"]);
         this.setColour(0);
-        this.setTooltip("Uses s.name / s.temp_c / unit from the temperature loop");
+        this.setTooltip(
+          "Uses s.name / s.temp_c from the temperature loop; converts to Config unit"
+        );
       },
     };
     Blockly.Lua["thesada_notify_temp"] = function (block) {
       var suffix = esc(block.getFieldValue("SUFFIX"));
       return (
-        'notify(s.name .. ": " .. s.temp_c .. unit .. " - ' +
+        'local t = (unit == "F") and (s.temp_c * 9 / 5 + 32) or s.temp_c\n' +
+        'notify(s.name .. ": " .. t .. unit .. " - ' +
         suffix +
         '", key)\n'
       );
