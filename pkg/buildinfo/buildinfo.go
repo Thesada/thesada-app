@@ -1,7 +1,7 @@
 // Package buildinfo exposes build-time metadata injected via -ldflags so
-// runtime code (admin debug page, /healthz, logs) can report what version
-// of thesada-app is actually running. Defaults are "dev" so `go run` and
-// `go test` still produce sensible output without ldflags.
+// runtime code (admin debug page, /api/v1/version, logs) can report what
+// version of thesada-app is actually running. Defaults are "dev" so `go run`
+// and `go test` still produce sensible output without ldflags.
 package buildinfo
 
 import (
