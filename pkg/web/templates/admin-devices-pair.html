@@ -61,6 +61,10 @@
                   onsubmit="return confirm('Revoke cert + push cert.clear to {{.Device.DeviceID}}?')">
               <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
               <button class="text-xs px-2 py-1 rounded bg-rose-600 text-white hover:bg-rose-700">Revoke</button>
+              <label class="text-xs text-slate-500 flex items-center gap-1"
+                     title="Proceed even if the device cannot get back onto the broker by itself. You will recover it over serial.">
+                <input type="checkbox" name="accept_serial_recovery" value="true"> accept serial recovery
+              </label>
             </form>
           {{else}}
             <form method="POST" action="/admin/devices/{{.Device.ID}}/pair/issue"
@@ -76,6 +80,10 @@
             <input type="hidden" name="confirm_device_id" value="">
             <button class="text-xs px-2 py-1 rounded bg-rose-800 text-white hover:bg-rose-900"
                     title="Delete device + cascade">Delete</button>
+            <label class="text-xs text-slate-500 flex items-center gap-1"
+                   title="Proceed even if the device cannot get back onto the broker by itself. You will recover it over serial.">
+              <input type="checkbox" name="accept_serial_recovery" value="true"> accept serial recovery
+            </label>
           </form>
           </div>
         </td>

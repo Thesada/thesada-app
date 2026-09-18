@@ -4,7 +4,7 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-08-20 (device CLI pulls gated on pairing state; hands-off
+Dated 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
 recovery refuses to run when the shared fallback credential is not
 connectable; unauthenticated device enrollment surface; device-facing
 enrollment endpoints address the row by its primary key and the claim
@@ -156,11 +156,13 @@ shared fallback credential. If that credential is disabled at the
 broker, the device reboots into a broker that refuses it and needs
 physical serial recovery.
 
-How enforced: the sequence probes `getClient` for the configured
-fallback user first and aborts unless it is enabled. A probe error
-counts as unusable - an unreachable broker is not evidence the
+How enforced: the handler probes `getClient` for the configured
+fallback user once per request (`recoveryPath`) and hands the verdict to
+`preemptiveCertClear`, which skips the sequence when it is not usable. A
+probe error counts as unusable - an unreachable broker is not evidence the
 credential works. Decision is `mqtt.RecoveryPathUsable(enabled, err)`,
-tested in `recovery_guard_test.go`. A disabled client stays listed by
+tested in `recovery_guard_test.go`. The same verdict feeds the refusal
+gate in the next section. A disabled client stays listed by
 `listClients` and keeps its password, so presence is not evidence it
 can connect; only the `disabled` flag is.
 
@@ -891,17 +893,50 @@ multi-tenant rollout but mandatory for any device that has a cert.
 
 Source: `pkg/web/admin_pair.go`, `pkg/mqtt/dynsec.go`.
 
-### CLI responses are read from both topic generations
+### Revoke and delete refuse to strand a paired device
 
-Firmware publishes CLI responses to `<prefix>/cli_response`; firmware from
-before the topic split publishes to `<prefix>/cli/response`. `tapCLIResponses`
-subscribes to both for every request, so a device on either side answers at
-full speed and no fleet state needs a timeout to discover. A device publishes
-on exactly one of them - the firmware does not dual-publish.
+A paired device walked off mTLS needs the shared fallback credential to get
+back onto the broker. Single delete, bulk delete and revoke all probe that
+credential first (`recoveryPath`) and, for a paired device with
+an unusable path, refuses before the certificate is touched. The operator
+can override with `accept_serial_recovery=true`, which is logged; the
+override exists because the fallback credential was removed from the broker
+and portal re-enrollment is not shipped yet, so serial recovery is the only
+route back. Everything after the committed revoke runs on
+`context.WithoutCancel` with a timeout per step, the audit row included,
+and an enrollment reset that fails is surfaced on the redirect (a `sealed`
+count on bulk), never reported as success. `serial_recovery_accepted` is
+recorded only when the override did the work: a paired device, no usable
+path, box ticked. An unpaired device passes the gate with nothing recorded.
 
-This is why the platform must be deployed BEFORE firmware carrying the split:
-old firmware works against a new platform, but new firmware against an old
-platform goes mute on CLI.
+How enforced: `destructiveAllowed` (`pkg/web/admin_devices_bulk.go`) is the
+one gate, unit-tested for all eight input shapes; `recoveryGate` is the
+only way a single-device handler reaches it.
+### Retained MQTT deliveries are never acted on as live
+
+A retained flag on delivery means the broker replayed a device's last
+publish to a fresh subscription, which is every app restart. Nothing treats
+that as the device talking: `handleInfo` skips drift work on a retained
+`info` (the pull would race a device that has not reconnected yet),
+`handleAlert` neither stores nor notifies a retained alert, and the CLI
+response tap drops a retained reply. Separately, `InsertAlert` refuses the
+same JSON payload from the same device inside a 10 minute window, so QoS 1
+redelivery after a reconnect cannot notify twice; the insert retry treats
+that refusal as "already stored" and leaves delivery to the redispatch
+sweeper.
+
+How enforced: the retained flag is checked at the top of each handler in
+`pkg/mqtt/mqtt_ingest.go` and in `tapCLIResponses`; the dedup window is an
+integration test on `AlertService`.
+
+### CLI responses are read from `cli_response` only
+
+Firmware publishes CLI responses to `<prefix>/cli_response`, outside the
+`<prefix>/cli/#` wildcard a device subscribes to, so a device never receives
+its own responses. `tapCLIResponses` subscribes to that one topic. The
+pre-split `<prefix>/cli/response` is no longer read: every fielded device runs
+firmware at or past the split (26.08.0), and a device on older firmware would
+go mute on CLI against this platform.
 
 How enforced: every CLI topic is built by `pkg/mqtt/topics.go`; no topic
 literal is assembled at a call site, in `pkg/mqtt` or in the web handlers.

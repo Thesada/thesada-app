@@ -8,6 +8,9 @@
   Cross-tenant view. Move a device to a different tenant by picking a target and clicking reassign. <strong>You must update the on-device <code class="text-xs">mqtt.topic_prefix</code> separately</strong> - this form only touches the app-side row.
 </p>
 
+{{if .Flash}}<div class="mb-4 rounded-md bg-emerald-50 border border-emerald-200 p-3 text-sm text-emerald-800">{{.Flash}}</div>{{end}}
+{{if .FlashErr}}<div class="mb-4 rounded-md bg-rose-50 border border-rose-200 p-3 text-sm text-rose-800">{{.FlashErr}}</div>{{end}}
+
 <!-- Bulk form is empty + sits OUTSIDE the table. Per-row checkboxes,
      the action select, and the submit button reach back into it via
      the HTML5 `form="bulk-form"` attribute. This keeps the per-row
@@ -37,6 +40,10 @@
           class="text-xs px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 text-white">
     apply to selected
   </button>
+  <label class="text-xs text-slate-500 flex items-center gap-1"
+         title="Delete paired devices even if they cannot get back onto the broker by themselves. You will recover them over serial.">
+    <input type="checkbox" form="bulk-form" name="accept_serial_recovery" value="true"> accept serial recovery
+  </label>
 </div>
 
 <div class="bg-white border border-slate-200 rounded-xl overflow-x-auto">

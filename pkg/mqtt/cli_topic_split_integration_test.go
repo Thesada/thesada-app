@@ -1,8 +1,8 @@
 //go:build integration
 
-// CLI topic split: the app must get a response from a device whichever side of
-// the migration that device is on. Runs the real broker path so the topic
-// wiring is exercised, not mocked.
+// CLI topic split: the app must get exactly one response per request over the
+// real broker path, including when a device answers twice. Runs the real
+// broker so the topic wiring is exercised, not mocked.
 //
 //	go test -tags integration -run TestCLITopicSplit ./pkg/mqtt/...
 package mqtt
@@ -16,15 +16,14 @@ import (
 	"thesada.app/app/pkg/service/servicetest"
 )
 
-func TestCLITopicSplit_RespondsOnEitherTopic(t *testing.T) {
+func TestCLITopicSplit_OneResponsePerRequest(t *testing.T) {
 	cases := []struct {
 		name string
 		mode mqtttest.CLIResponseMode
 	}{
-		{"new firmware, new topic only", mqtttest.RespondNewOnly},
-		{"old firmware, legacy topic only", mqtttest.RespondLegacyOnly},
+		{"firmware answering once", mqtttest.RespondOnce},
 		// Not a fleet state - a duplicate-response robustness case.
-		{"device answering on both topics", mqtttest.RespondDual},
+		{"device answering twice", mqtttest.RespondDual},
 	}
 
 	for _, tc := range cases {

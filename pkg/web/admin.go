@@ -527,8 +527,10 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, r, "admin-devices.html", map[string]interface{}{
-		"Devices": devices,
-		"Tenants": tenants,
+		"Devices":  devices,
+		"Tenants":  tenants,
+		"Flash":    r.URL.Query().Get("ok"),
+		"FlashErr": r.URL.Query().Get("error"),
 	})
 }
 

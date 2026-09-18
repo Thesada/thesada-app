@@ -110,3 +110,50 @@ func TestAdminDevicesBulk_Delete_NoSelection(t *testing.T) {
 		t.Errorf("Location = %q, want error=no+devices+selected", loc)
 	}
 }
+
+// The recovery gate refuses exactly one shape: a paired device, no usable
+// path back onto the broker, and no operator override.
+func TestDestructiveAllowed_RefusesOnlyPairedUnusableNoOverride(t *testing.T) {
+	cases := []struct {
+		paired, usable, override, want bool
+	}{
+		{false, false, false, true},
+		{false, false, true, true},
+		{false, true, false, true},
+		{false, true, true, true},
+		{true, false, false, false},
+		{true, false, true, true},
+		{true, true, false, true},
+		{true, true, true, true},
+	}
+	for _, c := range cases {
+		if got := destructiveAllowed(c.paired, c.usable, c.override); got != c.want {
+			t.Errorf("destructiveAllowed(paired=%v usable=%v override=%v) = %v, want %v",
+				c.paired, c.usable, c.override, got, c.want)
+		}
+	}
+}
+
+// Acceptance is recorded only when the override was what let the operation
+// through: paired, unusable, ticked. Nothing else counts.
+func TestSerialRecoveryAccepted_OnlyWhenOverrideDidTheWork(t *testing.T) {
+	usable := recoveryVerdict{usable: true}
+	broken := recoveryVerdict{reason: "disabled"}
+	cases := []struct {
+		name     string
+		paired   bool
+		v        recoveryVerdict
+		override bool
+		want     bool
+	}{
+		{"unpaired, broken path, no tick", false, broken, false, false},
+		{"unpaired, broken path, ticked anyway", false, broken, true, false},
+		{"paired, usable path, ticked anyway", true, usable, true, false},
+		{"paired, broken path, ticked", true, broken, true, true},
+	}
+	for _, c := range cases {
+		if got := serialRecoveryAccepted(c.paired, c.v, c.override); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}

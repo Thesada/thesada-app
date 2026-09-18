@@ -8,6 +8,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/google/uuid"
@@ -71,6 +72,13 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 
 	user := authmw.CurrentUser(r)
 
+	// Recovery gate: no stranding a paired device unless the operator takes
+	// the serial recovery on themselves.
+	v, accepted, proceed := s.recoveryGate(w, r, device, "delete", "/admin/devices")
+	if !proceed {
+		return
+	}
+
 	// Step 0: walk an online paired device through hands-off recovery
 	// before the cascade revokes broker-side state. Sends three MQTT CLI
 	// commands (config.set mqtt.port 8883, cert.clear, restart) so the
@@ -78,7 +86,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	// ready to re-pair if the shared broker user is enabled. See
 	// preemptiveCertClear in admin_devices_bulk.go for the full rationale
 	// + ordering verified against sht31 on 2026-04-30.
-	preemptiveCertClear(r.Context(), s, device, "device delete")
+	preemptiveCertClear(r.Context(), s, device, "device delete", v.usable)
 
 	// Step 1: revoke cert. Load-bearing - if revoke fails we abort because
 	// the audit trail must reflect "operator chose to delete this" before
@@ -92,12 +100,16 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	if device.PairedAt != nil {
 		logPairStateChange(device, "paired", "revoked", user.Email, "device_delete")
 	}
+	// The revoke is committed. From here on a browser that disconnects must
+	// not abandon the cascade halfway, so drop request cancellation and keep
+	// the per-step timeouts as the bound.
+	ctx := context.WithoutCancel(r.Context())
 
 	// Step 2: dynsec teardown. Best-effort. Bound the time we wait so a
 	// broker outage can't pin the request handler.
 	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
 	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
-	dynsecCtx, dynsecCancel := context.WithTimeout(r.Context(), 10*time.Second)
+	dynsecCtx, dynsecCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer dynsecCancel()
 	if derr := s.mqtt.DeleteDynsecClient(dynsecCtx, cn); derr != nil {
 		slog.Warn("device delete: dynsec deleteClient failed",
@@ -113,7 +125,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	// <prefix>/info/retained_topics topic. Do this after dynsec
 	// teardown so the device cannot reconnect and republish mid-clear.
 	if device.MQTTTopicPrefix != nil && *device.MQTTTopicPrefix != "" {
-		retCtx, retCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		retCtx, retCancel := context.WithTimeout(ctx, 10*time.Second)
 		cleared, failed, rerr := s.mqtt.ClearDeviceRetained(retCtx, *device.MQTTTopicPrefix)
 		retCancel()
 		if rerr != nil {
@@ -136,7 +148,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Step 4: DELETE FROM devices. FK CASCADE handles dependents.
-	dbCtx, dbCancel := context.WithTimeout(r.Context(), 30*time.Second)
+	dbCtx, dbCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer dbCancel()
 	if err := s.services.Devices.DeleteByID(dbCtx, device.TenantID, device.ID); err != nil {
 		slog.Error("device delete: DB delete failed",
@@ -147,7 +159,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 
 	// Step 5: clear the enrollment rows so the hardware can enroll again. A
 	// deleted device that stays sealed is a device that needs manual SQL.
-	s.resetDeviceEnrollment(r.Context(), device.DeviceID, "device delete")
+	enrollErr := s.resetDeviceEnrollment(ctx, device.DeviceID, "device delete")
 
 	// Step 6: tombstone. Records the (tenant, device, prefix)
 	// so the MQTT ingest path drops retained replays at next app restart
@@ -157,19 +169,32 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	if device.MQTTTopicPrefix != nil {
 		tombPrefix = *device.MQTTTopicPrefix
 	}
-	if terr := s.services.Devices.Tombstone(r.Context(), device.TenantID, device.DeviceID, tombPrefix); terr != nil {
+	tombCtx, tombCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer tombCancel()
+	if terr := s.services.Devices.Tombstone(tombCtx, device.TenantID, device.DeviceID, tombPrefix); terr != nil {
 		slog.Warn("device delete: tombstone write failed",
 			"device", device.ID, "tenant", device.TenantID, "device_id", device.DeviceID, "err", terr)
 	}
 
 	slog.Info("device deleted",
 		"user", user.Email, "device", device.DeviceID, "tenant", device.TenantID, "pk", device.ID)
-	s.audit(r.Context(), user, authz.DeviceDelete, service.AuditEntry{
+	auditCtx, auditCancel := context.WithTimeout(ctx, auditTimeout)
+	defer auditCancel()
+	s.audit(auditCtx, user, authz.DeviceDelete, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
-		Detail: map[string]any{"device_id": device.DeviceID},
+		Detail: auditDetail(map[string]any{"device_id": device.DeviceID}, accepted),
 	})
 
+	if enrollErr != nil {
+		// Deleted, but the enrollment rows may still be sealed: the hardware
+		// cannot re-enroll under this id until they are cleared. Say so
+		// instead of reporting a clean success.
+		http.Redirect(w, r, "/admin/devices?ok=deleted+"+url.QueryEscape(device.DeviceID)+
+			"&error="+url.QueryEscape("enrollment reset failed for "+device.DeviceID+", re-enrollment stays blocked"),
+			http.StatusFound)
+		return
+	}
 	http.Redirect(w, r,
-		"/admin/devices?ok=deleted+"+device.DeviceID,
+		"/admin/devices?ok=deleted+"+url.QueryEscape(device.DeviceID),
 		http.StatusFound)
 }

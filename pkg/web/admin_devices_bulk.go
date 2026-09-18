@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -220,31 +222,137 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Second pass: cascade per device. Each step bounded so a single
-	// broker hiccup or DB hang doesn't pin the whole batch.
-	var ok, failed int
+	// broker hiccup or DB hang doesn't pin the whole batch. One recovery
+	// probe covers the batch; the gate is per device. Audit rows are written
+	// on a context that outlives the request: the revoke they record is
+	// already committed.
+	v := s.recoveryPath(r.Context())
+	override := acceptSerialRecovery(r)
+	auditCtx := context.WithoutCancel(r.Context())
+	var ok, failed, refused, sealed int
 	failed = lookupFailed
 	for _, p := range resolved {
-		if !s.cascadeDeleteOne(r.Context(), user.Email, p.device) {
+		verdict := s.cascadeDeleteOne(r.Context(), user.Email, p.device, v, override)
+		switch verdict {
+		case cascadeRefused:
+			refused++
+			continue
+		case cascadeFailed:
 			failed++
 			continue
+		case cascadeOKSealed:
+			sealed++
 		}
-		s.audit(r.Context(), user, authz.DeviceDelete, service.AuditEntry{
+		rowCtx, rowCancel := context.WithTimeout(auditCtx, auditTimeout)
+		s.audit(rowCtx, user, authz.DeviceDelete, service.AuditEntry{
 			TargetType: "device", TargetID: p.device.ID.String(), TenantID: p.device.TenantID,
-			Detail: map[string]any{"device_id": p.device.DeviceID, "bulk": true},
+			Detail: auditDetail(map[string]any{"device_id": p.device.DeviceID, "bulk": true},
+				serialRecoveryAccepted(p.device.PairedAt != nil, v, override)),
 		})
+		rowCancel()
 		ok++
 	}
 	slog.Info("admin bulk delete dispatched",
 		"user", user.Email,
 		"tenants", len(tenants),
 		"cross_tenant", len(tenants) > 1,
-		"ok", ok, "failed", failed, "total", len(ids))
+		"ok", ok, "failed", failed, "refused", refused, "sealed", sealed, "total", len(ids))
 
-	http.Redirect(w, r,
-		"/admin/devices?ok=deleted+"+strconv.Itoa(ok)+
-			"&failed="+strconv.Itoa(failed),
-		http.StatusFound)
+	target := "/admin/devices?ok=deleted+" + strconv.Itoa(ok) + "&failed=" + strconv.Itoa(failed)
+	var problems []string
+	if refused > 0 {
+		problems = append(problems, strconv.Itoa(refused)+" paired device(s) refused: "+v.reason+
+			". Tick accept serial recovery to delete anyway")
+	}
+	if sealed > 0 {
+		problems = append(problems, strconv.Itoa(sealed)+" deleted but enrollment reset failed, re-enrollment stays blocked")
+	}
+	if len(problems) > 0 {
+		target += "&error=" + url.QueryEscape(strings.Join(problems, "; "))
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }
+
+// recoveryVerdict is one probe of the shared fallback credential.
+type recoveryVerdict struct {
+	usable bool
+	reason string // operator-facing, set when not usable
+}
+
+// recoveryPath probes whether a device walked off mTLS could get back onto
+// the broker on the shared fallback credential. One probe per request.
+// in: ctx. out: verdict.
+func (s *Server) recoveryPath(ctx context.Context) recoveryVerdict {
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	enabled, err := s.mqtt.DynsecClientEnabled(probeCtx, s.cfg.MQTTDeviceFallbackUser)
+	if mqtt.RecoveryPathUsable(enabled, err) {
+		return recoveryVerdict{usable: true}
+	}
+	if err != nil {
+		return recoveryVerdict{reason: "fallback credential " + s.cfg.MQTTDeviceFallbackUser + " unreachable: " + err.Error()}
+	}
+	return recoveryVerdict{reason: "fallback credential " + s.cfg.MQTTDeviceFallbackUser + " is disabled at the broker"}
+}
+
+// destructiveAllowed refuses exactly one shape: a paired device, no usable
+// path back onto the broker, no operator override.
+// in: device is paired, recovery path usable, operator override. out: proceed.
+func destructiveAllowed(paired, usable, override bool) bool {
+	return !paired || usable || override
+}
+
+// acceptSerialRecovery reads the operator override from the form.
+// in: request. out: override set.
+func acceptSerialRecovery(r *http.Request) bool {
+	return r.PostFormValue("accept_serial_recovery") == "true"
+}
+
+// serialRecoveryAccepted is true only when the override did the work: a
+// paired device, no usable path, and the operator ticked the box. An unpaired
+// device passes the gate without any acceptance, so nothing is recorded.
+// in: device is paired, verdict, override. out: accepted.
+func serialRecoveryAccepted(paired bool, v recoveryVerdict, override bool) bool {
+	return paired && !v.usable && override
+}
+
+// recoveryGate runs the probe and the gate for one device on a single-device
+// handler, writes the refusal redirect itself, and logs an accepted override.
+// in: writer, request, device, op ("delete"|"revoke"), redirect base on
+// refusal. out: verdict, override accepted, proceed.
+func (s *Server) recoveryGate(w http.ResponseWriter, r *http.Request, device *service.Device, op, dest string) (recoveryVerdict, bool, bool) {
+	v := s.recoveryPath(r.Context())
+	override := acceptSerialRecovery(r)
+	user := authmw.CurrentUser(r)
+	paired := device.PairedAt != nil
+	if !destructiveAllowed(paired, v.usable, override) {
+		slog.Warn("device."+op+".refused", "reason", "recovery_path_unusable",
+			"user", user.Email, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason)
+		http.Redirect(w, r, dest+"?error="+url.QueryEscape(
+			op+" refused: "+v.reason+". Tick accept serial recovery to "+op+" anyway"),
+			http.StatusFound)
+		return v, false, false
+	}
+	accepted := serialRecoveryAccepted(paired, v, override)
+	if accepted {
+		slog.Warn("device."+op+".serial_recovery_accepted",
+			"user", user.Email, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason)
+	}
+	return v, accepted, true
+}
+
+// auditDetail marks an audit row when the override did the work.
+// in: base detail, accepted. out: detail.
+func auditDetail(detail map[string]any, accepted bool) map[string]any {
+	if accepted {
+		detail["serial_recovery_accepted"] = true
+	}
+	return detail
+}
+
+// auditTimeout bounds one audit write after a committed mutation: the row
+// must outlive the request, not a database outage.
+const auditTimeout = 10 * time.Second
 
 // preemptiveCertClear walks an online paired device through a hands-off
 // recovery state before the delete cascade revokes broker-side state.
@@ -284,25 +392,21 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 // WiFi side.
 //
 // in: ctx, server, device pointer (only MQTTTopicPrefix is used), op
-// label for slog ("device delete" / "bulk delete"). out: none.
-func preemptiveCertClear(ctx context.Context, s *Server, device *service.Device, op string) {
+// label for slog ("device delete" / "bulk delete"), recovery path usable
+// (from recoveryPath; the caller already passed destructiveAllowed). out: none.
+func preemptiveCertClear(ctx context.Context, s *Server, device *service.Device, op string, usable bool) {
 	if device.MQTTTopicPrefix == nil || *device.MQTTTopicPrefix == "" {
 		return
 	}
 	prefix := *device.MQTTTopicPrefix
 
-	// The whole sequence below hands the device to the shared fallback
-	// credential. If that credential cannot connect, step 2 wipes the only
-	// cert the device has and step 3 reboots it into a broker that will
-	// refuse it - a stranded device needing serial recovery. Refuse loudly
-	// rather than proceeding blind.
-	probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
-	enabled, probeErr := s.mqtt.DynsecClientEnabled(probeCtx, s.cfg.MQTTDeviceFallbackUser)
-	probeCancel()
-	if !mqtt.RecoveryPathUsable(enabled, probeErr) {
+	// The sequence below hands the device to the shared fallback credential.
+	// With that credential unusable, step 2 would wipe the only cert the
+	// device has and step 3 reboot it into a broker that refuses it. The
+	// operator accepted serial recovery to get here; do not make it worse.
+	if !usable {
 		slog.Warn(op+": pre-emptive cert clear skipped, fallback credential unusable",
-			"device", device.ID, "fallback_user", s.cfg.MQTTDeviceFallbackUser,
-			"enabled", enabled, "err", probeErr)
+			"device", device.ID, "fallback_user", s.cfg.MQTTDeviceFallbackUser)
 		return
 	}
 
@@ -360,20 +464,39 @@ func preemptiveCertClear(ctx context.Context, s *Server, device *service.Device,
 	}
 }
 
-// cascadeDeleteOne runs cert revoke + dynsec teardown + DB cascade for
-// one device, bounding each remote step. Returns true on overall success
-// (cert revoke + DB delete both succeeded; dynsec is best-effort and not
-// load-bearing). Mirrors handleAdminDeviceDelete except for the
-// confirmation gate (which the bulk handler enforces upstream).
-// in: ctx, operator email (for slog), *service.Device. out: bool ok.
-func (s *Server) cascadeDeleteOne(ctx context.Context, opEmail string, device *service.Device) bool {
-	preemptiveCertClear(ctx, s, device, "bulk delete")
+// cascadeVerdict is the outcome of one bulk cascade.
+type cascadeVerdict int
+
+const (
+	cascadeOK       cascadeVerdict = iota
+	cascadeOKSealed                // deleted, but the enrollment rows may still be sealed
+	cascadeRefused                 // recovery gate, nothing touched
+	cascadeFailed                  // revoke or DB delete failed
+)
+
+// cascadeDeleteOne gates, revokes, tears down dynsec and cascades the DB row
+// for one device; everything after the committed revoke ignores request
+// cancellation. Mirrors handleAdminDeviceDelete minus the confirm gate.
+// in: ctx, operator email, device, probe verdict, operator override. out: verdict.
+func (s *Server) cascadeDeleteOne(ctx context.Context, opEmail string, device *service.Device, v recoveryVerdict, override bool) cascadeVerdict {
+	paired := device.PairedAt != nil
+	if !destructiveAllowed(paired, v.usable, override) {
+		slog.Warn("device.delete.refused", "reason", "recovery_path_unusable",
+			"user", opEmail, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason, "bulk", true)
+		return cascadeRefused
+	}
+	if serialRecoveryAccepted(paired, v, override) {
+		slog.Warn("device.delete.serial_recovery_accepted",
+			"user", opEmail, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason, "bulk", true)
+	}
+	preemptiveCertClear(ctx, s, device, "bulk delete", v.usable)
 
 	if err := s.services.Certificates.Revoke(ctx, device.TenantID, device.ID); err != nil {
 		slog.Error("bulk delete: revoke cert failed",
 			"user", opEmail, "device", device.ID, "err", err)
-		return false
+		return cascadeFailed
 	}
+	ctx = context.WithoutCancel(ctx)
 	if device.PairedAt != nil {
 		logPairStateChange(device, "paired", "revoked", opEmail, "bulk_delete")
 	}
@@ -417,19 +540,24 @@ func (s *Server) cascadeDeleteOne(ctx context.Context, opEmail string, device *s
 	if err := s.services.Devices.DeleteByID(dbCtx, device.TenantID, device.ID); err != nil {
 		slog.Error("bulk delete: DB delete failed",
 			"user", opEmail, "device", device.ID, "err", err)
-		return false
+		return cascadeFailed
 	}
-	s.resetDeviceEnrollment(ctx, device.DeviceID, "bulk delete")
+	enrollErr := s.resetDeviceEnrollment(ctx, device.DeviceID, "bulk delete")
 
 	tombPrefix := ""
 	if device.MQTTTopicPrefix != nil {
 		tombPrefix = *device.MQTTTopicPrefix
 	}
-	if terr := s.services.Devices.Tombstone(ctx, device.TenantID, device.DeviceID, tombPrefix); terr != nil {
+	tombCtx, tombCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer tombCancel()
+	if terr := s.services.Devices.Tombstone(tombCtx, device.TenantID, device.DeviceID, tombPrefix); terr != nil {
 		slog.Warn("bulk delete: tombstone write failed",
 			"device", device.ID, "tenant", device.TenantID, "device_id", device.DeviceID, "err", terr)
 	}
 	slog.Info("device deleted (bulk)",
 		"user", opEmail, "device", device.DeviceID, "tenant", device.TenantID, "pk", device.ID)
-	return true
+	if enrollErr != nil {
+		return cascadeOKSealed
+	}
+	return cascadeOK
 }
