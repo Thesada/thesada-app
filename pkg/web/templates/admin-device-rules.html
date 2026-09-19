@@ -1,0 +1,224 @@
+{{define "title"}}Rules - {{.Device.DeviceID}} - thesada{{end}}
+{{define "content"}}
+<div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+  <div>
+    <a href="/admin/devices/{{.Device.ID}}/config" class="text-xs text-slate-500 hover:underline">&larr; Config</a>
+    <h1 class="text-2xl font-semibold mt-1">{{.Device.DeviceID}} - Visual rules</h1>
+    <p class="text-sm text-slate-500">Blockly → <span class="font-mono">/scripts/rules.lua</span>. Generate-only (no import from hand-written Lua yet). Sustain/cooldown match the device example rules.</p>
+    <p class="text-xs text-slate-400 font-mono mt-1">{{.TopicPrefix}}</p>
+  </div>
+  <div class="flex gap-2 flex-wrap">
+    <button type="button" id="btn-preview" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Refresh Lua</button>
+    <button type="button" id="btn-push" class="text-sm px-3 py-1 rounded bg-amber-600 text-white hover:bg-amber-700">Push to device</button>
+    <button type="button" id="btn-push-reload" class="text-sm px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Push + reload</button>
+    <button type="button" id="btn-reload" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">lua.reload</button>
+  </div>
+</div>
+
+<div id="status-bar" class="hidden mb-4 px-4 py-2 rounded text-sm"></div>
+
+<div class="grid gap-4 lg:grid-cols-2">
+  <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
+    <div id="blockly-workspace" style="height:640px; width:100%;"></div>
+  </div>
+  <div class="bg-white border border-slate-200 rounded-xl p-4 flex flex-col min-h-[640px]">
+    <h2 class="text-sm font-semibold mb-2">Generated Lua</h2>
+    <pre id="lua-preview" class="flex-1 overflow-auto font-mono text-xs bg-slate-50 border border-slate-200 rounded p-3 whitespace-pre-wrap">Build blocks, then Preview Lua.</pre>
+  </div>
+</div>
+
+<xml xmlns="https://developers.google.com/blockly/xml" id="toolbox" style="display:none">
+  <category name="Rules" colour="230">
+    <block type="thesada_rules_root"></block>
+    <block type="thesada_on_sensor"></block>
+  </category>
+  <category name="Conditions" colour="210">
+    <block type="thesada_if_temp">
+      <field name="SENSOR">supply</field>
+      <field name="OP">&gt;=</field>
+      <field name="THRESH">85</field>
+      <field name="SUSTAIN">YES</field>
+    </block>
+    <block type="thesada_if_current">
+      <field name="CHANNEL">pump</field>
+      <field name="OP">&lt;=</field>
+      <field name="THRESH">0.5</field>
+      <field name="COUNT">5</field>
+    </block>
+    <block type="thesada_if_battery">
+      <field name="PCT">20</field>
+    </block>
+  </category>
+  <category name="Actions" colour="0">
+    <block type="thesada_notify">
+      <field name="MSG">alert</field>
+    </block>
+    <block type="thesada_notify_temp">
+      <field name="SUFFIX">Overheat!</field>
+    </block>
+  </category>
+  <category name="Logic" colour="210">
+    <block type="controls_if"></block>
+    <block type="logic_compare"></block>
+    <block type="logic_operation"></block>
+    <block type="logic_negate"></block>
+  </category>
+  <category name="Text" colour="160">
+    <block type="text"></block>
+  </category>
+</xml>
+
+<script src="/static/js/blockly/blockly_compressed.js"></script>
+<script src="/static/js/blockly/blocks_compressed.js"></script>
+<script src="/static/js/blockly/lua_compressed.js"></script>
+<script src="/static/js/blockly/msg/en.js"></script>
+<script src="/static/js/blockly-rules.js"></script>
+<script>
+(function() {
+  var deviceID = "{{.Device.ID}}";
+  var csrfToken = "{{.CSRFToken}}";
+  var cliTimeoutSeconds = {{.CLITimeoutSeconds}};
+
+  var statusHideTimer = null;
+  function status(msg, ok) {
+    var bar = document.getElementById("status-bar");
+    bar.textContent = msg;
+    bar.className = "mb-4 px-4 py-2 rounded text-sm " +
+      (ok ? "bg-green-50 text-green-800 border border-green-200" :
+            "bg-red-50 text-red-800 border border-red-200");
+    if (statusHideTimer) { clearTimeout(statusHideTimer); }
+    statusHideTimer = setTimeout(function() {
+      bar.className = "hidden mb-4 px-4 py-2 rounded text-sm";
+    }, 5000);
+  }
+  function statusPending(msg) {
+    var bar = document.getElementById("status-bar");
+    bar.textContent = msg;
+    bar.className = "mb-4 px-4 py-2 rounded text-sm bg-sky-100 text-sky-800 border border-sky-500";
+    if (statusHideTimer) { clearTimeout(statusHideTimer); statusHideTimer = null; }
+  }
+
+  function parseJSON(r) {
+    return r.text().then(function(t) {
+      try { return JSON.parse(t); }
+      catch (e) { throw new Error("HTTP " + r.status + ": " + t.slice(0, 200)); }
+    });
+  }
+
+  function postCmd(command, payload) {
+    return fetch("/admin/devices/" + deviceID + "/config/cmd", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CSRF-Token": csrfToken},
+      body: JSON.stringify({command: command, payload: payload || ""})
+    }).then(parseJSON);
+  }
+  function postWrite(path, content) {
+    return fetch("/admin/devices/" + deviceID + "/config/write", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CSRF-Token": csrfToken},
+      body: JSON.stringify({path: path, content: content})
+    }).then(parseJSON);
+  }
+  function pollResult(requestID, timeoutSeconds) {
+    var deadline = Date.now() + (timeoutSeconds || cliTimeoutSeconds) * 1000;
+    function once() {
+      return fetch("/admin/devices/" + deviceID + "/config/cmd/result?id=" + encodeURIComponent(requestID), {
+        headers: {"X-CSRF-Token": csrfToken}
+      }).then(parseJSON).then(function(res) {
+        if (res.status === "done" || res.status === "error" ||
+            res.status === "timeout" || res.status === "expired") return res;
+        if (Date.now() > deadline) throw new Error("poll timeout");
+        return new Promise(function(r) { setTimeout(r, 500); }).then(once);
+      });
+    }
+    return once();
+  }
+
+  function assertDeviceOK(res, fallback) {
+    if (res.status === "done" && res.response && res.response.ok === true) return;
+    throw new Error(
+      (res.response && res.response.output && res.response.output.join(" ")) ||
+      res.error || res.status || fallback
+    );
+  }
+
+  var workspace = ThesadaRules.init({
+    workspaceEl: document.getElementById("blockly-workspace"),
+    toolboxEl: document.getElementById("toolbox"),
+    mediaPath: "/static/js/blockly/media/"
+  });
+
+  function refreshPreview() {
+    var lua = ThesadaRules.generateLua(workspace);
+    document.getElementById("lua-preview").textContent = lua || "-- empty workspace";
+    return lua;
+  }
+
+  document.getElementById("btn-preview").addEventListener("click", function() {
+    refreshPreview();
+    status("Lua preview updated", true);
+  });
+
+  function pushRules(thenReload) {
+    var lua = refreshPreview();
+    if (!lua || !lua.trim()) { status("nothing to push", false); return; }
+    statusPending("pushing /scripts/rules.lua…");
+    postWrite("/scripts/rules.lua", lua).then(function(enq) {
+      if (!enq.request_id) {
+        throw new Error("enqueue failed: " + JSON.stringify(enq));
+      }
+      return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds);
+    }).then(function(res) {
+      assertDeviceOK(res, "write failed");
+      if (!thenReload) {
+        status("rules.lua pushed — run lua.reload to apply", true);
+        return null;
+      }
+      statusPending("lua.reload…");
+      return postCmd("lua.reload", "").then(function(enq2) {
+        if (!enq2.request_id) {
+          throw new Error("enqueue failed: " + JSON.stringify(enq2));
+        }
+        return pollResult(enq2.request_id, enq2.timeout_seconds || cliTimeoutSeconds);
+      });
+    }).then(function(res) {
+      if (!res) return;
+      assertDeviceOK(res, "reload failed");
+      status("rules.lua pushed and reloaded", true);
+    }).catch(function(err) {
+      status(String(err.message || err), false);
+    });
+  }
+
+  document.getElementById("btn-push").addEventListener("click", function() {
+    pushRules(false);
+  });
+  document.getElementById("btn-push-reload").addEventListener("click", function() {
+    pushRules(true);
+  });
+
+  document.getElementById("btn-reload").addEventListener("click", function() {
+    statusPending("lua.reload…");
+    postCmd("lua.reload", "").then(function(enq) {
+      if (!enq.request_id) {
+        throw new Error("enqueue failed: " + JSON.stringify(enq));
+      }
+      return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds);
+    }).then(function(res) {
+      assertDeviceOK(res, "reload failed");
+      status("lua.reload ok", true);
+    }).catch(function(err) {
+      status(String(err.message || err), false);
+    });
+  });
+
+  var previewTimer = null;
+  workspace.addChangeListener(function(e) {
+    if (e.isUiEvent) return;
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(refreshPreview, 200);
+  });
+  refreshPreview();
+})();
+</script>
+{{end}}
