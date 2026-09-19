@@ -70,7 +70,7 @@ var ThesadaRules = (function () {
     Blockly.Blocks["thesada_rules_root"] = {
       init: function () {
         this.appendDummyInput().appendField("rules.lua");
-        this.appendStatementInput("BODY").setCheck(null);
+        this.appendStatementInput("BODY").setCheck("ThesadaEvent");
         this.setColour(230);
         this.setTooltip("Top-level rules file");
       },
@@ -93,8 +93,8 @@ var ThesadaRules = (function () {
           )
           .appendField("updates");
         this.appendStatementInput("DO").setCheck("ThesadaCondition");
-        this.setPreviousStatement(true, null);
-        this.setNextStatement(true, null);
+        this.setPreviousStatement(true, "ThesadaEvent");
+        this.setNextStatement(true, "ThesadaEvent");
         this.setColour(20);
       },
     };
@@ -193,7 +193,9 @@ var ThesadaRules = (function () {
         '    local key = "' +
         keyLit +
         '"\n' +
+        "    if can_alert(key) then\n" +
         branch +
+        "    end\n" +
         "  end\n" +
         "end\n"
       );
@@ -403,6 +405,7 @@ var ThesadaRules = (function () {
     var tops = workspace.getTopBlocks(true);
     var out = [];
     for (var i = 0; i < tops.length; i++) {
+      if (tops[i].type !== "thesada_rules_root") continue;
       var code = Blockly.Lua.blockToCode(tops[i]);
       if (Array.isArray(code)) code = code[0];
       if (code) out.push(code);
