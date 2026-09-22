@@ -21,7 +21,7 @@
   <div class="flex items-center justify-between mb-2">
     <h2 class="text-lg font-semibold">Device config</h2>
     <div class="flex gap-2">
-      <button onclick="loadConfig()" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Load from device</button>
+      <button data-act="loadConfig" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Load from device</button>
     </div>
   </div>
   <div class="bg-white border border-slate-200 rounded-xl p-4">
@@ -32,7 +32,7 @@
     {{end}}
     <textarea id="config-editor" class="w-full font-mono text-xs border border-slate-300 rounded p-3 min-h-[200px] resize-y" placeholder="Click 'Load from device' to fetch config...">{{if .LastSnapshot}}{{.LastSnapshot.Content}}{{end}}</textarea>
     <div class="flex justify-end gap-2 mt-2">
-      <button onclick="saveConfig()" class="text-xs px-3 py-1 rounded bg-amber-600 text-white hover:bg-amber-700">Push config keys</button>
+      <button data-act="saveConfig" class="text-xs px-3 py-1 rounded bg-amber-600 text-white hover:bg-amber-700">Push config keys</button>
     </div>
     <p class="text-xs text-slate-400 mt-1">Pushes changed keys via config.set. Network keys (mqtt.*, wifi.*) trigger a reconnect on the device.</p>
   </div>
@@ -43,8 +43,8 @@
   <div class="flex items-center justify-between mb-2">
     <h2 class="text-lg font-semibold">Scripts</h2>
     <div class="flex gap-2">
-      <button onclick="loadFileList()" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Refresh file list</button>
-      <button onclick="reloadLua()" class="text-xs px-3 py-1 rounded bg-sky-700 text-white hover:bg-sky-800">lua.reload</button>
+      <button data-act="loadFileList" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Refresh file list</button>
+      <button data-act="reloadLua" class="text-xs px-3 py-1 rounded bg-sky-700 text-white hover:bg-sky-800">lua.reload</button>
     </div>
   </div>
   <div id="file-list" class="bg-white border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100">
@@ -53,13 +53,13 @@
 </section>
 
 <!-- File editor modal -->
-<div id="file-editor-overlay" class="hidden fixed inset-0 bg-black/50 z-40" onclick="closeEditor()"></div>
+<div id="file-editor-overlay" class="hidden fixed inset-0 bg-black/50 z-40" data-act="closeEditor"></div>
 <div id="file-editor" class="hidden fixed inset-4 sm:inset-x-16 sm:inset-y-8 bg-white rounded-xl shadow-xl z-50 flex flex-col overflow-hidden">
   <div class="flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200">
     <span id="editor-title" class="font-mono text-sm font-semibold"></span>
     <div class="flex gap-2">
-      <button onclick="saveFile()" class="text-xs px-3 py-1 rounded bg-amber-600 text-white hover:bg-amber-700">Save to device</button>
-      <button onclick="closeEditor()" class="text-xs px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Close</button>
+      <button data-act="saveFile" class="text-xs px-3 py-1 rounded bg-amber-600 text-white hover:bg-amber-700">Save to device</button>
+      <button data-act="closeEditor" class="text-xs px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Close</button>
     </div>
   </div>
   <textarea id="editor-content" class="flex-1 font-mono text-xs p-4 resize-none border-none outline-none"></textarea>
@@ -82,7 +82,7 @@
         <option value="50" selected>50</option>
         <option value="100">100</option>
       </select>
-      <button onclick="loadHistory()" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Load</button>
+      <button data-act="loadHistory" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Load</button>
     </div>
   </div>
   <div id="history-list" class="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -91,8 +91,8 @@
   <div id="history-pager" class="flex items-center justify-between mt-2 text-xs text-slate-600 hidden">
     <span id="history-pager-info"></span>
     <div class="flex gap-1">
-      <button id="history-prev" onclick="historyPage(-1)" class="px-3 py-1 rounded border border-slate-300 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
-      <button id="history-next" onclick="historyPage(1)" class="px-3 py-1 rounded border border-slate-300 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+      <button id="history-prev" data-act="historyPage" data-arg="-1" class="px-3 py-1 rounded border border-slate-300 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+      <button id="history-next" data-act="historyPage" data-arg="1" class="px-3 py-1 rounded border border-slate-300 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
     </div>
   </div>
 </section>
@@ -101,7 +101,7 @@
 <section class="mb-8">
   <div class="flex items-center justify-between mb-2">
     <h2 class="text-lg font-semibold">Disk usage</h2>
-    <button onclick="loadDiskUsage()" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Refresh</button>
+    <button data-act="loadDiskUsage" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Refresh</button>
   </div>
   <div id="disk-info" class="bg-white border border-slate-200 rounded-xl p-4">
     <p class="text-sm text-slate-500">Click 'Refresh' to load disk usage.</p>
@@ -115,13 +115,13 @@
     <div class="flex gap-2 mb-2">
       <input id="cli-cmd" type="text" placeholder="command (e.g. heap, version, sensors)" class="flex-1 text-sm border border-slate-300 rounded px-3 py-1 font-mono">
       <input id="cli-payload" type="text" placeholder="payload (optional)" class="flex-1 text-sm border border-slate-300 rounded px-3 py-1 font-mono">
-      <button onclick="runCLI()" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Send</button>
+      <button data-act="runCLI" class="text-xs px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Send</button>
     </div>
     <pre id="cli-output" class="font-mono text-xs bg-slate-50 rounded p-3 min-h-[60px] max-h-[300px] overflow-auto text-slate-700"></pre>
   </div>
 </section>
 
-<script>
+<script nonce="{{.CSPNonce}}">
 (function() {
   var deviceID = "{{.Device.ID}}";
   var csrfToken = "{{.CSRFToken}}";
@@ -421,7 +421,7 @@
           '<div><span class="font-mono text-sm">' + display + '</span>' +
           '<span class="text-xs text-slate-400 ml-2">' + size + ' bytes</span></div>' +
           '<div class="flex gap-2">' +
-          '<button onclick="openFile(\'' + path + '\')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">Edit</button>' +
+          '<button type="button" data-act="openFile" data-arg="' + path.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">Edit</button>' +
           '</div></div>';
       });
       if (!html) html = '<p class="px-4 py-4 text-sm text-slate-500">No files found.</p>';
@@ -616,8 +616,8 @@
           '<td class="px-4 py-2 font-mono text-xs text-slate-400">' + s.sha256.substring(0, 12) + '</td>' +
           '<td class="px-4 py-2 text-xs text-slate-500">' + s.content.length + ' B</td>' +
           '<td class="px-4 py-2 text-right">' +
-          '<button onclick="viewSnapshot(' + idx + ')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">View</button> ' +
-          '<button onclick="restoreSnapshot(' + idx + ')" class="text-xs px-2 py-1 rounded border border-amber-300 text-amber-700 hover:bg-amber-50">Restore</button>' +
+          '<button type="button" data-act="viewSnapshot" data-arg="' + idx + '" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">View</button> ' +
+          '<button type="button" data-act="restoreSnapshot" data-arg="' + idx + '" class="text-xs px-2 py-1 rounded border border-amber-300 text-amber-700 hover:bg-amber-50">Restore</button>' +
           '</td></tr>';
       });
       html += '</tbody></table>';

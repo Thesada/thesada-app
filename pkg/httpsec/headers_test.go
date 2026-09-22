@@ -12,7 +12,9 @@ import (
 // header (direct TLS, proxy X-Forwarded-Proto, and plain-HTTP absence), and
 // that the wrapped handler still runs.
 func TestSecurityHeaders(t *testing.T) {
-	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var seenNonce string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenNonce = Nonce(r.Context())
 		w.WriteHeader(http.StatusTeapot)
 	})
 
@@ -46,10 +48,28 @@ func TestSecurityHeaders(t *testing.T) {
 		got := w.Header().Get("Content-Security-Policy")
 		for _, directive := range []string{
 			"default-src 'self'", "frame-ancestors 'none'", "base-uri 'self'", "form-action 'self'",
+			"style-src-attr 'unsafe-inline'",
 		} {
 			if !strings.Contains(got, directive) {
 				t.Errorf("CSP missing %q in %q", directive, got)
 			}
+		}
+		if strings.Contains(got, "script-src 'self' 'unsafe-inline'") {
+			t.Errorf("script-src still allows unsafe-inline: %q", got)
+		}
+		if !strings.Contains(got, "'nonce-"+seenNonce+"'") {
+			t.Errorf("CSP nonce = %q, header %q", seenNonce, got)
+		}
+		if seenNonce == "" {
+			t.Error("request context missing CSP nonce")
+		}
+	})
+
+	t.Run("nonce changes per request", func(t *testing.T) {
+		a := do(false, "").Header().Get("Content-Security-Policy")
+		b := do(false, "").Header().Get("Content-Security-Policy")
+		if a == b {
+			t.Fatalf("two responses shared a CSP: %q", a)
 		}
 	})
 

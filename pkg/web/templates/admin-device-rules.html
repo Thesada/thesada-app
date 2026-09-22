@@ -73,7 +73,7 @@
 <script src="/static/js/blockly/lua_compressed.js"></script>
 <script src="/static/js/blockly/msg/en.js"></script>
 <script src="/static/js/blockly-rules.js"></script>
-<script>
+<script nonce="{{.CSPNonce}}">
 (function() {
   var deviceID = "{{.Device.ID}}";
   var csrfToken = "{{.CSRFToken}}";
