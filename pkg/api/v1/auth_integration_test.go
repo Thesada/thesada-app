@@ -49,7 +49,7 @@ func post(srv http.Handler, path, body string, hdr map[string]string) *httptest.
 
 func TestAuthHandlers(t *testing.T) {
 	env := servicetest.Start(t)
-	srv := apiv1.New(env.Cfg, env.Services, nil)
+	srv := apiv1.New(env.Cfg, env.Services, nil, nil)
 
 	const tenant = "apiauth-a"
 	env.SeedTenant(t, tenant)
