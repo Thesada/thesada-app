@@ -50,7 +50,7 @@
             {{end}}
             {{if and (not .IsDefault) (not .IsCurrent)}}
             <form method="POST" action="/admin/tenants/{{.Tenant.ID}}/delete" class="inline"
-                  onsubmit="return confirm('Delete tenant {{.Tenant.ID}}? Users, devices, alerts and telemetry for this tenant will be deleted (cascade).');">
+                  data-confirm="Delete tenant {{.Tenant.ID}}? Users, devices, alerts and telemetry for this tenant will be deleted (cascade).">
               <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
               <button type="submit" class="text-xs px-2 py-1 rounded bg-red-600 hover:bg-red-500 text-white">
                 delete

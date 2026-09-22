@@ -58,7 +58,7 @@
           <div class="flex flex-wrap gap-1 items-center">
           {{if eq .Status "paired"}}
             <form method="POST" action="/admin/devices/{{.Device.ID}}/pair/revoke"
-                  onsubmit="return confirm('Revoke cert + push cert.clear to {{.Device.DeviceID}}?')">
+                  data-confirm="Revoke cert + push cert.clear to {{.Device.DeviceID}}?">
               <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
               <button class="text-xs px-2 py-1 rounded bg-rose-600 text-white hover:bg-rose-700">Revoke</button>
               <label class="text-xs text-slate-500 flex items-center gap-1"
@@ -68,13 +68,13 @@
             </form>
           {{else}}
             <form method="POST" action="/admin/devices/{{.Device.ID}}/pair/issue"
-                  onsubmit="return confirm('Issue cert + push to {{.Device.DeviceID}}?')">
+                  data-confirm="Issue cert + push to {{.Device.DeviceID}}?">
               <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
               <button class="text-xs px-2 py-1 rounded bg-sky-600 text-white hover:bg-sky-700">Issue + push</button>
             </form>
           {{end}}
           <form method="POST" action="/admin/devices/{{.Device.ID}}/delete"
-                onsubmit="return confirmDelete(this, '{{.Device.DeviceID}}');"
+                data-submit="confirmDelete" data-device-id="{{.Device.DeviceID}}"
                 class="inline-flex gap-1 items-center">
             <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
             <input type="hidden" name="confirm_device_id" value="">
@@ -95,11 +95,12 @@
   </table>
 </div>
 
-<script>
+<script nonce="{{.CSPNonce}}">
 // Strong confirm for destructive device delete. Requires the operator
 // to type the device_id back to prove they read it. Sets the hidden
 // confirm_device_id input on the form so the server-side check matches.
-function confirmDelete(form, deviceID) {
+function confirmDelete(form) {
+  var deviceID = form.getAttribute('data-device-id');
   var typed = window.prompt(
     'DELETE device "' + deviceID + '"?\n\n' +
     'This drops the cert, dynsec client + role, and all telemetry / files / ' +

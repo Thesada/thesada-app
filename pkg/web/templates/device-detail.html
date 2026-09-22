@@ -42,7 +42,7 @@
     </div>
     <p id="chart-empty" class="hidden text-center text-sm text-slate-500 py-8">No data in this range.</p>
   </div>
-  <script>
+  <script nonce="{{.CSPNonce}}">
     (function () {
       var deviceID = {{.Device.ID}};
       var ctx, chart;
@@ -186,9 +186,9 @@
     <h2 class="text-lg font-semibold">Latest sensors</h2>
     {{if .Latest}}
     <div class="flex gap-2 text-xs">
-      <button type="button" onclick="thesadaToggleGroups(true)"
+      <button type="button" data-act="thesadaToggleGroups" data-arg="true"
               class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:bg-slate-100">Expand all</button>
-      <button type="button" onclick="thesadaToggleGroups(false)"
+      <button type="button" data-act="thesadaToggleGroups" data-arg="false"
               class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:bg-slate-100">Collapse all</button>
     </div>
     {{end}}
@@ -214,7 +214,7 @@
                 <td class="px-4 py-2 text-right text-slate-900">{{telemetryValue .}}</td>
                 <td class="px-4 py-2 text-slate-500 w-36 sm:w-48 text-xs whitespace-nowrap">{{fmtTime .ReceivedAt}}</td>
                 <td class="px-2 py-2 w-8 text-right">
-                  <form method="post" action="/devices/{{$.Device.ID}}/sensors/delete" class="inline" onsubmit="return confirm('Delete all telemetry for {{.Metric}}? This cannot be undone.');">
+                  <form method="post" action="/devices/{{$.Device.ID}}/sensors/delete" class="inline" data-confirm="Delete all telemetry for {{.Metric}}? This cannot be undone.">
                     <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
                     <input type="hidden" name="metric" value="{{.Metric}}">
                     <input type="hidden" name="confirm_metric" value="{{.Metric}}">
@@ -237,7 +237,7 @@
               <td class="px-4 py-2 text-right text-slate-900">{{telemetryValue .}}</td>
               <td class="px-4 py-2 text-slate-500 w-36 sm:w-48 text-xs whitespace-nowrap">{{fmtTime .ReceivedAt}}</td>
               <td class="px-2 py-2 w-8 text-right">
-                <form method="post" action="/devices/{{$.Device.ID}}/sensors/delete" class="inline" onsubmit="return confirm('Delete all telemetry for {{.Metric}}? This cannot be undone.');">
+                <form method="post" action="/devices/{{$.Device.ID}}/sensors/delete" class="inline" data-confirm="Delete all telemetry for {{.Metric}}? This cannot be undone.">
                   <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
                   <input type="hidden" name="metric" value="{{.Metric}}">
                   <input type="hidden" name="confirm_metric" value="{{.Metric}}">
@@ -252,7 +252,7 @@
       {{end}}
     {{end}}
   </div>
-  <script>
+  <script nonce="{{.CSPNonce}}">
     function thesadaToggleGroups(open) {
       document.querySelectorAll('#metric-groups details.metric-group').forEach(function (d) {
         d.open = open;

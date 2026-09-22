@@ -18,6 +18,7 @@ import (
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/config"
 	"thesada.app/app/pkg/csrf"
+	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/mailer"
 	"thesada.app/app/pkg/mqtt"
 	"thesada.app/app/pkg/pki"
@@ -271,6 +272,9 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, dat
 	}
 	if _, set := data["CSRFToken"]; !set {
 		data["CSRFToken"] = csrf.Token(r)
+	}
+	if _, set := data["CSPNonce"]; !set {
+		data["CSPNonce"] = httpsec.Nonce(r.Context())
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := t.ExecuteTemplate(w, "layout", data); err != nil {

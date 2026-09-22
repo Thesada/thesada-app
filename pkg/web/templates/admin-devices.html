@@ -18,7 +18,7 @@
      instead of nesting them inside the bulk form, which is invalid
      HTML and was rendering the last column oddly. -->
 <form id="bulk-form" method="POST" action="/admin/devices/bulk"
-      onsubmit="return confirmBulk(this);">
+      data-submit="confirmBulk">
   <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
   <input type="hidden" name="confirm_cross_tenant" id="bulk-confirm-cross-tenant" value="">
 </form>
@@ -85,7 +85,7 @@
         <td class="px-4 py-2 text-slate-500 text-xs whitespace-nowrap hidden sm:table-cell">{{timeOrDash .LastSeenAt}}</td>
         <td class="px-4 py-2 text-right">
           <form method="POST" action="/admin/devices/{{.ID}}/reassign" class="inline-flex flex-wrap gap-1 items-center"
-                onsubmit="return confirm('Reassign {{.DeviceID}} to the selected tenant? Remember to also update the on-device mqtt.topic_prefix.');">
+                data-confirm="Reassign {{.DeviceID}} to the selected tenant? Remember to also update the on-device mqtt.topic_prefix.">
             <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
             <select name="target_tenant" class="text-xs border border-slate-300 rounded px-2 py-1">
               {{$cur := .TenantID}}
@@ -104,7 +104,7 @@
   </table>
 </div>
 
-<script>
+<script nonce="{{.CSPNonce}}">
 (function () {
   var all = document.getElementById('bulk-all');
   var rows = document.querySelectorAll('.bulk-row');
