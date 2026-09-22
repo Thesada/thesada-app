@@ -138,16 +138,16 @@ func (s *DeviceService) GetByID(id uuid.UUID, tenantID string) (*Device, error) 
 }
 
 // GetByDeviceID returns a device by tenant and device_id.
-// in: tenant_id, device_id. out: *devices row or nil if not found.
-func (s *DeviceService) GetByDeviceID(tenantID, deviceID string) (*Device, error) {
+// in: ctx, tenant_id, device_id. out: *devices row or nil if not found.
+func (s *DeviceService) GetByDeviceID(ctx context.Context, tenantID, deviceID string) (*Device, error) {
 	const query = `
 		SELECT id, tenant_id, owner_user_id, device_id, pairing_key, paired_at, display_name,
 		       hardware_type, firmware_version, last_seen_at, mqtt_topic_prefix, created_at
 		FROM devices WHERE tenant_id = $1 AND device_id = $2`
 
 	var d Device
-	err := db.WithTenant(context.Background(), s.pools.App, tenantID, func(tx pgx.Tx) error {
-		return tx.QueryRow(context.Background(), query, tenantID, deviceID).Scan(
+	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, query, tenantID, deviceID).Scan(
 			&d.ID, &d.TenantID, &d.OwnerUserID, &d.DeviceID, &d.PairingKey, &d.PairedAt,
 			&d.DisplayName, &d.HardwareType, &d.FirmwareVersion, &d.LastSeenAt,
 			&d.MQTTTopicPrefix, &d.CreatedAt)

@@ -128,11 +128,11 @@ func TestDeviceService(t *testing.T) {
 		if got, err := dev.GetByID(uuid.New(), tA); err != nil || got != nil {
 			t.Errorf("GetByID unknown: got %v err %v, want nil nil", got, err)
 		}
-		if got, err := dev.GetByDeviceID(tA, "nope"); err != nil || got != nil {
+		if got, err := dev.GetByDeviceID(ctx, tA, "nope"); err != nil || got != nil {
 			t.Errorf("GetByDeviceID unknown: got %v err %v, want nil nil", got, err)
 		}
 		id := mustUpsert(t, dev, tA, "dev-bydevid", "", "", "", "")
-		got, err := dev.GetByDeviceID(tA, "dev-bydevid")
+		got, err := dev.GetByDeviceID(ctx, tA, "dev-bydevid")
 		if err != nil || got == nil || got.ID != id {
 			t.Fatalf("GetByDeviceID hit: got %v err %v, want id %v", got, err, id)
 		}
@@ -144,7 +144,7 @@ func TestDeviceService(t *testing.T) {
 		if got, err := dev.GetByID(id, tB); err != nil || got != nil {
 			t.Errorf("cross-tenant GetByID leaked: got %v err %v, want nil", got, err)
 		}
-		if got, err := dev.GetByDeviceID(tB, "dev-iso"); err != nil || got != nil {
+		if got, err := dev.GetByDeviceID(ctx, tB, "dev-iso"); err != nil || got != nil {
 			t.Errorf("cross-tenant GetByDeviceID leaked: got %v err %v, want nil", got, err)
 		}
 	})
