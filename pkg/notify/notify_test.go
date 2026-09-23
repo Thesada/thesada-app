@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -77,12 +78,72 @@ func TestRequestLoginLink_RateLimitIsSilent(t *testing.T) {
 	mail := &fakeMail{}
 	accounts := &fakeAccounts{user: &service.User{ID: uuid.New(), Email: "ada@example.com"}}
 	m := New(accounts, mail, "https://app.example")
-	for i := 0; i < maxPerHour+2; i++ {
+	for i := 0; i < maxPerIP+2; i++ {
 		if err := m.RequestLoginLink("ada@example.com", "192.0.2.9"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if mail.sends != maxPerHour {
-		t.Fatalf("sends = %d, want %d", mail.sends, maxPerHour)
+	if mail.sends != maxPerIP {
+		t.Fatalf("sends = %d, want %d", mail.sends, maxPerIP)
+	}
+}
+
+func TestRequestLoginLink_OtherClientStillSends(t *testing.T) {
+	mail := &fakeMail{}
+	accounts := &fakeAccounts{user: &service.User{ID: uuid.New(), Email: "ada@example.com"}}
+	m := New(accounts, mail, "https://app.example")
+	for i := 0; i < maxPerIP; i++ {
+		if err := m.RequestLoginLink("ada@example.com", "192.0.2.1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.RequestLoginLink("ada@example.com", "192.0.2.2"); err != nil {
+		t.Fatal(err)
+	}
+	if mail.sends != maxPerIP+1 {
+		t.Fatalf("sends = %d, want %d", mail.sends, maxPerIP+1)
+	}
+}
+
+func TestRequestLoginLink_OverQuotaClientDoesNotSpendOtherAddresses(t *testing.T) {
+	mail := &fakeMail{}
+	accounts := &fakeAccounts{user: &service.User{ID: uuid.New(), Email: "ada@example.com"}}
+	m := New(accounts, mail, "https://app.example")
+	for i := 0; i < maxPerIP; i++ {
+		if err := m.RequestLoginLink("ada@example.com", "192.0.2.1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < maxPerEmail+2; i++ {
+		if err := m.RequestLoginLink("other@example.com", "192.0.2.1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.RequestLoginLink("other@example.com", "192.0.2.2"); err != nil {
+		t.Fatal(err)
+	}
+	if mail.sends != maxPerIP+1 {
+		t.Fatalf("sends = %d, want %d", mail.sends, maxPerIP+1)
+	}
+}
+
+func TestRequestLoginLink_AddressCapStopsDistributedSends(t *testing.T) {
+	mail := &fakeMail{}
+	accounts := &fakeAccounts{user: &service.User{ID: uuid.New(), Email: "ada@example.com"}}
+	m := New(accounts, mail, "https://app.example")
+	clients := maxPerEmail / maxPerIP
+	for n := 0; n < clients; n++ {
+		ip := fmt.Sprintf("192.0.2.%d", n+1)
+		for i := 0; i < maxPerIP; i++ {
+			if err := m.RequestLoginLink("ada@example.com", ip); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := m.RequestLoginLink("ada@example.com", "198.51.100.1"); err != nil {
+		t.Fatal(err)
+	}
+	if mail.sends != maxPerEmail {
+		t.Fatalf("sends = %d, want %d", mail.sends, maxPerEmail)
 	}
 }

@@ -4,7 +4,7 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
+Dated 2026-09-23 (magic-link limiter checks the client IP before the address cap, and that cap sits above one client's budget). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
 recovery refuses to run when the shared fallback credential is not
 connectable; unauthenticated device enrollment surface; device-facing
 enrollment endpoints address the row by its primary key and the claim
@@ -1065,16 +1065,20 @@ Source: `pkg/mqtt/mqtt_ingest.go::retryAlertInsert`.
 
 ### Magic-link and reset endpoints are rate-limited per IP + per email
 
-Window-based limiter (`pkg/ratelimit`). When either bucket (per-email
-or per-IP) is full the request is dropped silently: the endpoint still
-renders the same "check your email" confirmation, leaking neither which
-addresses exist nor whether a request was throttled. This is deliberate
-anti-enumeration (see the `allowMagicLink` header) - there is no 429.
-Map sweep removes empty entries on the window cadence so the map does
-not grow unbounded over the lifetime of the systemd unit.
+Window-based limiter (`pkg/ratelimit`). A request is dropped silently
+when the client IP is over its cap or when the address itself is over
+its wider cap. The IP cap is checked first so a client already over
+quota does not create an address key. One client cannot spend the
+address cap alone. The handler still returns the same sent result,
+leaking neither which addresses exist nor whether a request was
+throttled. There is no 429. Map sweep removes empty entries on the
+window cadence so the map does not grow unbounded over the lifetime of
+the systemd unit.
 
-Source: `pkg/ratelimit/ratelimit.go`, `pkg/web/web.go::allowMagicLink`
-(consumed by the magic-link login handler + `handleForgotSubmit`).
+Source: `pkg/ratelimit/ratelimit.go`, `pkg/notify/notify.go`
+(`RequestLoginLink`, `RequestResetLink`). The dashboard login and
+forgot-password handlers and `POST /api/v1/auth/magic-link` all call
+those two.
 
 ### Password login is rate-limited per email + per IP and answers 429
 

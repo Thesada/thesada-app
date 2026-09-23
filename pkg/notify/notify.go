@@ -20,8 +20,11 @@ import (
 )
 
 const (
-	maxPerHour = 5
-	window     = time.Hour
+	maxPerIP = 5
+	// Address-wide ceiling. Above one client's budget so that client cannot
+	// spend the address on its own. Distributed sends still stop here.
+	maxPerEmail = maxPerIP * 4
+	window      = time.Hour
 )
 
 //go:embed templates
@@ -39,8 +42,8 @@ type MIMESender interface {
 	SendMIME(to, subject, text, html string) error
 }
 
-// Mail renders the shared email templates and enforces the per-address
-// and per-IP send cap.
+// Mail renders the shared email templates and enforces the per-client
+// and per-address send caps.
 type Mail struct {
 	accounts  Accounts
 	send      MIMESender
@@ -58,8 +61,8 @@ func New(accounts Accounts, send MIMESender, baseURL string) *Mail {
 		accounts: accounts,
 		send:     send,
 		baseURL:  strings.TrimRight(baseURL, "/"),
-		byEmail:  ratelimit.New(window, maxPerHour),
-		byIP:     ratelimit.New(window, maxPerHour),
+		byEmail:  ratelimit.New(window, maxPerEmail),
+		byIP:     ratelimit.New(window, maxPerIP),
 	}
 	names := []string{"login_link", "reset_link"}
 	m.emailText = make(map[string]*texttemplate.Template, len(names))
@@ -118,13 +121,15 @@ func (m *Mail) request(email, ip, tmpl, subject, path string, login bool) error 
 	return nil
 }
 
+// The IP cap is first so a client already over quota does not create an address key.
 func (m *Mail) allow(email, ip string) bool {
-	if !m.byEmail.Allow("email:" + strings.ToLower(email)) {
-		slog.Warn("notify email rate-limited", "email", email)
-		return false
-	}
+	email = strings.ToLower(email)
 	if ip != "" && !m.byIP.Allow("ip:"+ip) {
 		slog.Warn("notify ip rate-limited", "ip", ip)
+		return false
+	}
+	if !m.byEmail.Allow("email:" + email) {
+		slog.Warn("notify email rate-limited", "email", email)
 		return false
 	}
 	return true
