@@ -53,16 +53,30 @@ func TestDerefOrDash(t *testing.T) {
 	if got := derefStringOrDash(&s); got != "owb" {
 		t.Errorf("string = %q", got)
 	}
+	if got := derefString(nil); got != "" {
+		t.Errorf("derefString nil = %q", got)
+	}
+	if got := derefString(&empty); got != "" {
+		t.Errorf("derefString empty = %q", got)
+	}
 	n := 3
+	zero := 0
 	if got := derefIntOrDash(nil); got != "-" {
 		t.Errorf("nil int = %q", got)
+	}
+	if got := derefIntOrDash(&zero); got != "0" {
+		t.Errorf("zero int = %q", got)
 	}
 	if got := derefIntOrDash(&n); got != "3" {
 		t.Errorf("int = %q", got)
 	}
 	var big int64 = 42
+	var zero64 int64
 	if got := derefInt64OrDash(nil); got != "-" {
 		t.Errorf("nil int64 = %q", got)
+	}
+	if got := derefInt64OrDash(&zero64); got != "0" {
+		t.Errorf("zero int64 = %q", got)
 	}
 	if got := derefInt64OrDash(&big); got != "42" {
 		t.Errorf("int64 = %q", got)
@@ -94,12 +108,12 @@ func TestUptimeLive(t *testing.T) {
 
 	freshAt := now.Add(-14 * time.Minute)
 	fresh := int64(0)
-	if got := uptimeLive(&fresh, &freshAt); strings.Contains(got, "stale") {
-		t.Errorf("14m sample marked stale: %q", got)
+	if got := uptimeLive(&fresh, &freshAt); got != "14m" {
+		t.Errorf("14m sample = %q, want 14m", got)
 	}
 
 	staleAt := now.Add(-16 * time.Minute)
-	if got := uptimeLive(&fresh, &staleAt); !strings.Contains(got, "(stale)") {
-		t.Errorf("16m sample not stale: %q", got)
+	if got := uptimeLive(&fresh, &staleAt); got != "16m (stale)" {
+		t.Errorf("16m sample = %q, want 16m (stale)", got)
 	}
 }

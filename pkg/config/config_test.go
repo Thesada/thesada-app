@@ -2,6 +2,7 @@ package config
 
 import (
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -99,11 +100,27 @@ func TestEnvBool(t *testing.T) {
 	}
 }
 
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	prev, had := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(key, prev)
+			return
+		}
+		_ = os.Unsetenv(key)
+	})
+}
+
 // TestEnvOrInt pins the silent fallback: a missing or unparseable value
 // returns the fallback instead of failing startup.
 func TestEnvOrInt(t *testing.T) {
 	const key = "THESADA_TEST_INT"
 	const fallback = 7
+	unsetEnv(t, key)
 	if got := envOrInt(key, fallback); got != fallback {
 		t.Errorf("unset = %d, want %d", got, fallback)
 	}
@@ -122,6 +139,7 @@ func TestEnvOrInt(t *testing.T) {
 func TestEnvOrDuration(t *testing.T) {
 	const key = "THESADA_TEST_DURATION"
 	fallback := 5 * time.Second
+	unsetEnv(t, key)
 	if got := envOrDuration(key, fallback); got != fallback {
 		t.Errorf("unset = %s, want %s", got, fallback)
 	}
