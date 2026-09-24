@@ -10,6 +10,7 @@ import (
 	"html/template"
 	"log/slog"
 	"strings"
+	"sync"
 	texttemplate "text/template"
 	"time"
 
@@ -52,6 +53,7 @@ type Mail struct {
 	emailText map[string]*texttemplate.Template
 	byEmail   *ratelimit.Limiter
 	byIP      *ratelimit.Limiter
+	mu        sync.Mutex
 }
 
 // New loads the email templates and starts the limiter sweepers.
@@ -123,7 +125,11 @@ func (m *Mail) request(email, ip, tmpl, subject, path string, login bool) error 
 
 // The IP cap is checked first so a client already over quota does not create
 // an address key. The IP hit is recorded only after the address cap accepts.
+// One lock covers both limiters so parallel requests cannot spend the address
+// budget after losing the IP slot.
 func (m *Mail) allow(email, ip string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	email = strings.ToLower(email)
 	if ip != "" && !m.byIP.WouldAllow("ip:"+ip) {
 		slog.Warn("notify ip rate-limited", "ip", ip)

@@ -3,6 +3,7 @@ package notify
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,11 +35,14 @@ func (f *fakeAccounts) CreateResetLink(uuid.UUID) (string, time.Time, error) {
 }
 
 type fakeMail struct {
+	mu                      sync.Mutex
 	to, subject, text, html string
 	sends                   int
 }
 
 func (f *fakeMail) SendMIME(to, subject, text, html string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.sends++
 	f.to, f.subject, f.text, f.html = to, subject, text, html
 	return nil
@@ -171,5 +175,38 @@ func TestRequestLoginLink_AddressCapDoesNotSpendClientBudget(t *testing.T) {
 	}
 	if mail.sends != maxPerEmail+1 {
 		t.Fatalf("sends = %d, want %d", mail.sends, maxPerEmail+1)
+	}
+}
+
+func TestRequestLoginLink_ParallelBurstDoesNotSpendAddress(t *testing.T) {
+	mail := &fakeMail{}
+	accounts := &fakeAccounts{user: &service.User{ID: uuid.New(), Email: "ada@example.com"}}
+	m := New(accounts, mail, "https://app.example")
+	for i := 0; i < maxPerIP-1; i++ {
+		if err := m.RequestLoginLink("other@example.com", "192.0.2.1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < maxPerEmail; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := m.RequestLoginLink("ada@example.com", "192.0.2.1"); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if mail.sends != maxPerIP {
+		t.Fatalf("sends after burst = %d, want %d", mail.sends, maxPerIP)
+	}
+	for i := 0; i < maxPerIP; i++ {
+		if err := m.RequestLoginLink("ada@example.com", "192.0.2.2"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if mail.sends != maxPerIP*2 {
+		t.Fatalf("sends = %d, want %d", mail.sends, maxPerIP*2)
 	}
 }
