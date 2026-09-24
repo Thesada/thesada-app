@@ -185,6 +185,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/devices/{id}/config/snapshot", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigSnapshot))
 	s.mux.HandleFunc("GET /admin/devices/{id}/config/history", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigHistory))
 	s.mux.HandleFunc("GET /admin/devices/{id}/rules", authmw.RequireSuperAdmin(s.handleAdminDeviceRules))
+	s.mux.HandleFunc("GET /admin/devices/{id}/rules/workspace", authmw.RequireSuperAdmin(s.handleAdminDeviceRulesWorkspaceGET))
+	s.mux.HandleFunc("POST /admin/devices/{id}/rules/workspace", authmw.RequireSuperAdmin(s.handleAdminDeviceRulesWorkspacePOST))
 	s.mux.HandleFunc("GET /admin/devices/{id}/secrets", authmw.RequireSuperAdmin(s.handleAdminDeviceSecrets))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/set", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsSet))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/clear", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsClear))

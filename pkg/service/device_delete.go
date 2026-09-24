@@ -21,6 +21,7 @@ import (
 //   - subscriptions (alert subscriptions; nullable FK preserves wildcards)
 //   - device_certificates (the row stays referenced by audit logs only)
 //   - device_files / device_file_history / device_file_observations
+//   - device_rule_workspaces / device_rule_workspace_history
 //
 // Continuous aggregates (device_telemetry_hourly / _daily) are NOT cascaded;
 // they're materialized views and lag until the next refresh or retention sweep.
