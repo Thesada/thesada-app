@@ -69,6 +69,23 @@
   </category>
 </xml>
 
+<script nonce="{{.CSPNonce}}">
+  // Blockly injects <style> tags at runtime. With a nonced style-src, those
+  // tags are refused unless they carry the same nonce (unsafe-inline is
+  // ignored once a nonce is present). Stamp createElement("style") here
+  // before the Blockly bundle runs.
+  window.__CSP_NONCE = "{{.CSPNonce}}";
+  (function () {
+    var create = Document.prototype.createElement;
+    Document.prototype.createElement = function (name, options) {
+      var el = create.call(this, name, options);
+      if (String(name).toLowerCase() === "style" && window.__CSP_NONCE) {
+        el.nonce = window.__CSP_NONCE;
+      }
+      return el;
+    };
+  })();
+</script>
 <script src="/static/js/blockly/blockly_compressed.js"></script>
 <script src="/static/js/blockly/blocks_compressed.js"></script>
 <script src="/static/js/blockly/lua_compressed.js"></script>
