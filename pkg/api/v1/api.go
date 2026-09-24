@@ -17,6 +17,7 @@ import (
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/config"
 	"thesada.app/app/pkg/httpsec"
+	"thesada.app/app/pkg/notify"
 	"thesada.app/app/pkg/pki"
 	"thesada.app/app/pkg/service"
 )
@@ -39,12 +40,13 @@ type Server struct {
 
 	// Rate limiters for the unauthenticated device enrollment surface.
 	enroll *enrollLimiters
+	notes  *notify.Mail
 }
 
 // New constructs the API server with all routes wired up.
 // in: cfg, services bundle, CA for pair endpoint. out: ready *Server.
-func New(cfg *config.Config, services *service.Services, ca *pki.CA) *Server {
-	s := &Server{cfg: cfg, services: services, ca: ca, mux: http.NewServeMux(),
+func New(cfg *config.Config, services *service.Services, ca *pki.CA, notes *notify.Mail) *Server {
+	s := &Server{cfg: cfg, services: services, ca: ca, notes: notes, mux: http.NewServeMux(),
 		enroll: newEnrollLimiters()}
 	s.routes()
 	return s
@@ -66,6 +68,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /auth/login", s.handleAuthLogin)
 	s.mux.HandleFunc("POST /auth/logout", s.handleAuthLogout)
 	s.mux.HandleFunc("POST /auth/magic-link", s.handleAuthMagicLink)
+	s.mux.HandleFunc("POST /auth/magic-link/verify", s.handleAuthMagicLinkVerify)
 	s.mux.HandleFunc("POST /auth/signup", s.handleAuthSignup)
 	s.mux.HandleFunc("GET /devices", authmw.RequireAuthJSON(s.handleDeviceList))
 	s.mux.HandleFunc("GET /devices/{id}", authmw.RequireAuthJSON(s.handleDeviceGet))
@@ -212,11 +215,6 @@ func (s *Server) handleDevicePair(w http.ResponseWriter, r *http.Request) {
 
 // Auth handlers live in auth.go; device-read in devices.go; alert + alert-
 // subscription handlers in alerts.go.
-//
-// magic-link is the one remaining stub (501): it needs the web layer's email
-// templates + rate-limiters + mailer, deferred.
-
-func (s *Server) handleAuthMagicLink(w http.ResponseWriter, r *http.Request) { stub(w) }
 
 // writeJSON writes a JSON body with the given status code.
 // in: writer, http status, payload to encode. out: none (best-effort write).
@@ -224,12 +222,6 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
-}
-
-// stub writes a 501 JSON error.
-// in: writer. out: 501 with {"error":"not implemented"}.
-func stub(w http.ResponseWriter) {
-	writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "not implemented"})
 }
 
 // decodeJSON decodes the request body into dst, writing a 400 JSON error on

@@ -30,8 +30,7 @@ func TestParseTemplates_EveryTemplateFileRegistered(t *testing.T) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		// layout.html is the shared shell, emails/ pairs are parsed via
-		// renderEmail's own map - only page templates must be registered.
+		// layout.html is the shared shell. Email templates live in pkg/notify.
 		if e.IsDir() || name == "layout.html" || !strings.HasSuffix(name, ".html") {
 			continue
 		}

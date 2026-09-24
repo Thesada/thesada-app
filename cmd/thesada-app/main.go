@@ -22,6 +22,7 @@ import (
 	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/mailer"
 	"thesada.app/app/pkg/mqtt"
+	"thesada.app/app/pkg/notify"
 	"thesada.app/app/pkg/pki"
 	"thesada.app/app/pkg/secrets"
 	"thesada.app/app/pkg/service"
@@ -244,7 +245,8 @@ func mustStartMQTT(ctx context.Context, cfg *config.Config, pool *db.Pool,
 func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub, mail *mailer.Mailer, mqttClient *mqtt.Client, ca *pki.CA, pool *db.Pool) *http.Server {
 	root := http.NewServeMux()
 
-	api := apiv1.New(cfg, services, ca)
+	notes := notify.New(services.Auth, mail, cfg.BaseURL)
+	api := apiv1.New(cfg, services, ca, notes)
 	api.SetHealthProbes(
 		func(ctx context.Context) error { return db.Ping(ctx, pool) },
 		mqttClient.Status,
@@ -260,7 +262,7 @@ func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub
 	wsChain := authmw.Middleware(services.Auth, cfg.TrustedProxies)(authmw.RequireAuth(hub.ServeHTTP))
 	root.Handle("/ws", wsChain)
 
-	web := web.New(cfg, services, mail, mqttClient, ca)
+	web := web.New(cfg, services, mail, mqttClient, ca, notes)
 	root.Handle("/", web)
 
 	return &http.Server{
