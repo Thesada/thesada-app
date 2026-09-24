@@ -390,8 +390,11 @@ var ThesadaRules = (function () {
       grid: { spacing: 20, length: 3, colour: "#ccc", snap: true },
       zoom: { controls: true, wheel: true, startScale: 0.9 },
     });
-    if (opts.seed !== false) {
+    // Caller decides seed vs restore; default remains seed for empty pages.
+    if (opts.seed === true || (opts.seed !== false && !opts.savedState)) {
       seedWorkspace(workspace);
+    } else if (opts.savedState) {
+      loadWorkspace(workspace, opts.savedState);
     }
     if (typeof Blockly !== "undefined" && Blockly.svgResize) {
       setTimeout(function () {
@@ -413,5 +416,20 @@ var ThesadaRules = (function () {
     return (PREAMBLE + out.join("\n")).replace(/\n+$/, "\n");
   }
 
-  return { init: init, generateLua: generateLua, seedWorkspace: seedWorkspace };
+  function serializeWorkspace(workspace) {
+    return Blockly.serialization.workspaces.save(workspace);
+  }
+
+  function loadWorkspace(workspace, state) {
+    workspace.clear();
+    Blockly.serialization.workspaces.load(state, workspace);
+  }
+
+  return {
+    init: init,
+    generateLua: generateLua,
+    seedWorkspace: seedWorkspace,
+    serializeWorkspace: serializeWorkspace,
+    loadWorkspace: loadWorkspace,
+  };
 })();
