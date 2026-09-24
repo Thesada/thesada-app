@@ -106,13 +106,13 @@ func TestUptimeLive(t *testing.T) {
 		t.Errorf("day bucket = %q", got)
 	}
 
-	freshAt := now.Add(-14 * time.Minute)
+	freshAt := time.Now().Add(-14 * time.Minute)
 	fresh := int64(0)
 	if got := uptimeLive(&fresh, &freshAt); got != "14m" {
 		t.Errorf("14m sample = %q, want 14m", got)
 	}
 
-	staleAt := now.Add(-16 * time.Minute)
+	staleAt := time.Now().Add(-16 * time.Minute)
 	if got := uptimeLive(&fresh, &staleAt); got != "16m (stale)" {
 		t.Errorf("16m sample = %q, want 16m (stale)", got)
 	}
