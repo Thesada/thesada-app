@@ -147,3 +147,29 @@ func TestRequestLoginLink_AddressCapStopsDistributedSends(t *testing.T) {
 		t.Fatalf("sends = %d, want %d", mail.sends, maxPerEmail)
 	}
 }
+
+func TestRequestLoginLink_AddressCapDoesNotSpendClientBudget(t *testing.T) {
+	mail := &fakeMail{}
+	accounts := &fakeAccounts{user: &service.User{ID: uuid.New(), Email: "ada@example.com"}}
+	m := New(accounts, mail, "https://app.example")
+	clients := maxPerEmail / maxPerIP
+	for n := 0; n < clients; n++ {
+		ip := fmt.Sprintf("192.0.2.%d", n+1)
+		for i := 0; i < maxPerIP; i++ {
+			if err := m.RequestLoginLink("ada@example.com", ip); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for i := 0; i < maxPerIP; i++ {
+		if err := m.RequestLoginLink("ada@example.com", "198.51.100.9"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.RequestLoginLink("other@example.com", "198.51.100.9"); err != nil {
+		t.Fatal(err)
+	}
+	if mail.sends != maxPerEmail+1 {
+		t.Fatalf("sends = %d, want %d", mail.sends, maxPerEmail+1)
+	}
+}

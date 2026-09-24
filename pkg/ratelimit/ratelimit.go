@@ -28,6 +28,23 @@ func New(window time.Duration, max int) *Limiter {
 	}
 }
 
+// WouldAllow reports whether key is under the cap. It does not record a hit
+// and does not create a map entry.
+// in: key. out: true when an immediate Allow would record a hit.
+func (l *Limiter) WouldAllow(key string) bool {
+	now := time.Now()
+	cutoff := now.Add(-l.window)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, t := range l.hits[key] {
+		if t.After(cutoff) {
+			n++
+		}
+	}
+	return n < l.max
+}
+
 // Allow records a hit for key at time.Now and reports whether the key is still
 // under the cap. Callers should check the return and reject if false.
 // in: key. out: true if allowed, false if rate exceeded.

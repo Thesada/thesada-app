@@ -121,15 +121,20 @@ func (m *Mail) request(email, ip, tmpl, subject, path string, login bool) error 
 	return nil
 }
 
-// The IP cap is first so a client already over quota does not create an address key.
+// The IP cap is checked first so a client already over quota does not create
+// an address key. The IP hit is recorded only after the address cap accepts.
 func (m *Mail) allow(email, ip string) bool {
 	email = strings.ToLower(email)
-	if ip != "" && !m.byIP.Allow("ip:"+ip) {
+	if ip != "" && !m.byIP.WouldAllow("ip:"+ip) {
 		slog.Warn("notify ip rate-limited", "ip", ip)
 		return false
 	}
 	if !m.byEmail.Allow("email:" + email) {
 		slog.Warn("notify email rate-limited", "email", email)
+		return false
+	}
+	if ip != "" && !m.byIP.Allow("ip:"+ip) {
+		slog.Warn("notify ip rate-limited", "ip", ip)
 		return false
 	}
 	return true

@@ -4,7 +4,7 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-09-23 (magic-link limiter checks the client IP before the address cap, and that cap sits above one client's budget). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
+Dated 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, and an address rejection does not spend the client's cap). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
 recovery refuses to run when the shared fallback credential is not
 connectable; unauthenticated device enrollment surface; device-facing
 enrollment endpoints address the row by its primary key and the claim
@@ -1068,8 +1068,9 @@ Source: `pkg/mqtt/mqtt_ingest.go::retryAlertInsert`.
 Window-based limiter (`pkg/ratelimit`). A request is dropped silently
 when the client IP is over its cap or when the address itself is over
 its wider cap. The IP cap is checked first so a client already over
-quota does not create an address key. One client cannot spend the
-address cap alone. The handler still returns the same sent result,
+quota does not create an address key. A rejected address does not
+spend that client's own cap. One client cannot spend the address cap
+alone. The handler still returns the same sent result,
 leaking neither which addresses exist nor whether a request was
 throttled. There is no 429. Map sweep removes empty entries on the
 window cadence so the map does not grow unbounded over the lifetime of
