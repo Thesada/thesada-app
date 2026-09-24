@@ -20,3 +20,20 @@ func TestValidRuleSlot(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeRuleSlot(t *testing.T) {
+	cases := []struct {
+		slot string
+		want string
+	}{
+		{"", DefaultRuleSlot},
+		{"rules.lua", "rules.lua"},
+		{"main.lua", "main.lua"},
+		{"other.lua", "other.lua"},
+	}
+	for _, tc := range cases {
+		if got := NormalizeRuleSlot(tc.slot); got != tc.want {
+			t.Errorf("NormalizeRuleSlot(%q) = %q, want %q", tc.slot, got, tc.want)
+		}
+	}
+}

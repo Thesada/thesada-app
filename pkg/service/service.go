@@ -48,7 +48,7 @@ func New(cfg *config.Config, pools db.Pools) (*Services, error) {
 		Tenants:        &TenantService{cfg: cfg, pools: pools, secrets: secretsSvc},
 		Settings:       &SettingsService{cfg: cfg, pools: pools, cache: make(map[string]json.RawMessage)},
 		DeviceFiles:    &DeviceFilesService{cfg: cfg, pools: pools},
-		RuleWorkspaces: &DeviceRuleWorkspacesService{cfg: cfg, pools: pools},
+		RuleWorkspaces: &DeviceRuleWorkspacesService{pools: pools},
 		Certificates:   &CertificateService{cfg: cfg, pools: pools},
 		OAuth:          NewOAuthService(cfg, pools),
 		ApiTokens:      &ApiTokenService{cfg: cfg, pools: pools},
