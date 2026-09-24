@@ -124,3 +124,31 @@ type DeviceFileObservation struct {
 	ReportedSHA256 string    `json:"reported_sha256"`
 	ObservedAt     time.Time `json:"observed_at"`
 }
+
+// DeviceRuleWorkspace is the canonical Blockly workspace for a device
+// file slot. LuaContent is the generated artifact; WorkspaceJSON is what
+// the editor reloads.
+type DeviceRuleWorkspace struct {
+	DevicePK      uuid.UUID  `json:"device_pk"`
+	Slot          string     `json:"slot"`
+	WorkspaceJSON string     `json:"workspace_json"`
+	LuaContent    string     `json:"lua_content"`
+	LuaSHA256     string     `json:"lua_sha256"`
+	Source        string     `json:"source"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	UpdatedBy     *uuid.UUID `json:"updated_by"`
+}
+
+// DeviceRuleWorkspaceHistory is one immutable save of a rule workspace.
+type DeviceRuleWorkspaceHistory struct {
+	ID            int64      `json:"id"`
+	DevicePK      uuid.UUID  `json:"device_pk"`
+	Slot          string     `json:"slot"`
+	WorkspaceJSON string     `json:"workspace_json"`
+	LuaContent    string     `json:"lua_content"`
+	LuaSHA256     string     `json:"lua_sha256"`
+	PrevSHA256    *string    `json:"prev_sha256"`
+	Source        string     `json:"source"`
+	CreatedBy     *uuid.UUID `json:"created_by"`
+	CreatedAt     time.Time  `json:"created_at"`
+}

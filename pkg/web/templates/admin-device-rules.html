@@ -4,11 +4,12 @@
   <div>
     <a href="/admin/devices/{{.Device.ID}}/config" class="text-xs text-slate-500 hover:underline">&larr; Config</a>
     <h1 class="text-2xl font-semibold mt-1">{{.Device.DeviceID}} - Visual rules</h1>
-    <p class="text-sm text-slate-500">Blockly → <span class="font-mono">/scripts/rules.lua</span>. Generate-only (no import from hand-written Lua yet). Sustain/cooldown match the device example rules.</p>
+    <p class="text-sm text-slate-500">Blockly → <span class="font-mono">/scripts/{{.RuleSlot}}</span>. Workspace JSON is saved server-side for round-trip editing; Lua is what the device runs after Push.</p>
     <p class="text-xs text-slate-400 font-mono mt-1">{{.TopicPrefix}}</p>
   </div>
   <div class="flex gap-2 flex-wrap">
     <button type="button" id="btn-preview" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Refresh Lua</button>
+    <button type="button" id="btn-save" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Save workspace</button>
     <button type="button" id="btn-push" class="text-sm px-3 py-1 rounded bg-amber-600 text-white hover:bg-amber-700">Push to device</button>
     <button type="button" id="btn-push-reload" class="text-sm px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Push + reload</button>
     <button type="button" id="btn-reload" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">lua.reload</button>
@@ -23,7 +24,7 @@
   </div>
   <div class="bg-white border border-slate-200 rounded-xl p-4 flex flex-col min-h-[640px]">
     <h2 class="text-sm font-semibold mb-2">Generated Lua</h2>
-    <pre id="lua-preview" class="flex-1 overflow-auto font-mono text-xs bg-slate-50 border border-slate-200 rounded p-3 whitespace-pre-wrap">Build blocks, then Preview Lua.</pre>
+    <pre id="lua-preview" class="flex-1 overflow-auto font-mono text-xs bg-slate-50 border border-slate-200 rounded p-3 whitespace-pre-wrap">Loading workspace…</pre>
   </div>
 </div>
 
@@ -78,6 +79,8 @@
   var deviceID = "{{.Device.ID}}";
   var csrfToken = "{{.CSRFToken}}";
   var cliTimeoutSeconds = {{.CLITimeoutSeconds}};
+  var ruleSlot = "{{.RuleSlot}}";
+  var scriptPath = "/scripts/" + ruleSlot;
 
   var statusHideTimer = null;
   function status(msg, ok) {
@@ -142,83 +145,145 @@
     );
   }
 
-  var workspace = ThesadaRules.init({
-    workspaceEl: document.getElementById("blockly-workspace"),
-    toolboxEl: document.getElementById("toolbox"),
-    mediaPath: "/static/js/blockly/media/"
-  });
+  function saveWorkspace(source) {
+    var state = ThesadaRules.serializeWorkspace(workspace);
+    var lua = refreshPreview();
+    return fetch("/admin/devices/" + deviceID + "/rules/workspace", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CSRF-Token": csrfToken},
+      body: JSON.stringify({
+        slot: ruleSlot,
+        workspace_json: JSON.stringify(state),
+        lua_content: lua || "",
+        source: source || "editor"
+      })
+    }).then(parseJSON).then(function(res) {
+      if (!res.ok) throw new Error("save failed: " + JSON.stringify(res));
+      return res;
+    });
+  }
+
+  var workspace = null;
 
   function refreshPreview() {
+    if (!workspace) return "";
     var lua = ThesadaRules.generateLua(workspace);
     document.getElementById("lua-preview").textContent = lua || "-- empty workspace";
     return lua;
   }
 
-  document.getElementById("btn-preview").addEventListener("click", function() {
-    refreshPreview();
-    status("Lua preview updated", true);
-  });
-
-  function pushRules(thenReload) {
-    var lua = refreshPreview();
-    if (!lua || !lua.trim()) { status("nothing to push", false); return; }
-    statusPending("pushing /scripts/rules.lua…");
-    postWrite("/scripts/rules.lua", lua).then(function(enq) {
-      if (!enq.request_id) {
-        throw new Error("enqueue failed: " + JSON.stringify(enq));
-      }
-      return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds);
-    }).then(function(res) {
-      assertDeviceOK(res, "write failed");
-      if (!thenReload) {
-        status("rules.lua pushed — run lua.reload to apply", true);
-        return null;
-      }
-      statusPending("lua.reload…");
-      return postCmd("lua.reload", "").then(function(enq2) {
-        if (!enq2.request_id) {
-          throw new Error("enqueue failed: " + JSON.stringify(enq2));
-        }
-        return pollResult(enq2.request_id, enq2.timeout_seconds || cliTimeoutSeconds);
-      });
-    }).then(function(res) {
-      if (!res) return;
-      assertDeviceOK(res, "reload failed");
-      status("rules.lua pushed and reloaded", true);
-    }).catch(function(err) {
-      status(String(err.message || err), false);
+  function wireWorkspace() {
+    document.getElementById("btn-preview").addEventListener("click", function() {
+      refreshPreview();
+      status("Lua preview updated", true);
     });
+
+    document.getElementById("btn-save").addEventListener("click", function() {
+      statusPending("saving workspace…");
+      saveWorkspace("editor").then(function(res) {
+        status("workspace saved (sha " + (res.lua_sha256 || "").slice(0, 12) + "…)", true);
+      }).catch(function(err) {
+        status(String(err.message || err), false);
+      });
+    });
+
+    function pushRules(thenReload) {
+      var lua = refreshPreview();
+      if (!lua || !lua.trim()) { status("nothing to push", false); return; }
+      statusPending("saving workspace…");
+      saveWorkspace("push").then(function() {
+        statusPending("pushing " + scriptPath + "…");
+        return postWrite(scriptPath, lua);
+      }).then(function(enq) {
+        if (!enq.request_id) {
+          throw new Error("enqueue failed: " + JSON.stringify(enq));
+        }
+        return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds);
+      }).then(function(res) {
+        assertDeviceOK(res, "write failed");
+        if (!thenReload) {
+          status(ruleSlot + " pushed — run lua.reload to apply", true);
+          return null;
+        }
+        statusPending("lua.reload…");
+        return postCmd("lua.reload", "").then(function(enq2) {
+          if (!enq2.request_id) {
+            throw new Error("enqueue failed: " + JSON.stringify(enq2));
+          }
+          return pollResult(enq2.request_id, enq2.timeout_seconds || cliTimeoutSeconds);
+        });
+      }).then(function(res) {
+        if (!res) return;
+        assertDeviceOK(res, "reload failed");
+        status(ruleSlot + " pushed and reloaded", true);
+      }).catch(function(err) {
+        status(String(err.message || err), false);
+      });
+    }
+
+    document.getElementById("btn-push").addEventListener("click", function() {
+      pushRules(false);
+    });
+    document.getElementById("btn-push-reload").addEventListener("click", function() {
+      pushRules(true);
+    });
+
+    document.getElementById("btn-reload").addEventListener("click", function() {
+      statusPending("lua.reload…");
+      postCmd("lua.reload", "").then(function(enq) {
+        if (!enq.request_id) {
+          throw new Error("enqueue failed: " + JSON.stringify(enq));
+        }
+        return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds);
+      }).then(function(res) {
+        assertDeviceOK(res, "reload failed");
+        status("lua.reload ok", true);
+      }).catch(function(err) {
+        status(String(err.message || err), false);
+      });
+    });
+
+    var previewTimer = null;
+    workspace.addChangeListener(function(e) {
+      if (e.isUiEvent) return;
+      if (previewTimer) clearTimeout(previewTimer);
+      previewTimer = setTimeout(refreshPreview, 200);
+    });
+    refreshPreview();
   }
 
-  document.getElementById("btn-push").addEventListener("click", function() {
-    pushRules(false);
-  });
-  document.getElementById("btn-push-reload").addEventListener("click", function() {
-    pushRules(true);
-  });
-
-  document.getElementById("btn-reload").addEventListener("click", function() {
-    statusPending("lua.reload…");
-    postCmd("lua.reload", "").then(function(enq) {
-      if (!enq.request_id) {
-        throw new Error("enqueue failed: " + JSON.stringify(enq));
-      }
-      return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds);
-    }).then(function(res) {
-      assertDeviceOK(res, "reload failed");
-      status("lua.reload ok", true);
-    }).catch(function(err) {
-      status(String(err.message || err), false);
+  statusPending("loading workspace…");
+  fetch("/admin/devices/" + deviceID + "/rules/workspace?slot=" + encodeURIComponent(ruleSlot), {
+    headers: {"X-CSRF-Token": csrfToken}
+  }).then(parseJSON).then(function(res) {
+    var savedState = null;
+    if (res.exists && res.workspace_json) {
+      try { savedState = JSON.parse(res.workspace_json); }
+      catch (e) { throw new Error("corrupt saved workspace JSON"); }
+    }
+    workspace = ThesadaRules.init({
+      workspaceEl: document.getElementById("blockly-workspace"),
+      toolboxEl: document.getElementById("toolbox"),
+      mediaPath: "/static/js/blockly/media/",
+      seed: !savedState,
+      savedState: savedState
     });
+    wireWorkspace();
+    if (savedState) {
+      status("restored saved workspace", true);
+    } else {
+      status("seeded starter workspace — Save to keep it", true);
+    }
+  }).catch(function(err) {
+    workspace = ThesadaRules.init({
+      workspaceEl: document.getElementById("blockly-workspace"),
+      toolboxEl: document.getElementById("toolbox"),
+      mediaPath: "/static/js/blockly/media/",
+      seed: true
+    });
+    wireWorkspace();
+    status("could not load saved workspace: " + (err.message || err), false);
   });
-
-  var previewTimer = null;
-  workspace.addChangeListener(function(e) {
-    if (e.isUiEvent) return;
-    if (previewTimer) clearTimeout(previewTimer);
-    previewTimer = setTimeout(refreshPreview, 200);
-  });
-  refreshPreview();
 })();
 </script>
 {{end}}
