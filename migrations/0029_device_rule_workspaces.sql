@@ -63,7 +63,10 @@ CREATE TRIGGER trg_device_rule_workspace_history_set_tenant
     BEFORE INSERT ON device_rule_workspace_history
     FOR EACH ROW EXECUTE FUNCTION device_rule_workspace_history_set_tenant();
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON device_rule_workspaces, device_rule_workspace_history
+GRANT SELECT, INSERT, UPDATE, DELETE ON device_rule_workspaces
+    TO thesada_app, thesada_app_admin;
+-- History is append-only; deny UPDATE/DELETE so app roles cannot rewrite past saves.
+GRANT SELECT, INSERT ON device_rule_workspace_history
     TO thesada_app, thesada_app_admin;
 GRANT USAGE, SELECT ON SEQUENCE device_rule_workspace_history_id_seq
     TO thesada_app, thesada_app_admin;

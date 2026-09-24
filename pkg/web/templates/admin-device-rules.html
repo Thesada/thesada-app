@@ -13,6 +13,7 @@
     <button type="button" id="btn-push" class="text-sm px-3 py-1 rounded bg-amber-600 text-white hover:bg-amber-700">Push to device</button>
     <button type="button" id="btn-push-reload" class="text-sm px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-800">Push + reload</button>
     <button type="button" id="btn-reload" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">lua.reload</button>
+    <button type="button" id="btn-use-starter" class="hidden text-sm px-3 py-1 rounded border border-amber-500 text-amber-800 hover:bg-amber-50">Use starter workspace</button>
   </div>
 </div>
 
@@ -181,6 +182,37 @@
   }
 
   var workspace = null;
+  var writesAllowed = true;
+  var writeBusy = false;
+  var writeBtnIds = ["btn-save", "btn-push", "btn-push-reload"];
+
+  function setWriteControls(enabled) {
+    writeBtnIds.forEach(function(id) {
+      var b = document.getElementById(id);
+      if (b) b.disabled = !enabled;
+    });
+  }
+
+  function beginWrite() {
+    if (!writesAllowed || writeBusy) return false;
+    writeBusy = true;
+    setWriteControls(false);
+    return true;
+  }
+
+  function endWrite() {
+    writeBusy = false;
+    if (writesAllowed) setWriteControls(true);
+  }
+
+  function clearWorkspaceEl() {
+    if (workspace && typeof workspace.dispose === "function") {
+      try { workspace.dispose(); } catch (e) { /* ignore dispose errors */ }
+      workspace = null;
+    }
+    var el = document.getElementById("blockly-workspace");
+    while (el.firstChild) el.removeChild(el.firstChild);
+  }
 
   function refreshPreview() {
     if (!workspace) return "";
@@ -196,17 +228,19 @@
     });
 
     document.getElementById("btn-save").addEventListener("click", function() {
+      if (!beginWrite()) return;
       statusPending("saving workspace…");
       saveWorkspace("editor").then(function(res) {
         status("workspace saved (sha " + (res.lua_sha256 || "").slice(0, 12) + "…)", true);
       }).catch(function(err) {
         status(String(err.message || err), false);
-      });
+      }).finally(endWrite);
     });
 
     function pushRules(thenReload) {
       var lua = refreshPreview();
       if (!lua || !lua.trim()) { status("nothing to push", false); return; }
+      if (!beginWrite()) return;
       statusPending("saving workspace…");
       saveWorkspace("push").then(function() {
         statusPending("pushing " + scriptPath + "…");
@@ -235,7 +269,7 @@
         status(ruleSlot + " pushed and reloaded", true);
       }).catch(function(err) {
         status(String(err.message || err), false);
-      });
+      }).finally(endWrite);
     }
 
     document.getElementById("btn-push").addEventListener("click", function() {
@@ -258,6 +292,13 @@
       }).catch(function(err) {
         status(String(err.message || err), false);
       });
+    });
+
+    document.getElementById("btn-use-starter").addEventListener("click", function() {
+      writesAllowed = true;
+      setWriteControls(true);
+      this.classList.add("hidden");
+      status("starter workspace unlocked — Save to keep it", true);
     });
 
     var previewTimer = null;
@@ -296,9 +337,15 @@
       status("seeded starter workspace — Save to keep it", true);
     }
   }).catch(function(err) {
+    // Do not leave Save/Push armed after a failed restore: starter Lua would
+    // overwrite the device's real rules. Clear any partial inject first.
+    clearWorkspaceEl();
     workspace = injectWorkspace({seed: true});
+    writesAllowed = false;
+    setWriteControls(false);
     wireWorkspace();
-    status("could not load saved workspace: " + (err.message || err), false);
+    document.getElementById("btn-use-starter").classList.remove("hidden");
+    status("could not load saved workspace: " + (err.message || err) + " — writes locked until you opt into the starter", false);
   });
 })();
 </script>

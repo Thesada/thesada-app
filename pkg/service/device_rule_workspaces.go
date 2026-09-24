@@ -157,7 +157,7 @@ func (s *DeviceRuleWorkspacesService) History(ctx context.Context, tenantID stri
 		SELECT id, device_pk, slot, workspace_json, lua_content, lua_sha256, prev_sha256, source, created_by, created_at
 		FROM device_rule_workspace_history
 		WHERE device_pk = $1 AND slot = $2
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, id DESC
 		LIMIT $3`
 	var out []DeviceRuleWorkspaceHistory
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
