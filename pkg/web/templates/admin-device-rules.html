@@ -269,6 +269,16 @@
     refreshPreview();
   }
 
+  function injectWorkspace(opts) {
+    return ThesadaRules.init({
+      workspaceEl: document.getElementById("blockly-workspace"),
+      toolboxEl: document.getElementById("toolbox"),
+      mediaPath: "/static/js/blockly/media/",
+      seed: !!opts.seed,
+      savedState: opts.savedState || null
+    });
+  }
+
   statusPending("loading workspace…");
   fetch("/admin/devices/" + deviceID + "/rules/workspace?slot=" + encodeURIComponent(ruleSlot), {
     headers: {"X-CSRF-Token": csrfToken}
@@ -278,13 +288,7 @@
       try { savedState = JSON.parse(res.workspace_json); }
       catch (e) { throw new Error("corrupt saved workspace JSON"); }
     }
-    workspace = ThesadaRules.init({
-      workspaceEl: document.getElementById("blockly-workspace"),
-      toolboxEl: document.getElementById("toolbox"),
-      mediaPath: "/static/js/blockly/media/",
-      seed: !savedState,
-      savedState: savedState
-    });
+    workspace = injectWorkspace({seed: !savedState, savedState: savedState});
     wireWorkspace();
     if (savedState) {
       status("restored saved workspace", true);
@@ -292,12 +296,7 @@
       status("seeded starter workspace — Save to keep it", true);
     }
   }).catch(function(err) {
-    workspace = ThesadaRules.init({
-      workspaceEl: document.getElementById("blockly-workspace"),
-      toolboxEl: document.getElementById("toolbox"),
-      mediaPath: "/static/js/blockly/media/",
-      seed: true
-    });
+    workspace = injectWorkspace({seed: true});
     wireWorkspace();
     status("could not load saved workspace: " + (err.message || err), false);
   });

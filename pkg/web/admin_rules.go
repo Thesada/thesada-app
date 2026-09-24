@@ -2,7 +2,6 @@ package web
 
 import (
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 
@@ -13,28 +12,14 @@ import (
 )
 
 const (
-	ruleSlotRulesLua = "rules.lua"
 	// Cap workspace POST bodies. Blockly JSON for a dense ruleset is small;
 	// this is a DoS backstop, not a product limit.
 	maxRuleWorkspaceBody = 1 << 20 // 1 MiB
 )
 
 func (s *Server) handleAdminDeviceRules(w http.ResponseWriter, r *http.Request) {
-	idStr := r.PathValue("id")
-	id, err := uuid.Parse(idStr)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-
-	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
-	if err != nil {
-		slog.Error("device lookup failed", "device", id, "err", err)
-		http.Error(w, "device lookup failed", http.StatusInternalServerError)
-		return
-	}
-	if device == nil {
-		http.NotFound(w, r)
+	device, ok := s.adminDeviceFromPath(w, r)
+	if !ok {
 		return
 	}
 
@@ -42,7 +27,7 @@ func (s *Server) handleAdminDeviceRules(w http.ResponseWriter, r *http.Request) 
 		"Device":            device,
 		"TopicPrefix":       s.deviceTopicPrefix(device),
 		"CLITimeoutSeconds": int(s.cfg.CLIRequestTimeout.Seconds()),
-		"RuleSlot":          ruleSlotRulesLua,
+		"RuleSlot":          service.DefaultRuleSlot,
 	})
 }
 
@@ -57,14 +42,11 @@ type ruleWorkspaceSaveRequest struct {
 // a device slot, or {exists:false} when none has been saved yet.
 // in: writer, request (?slot=). out: JSON.
 func (s *Server) handleAdminDeviceRulesWorkspaceGET(w http.ResponseWriter, r *http.Request) {
-	_, device, ok := s.adminDeviceFromPath(w, r)
+	device, ok := s.adminDeviceFromPath(w, r)
 	if !ok {
 		return
 	}
-	slot := r.URL.Query().Get("slot")
-	if slot == "" {
-		slot = ruleSlotRulesLua
-	}
+	slot := service.NormalizeRuleSlot(r.URL.Query().Get("slot"))
 	if !service.ValidRuleSlot(slot) {
 		http.Error(w, "invalid slot", http.StatusBadRequest)
 		return
@@ -96,23 +78,17 @@ func (s *Server) handleAdminDeviceRulesWorkspaceGET(w http.ResponseWriter, r *ht
 // goes through /config/write.
 // in: writer, request (JSON body). out: JSON {ok, lua_sha256}.
 func (s *Server) handleAdminDeviceRulesWorkspacePOST(w http.ResponseWriter, r *http.Request) {
-	_, device, ok := s.adminDeviceFromPath(w, r)
+	device, ok := s.adminDeviceFromPath(w, r)
 	if !ok {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRuleWorkspaceBody)
 	var req ruleWorkspaceSaveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if err == io.EOF {
-			http.Error(w, "bad json", http.StatusBadRequest)
-			return
-		}
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	if req.Slot == "" {
-		req.Slot = ruleSlotRulesLua
-	}
+	req.Slot = service.NormalizeRuleSlot(req.Slot)
 	if !service.ValidRuleSlot(req.Slot) {
 		http.Error(w, "invalid slot", http.StatusBadRequest)
 		return
@@ -120,6 +96,12 @@ func (s *Server) handleAdminDeviceRulesWorkspacePOST(w http.ResponseWriter, r *h
 	if req.WorkspaceJSON == "" {
 		http.Error(w, "workspace_json required", http.StatusBadRequest)
 		return
+	}
+	// WHY: the service requires a non-empty source; the visual editor is the
+	// only caller today, so omitted source defaults here rather than silently
+	// inside Save.
+	if req.Source == "" {
+		req.Source = "editor"
 	}
 	user := authmw.CurrentUser(r)
 	sha, err := s.services.RuleWorkspaces.Save(
@@ -138,22 +120,22 @@ func (s *Server) handleAdminDeviceRulesWorkspacePOST(w http.ResponseWriter, r *h
 
 // adminDeviceFromPath resolves the {id} path param to a device for
 // super-admin handlers. Writes 4xx/5xx and returns ok=false on failure.
-func (s *Server) adminDeviceFromPath(w http.ResponseWriter, r *http.Request) (uuid.UUID, *service.Device, bool) {
+func (s *Server) adminDeviceFromPath(w http.ResponseWriter, r *http.Request) (*service.Device, bool) {
 	idStr := r.PathValue("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
 		http.Error(w, "bad device id", http.StatusBadRequest)
-		return uuid.Nil, nil, false
+		return nil, false
 	}
 	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
 	if err != nil {
 		slog.Error("device lookup failed", "device", id, "err", err)
 		http.Error(w, "device lookup failed", http.StatusInternalServerError)
-		return uuid.Nil, nil, false
+		return nil, false
 	}
 	if device == nil {
 		http.NotFound(w, r)
-		return uuid.Nil, nil, false
+		return nil, false
 	}
-	return id, device, true
+	return device, true
 }

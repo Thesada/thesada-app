@@ -13,9 +13,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"thesada.app/app/pkg/config"
 	"thesada.app/app/pkg/db"
 )
+
+// DefaultRuleSlot is the primary visual-rules slot. Keep in sync with the
+// CHECK on device_rule_workspaces (migration 0029).
+const DefaultRuleSlot = "rules.lua"
 
 // Allowed rule-workspace slots. Matches the CHECK on the table; keep in sync
 // with migration 0029. New slots are a follow-up issue, not an open enum.
@@ -26,7 +29,6 @@ var allowedRuleSlots = map[string]struct{}{
 
 // DeviceRuleWorkspacesService owns device_rule_workspaces + history.
 type DeviceRuleWorkspacesService struct {
-	cfg   *config.Config
 	pools db.Pools
 }
 
@@ -37,9 +39,17 @@ func ValidRuleSlot(slot string) bool {
 	return ok
 }
 
-// Save upserts the canonical workspace for (devicePk, slot) and appends a
-// history row when lua_sha256 changes or the operator re-saves. Tenant-scoped
-// via WithTenant.
+// NormalizeRuleSlot maps an omitted/empty slot to DefaultRuleSlot.
+// in: raw slot from query/body. out: normalized slot (may still be invalid).
+func NormalizeRuleSlot(slot string) string {
+	if slot == "" {
+		return DefaultRuleSlot
+	}
+	return slot
+}
+
+// Save upserts the canonical workspace for (devicePk, slot) and always appends
+// a history row. Tenant-scoped via WithTenant.
 //
 // in: ctx, tenantID, devicePk, slot, workspaceJSON, luaContent, source, createdBy
 // out: lua sha256 hex, error
@@ -57,7 +67,7 @@ func (s *DeviceRuleWorkspacesService) Save(
 		return "", errors.New("workspace_json required")
 	}
 	if source == "" {
-		source = "editor"
+		return "", errors.New("source required")
 	}
 	sum := sha256.Sum256([]byte(luaContent))
 	shaHex := hex.EncodeToString(sum[:])
