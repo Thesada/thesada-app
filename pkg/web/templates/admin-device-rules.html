@@ -253,7 +253,7 @@
       }).then(function(res) {
         assertDeviceOK(res, "write failed");
         if (!thenReload) {
-          status(ruleSlot + " pushed — run lua.reload to apply", true);
+          status(ruleSlot + " pushed - run lua.reload to apply", true);
           return null;
         }
         statusPending("lua.reload…");
@@ -298,7 +298,7 @@
       writesAllowed = true;
       setWriteControls(true);
       this.classList.add("hidden");
-      status("starter workspace unlocked — Save to keep it", true);
+      status("starter workspace unlocked - Save to keep it", true);
     });
 
     var previewTimer = null;
@@ -334,7 +334,7 @@
     if (savedState) {
       status("restored saved workspace", true);
     } else {
-      status("seeded starter workspace — Save to keep it", true);
+      status("seeded starter workspace - Save to keep it", true);
     }
   }).catch(function(err) {
     // Do not leave Save/Push armed after a failed restore: starter Lua would
@@ -345,7 +345,7 @@
     setWriteControls(false);
     wireWorkspace();
     document.getElementById("btn-use-starter").classList.remove("hidden");
-    status("could not load saved workspace: " + (err.message || err) + " — writes locked until you opt into the starter", false);
+    status("could not load saved workspace: " + (err.message || err) + " - writes locked until you opt into the starter", false);
   });
 })();
 </script>
