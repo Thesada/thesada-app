@@ -61,32 +61,10 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.allowMagicLink(email, s.clientIP(r)) {
-		s.render(w, r, "login.html", map[string]interface{}{"Sent": true, "Email": email})
-		return
-	}
-	u, err := s.services.Auth.GetUserByEmailAnyTenant(email)
-	if err != nil {
-		if errors.Is(err, service.ErrNotFound) {
-			s.render(w, r, "login.html", map[string]interface{}{"Sent": true, "Email": email})
-			return
-		}
-		slog.Error("user lookup failed", "email", email, "err", err)
+	if err := s.notes.RequestLoginLink(email, s.clientIP(r)); err != nil {
+		slog.Error("magic link failed", "email", email, "err", err)
 		http.Error(w, "login failed", http.StatusInternalServerError)
 		return
-	}
-	token, _, err := s.services.Auth.CreateMagicLink(u.ID)
-	if err != nil {
-		slog.Error("magic link create failed", "email", email, "err", err)
-		http.Error(w, "login failed", http.StatusInternalServerError)
-		return
-	}
-	link := s.cfg.BaseURL + "/login/verify?token=" + token
-	textBody, htmlBody, err := s.renderEmail("login_link", map[string]interface{}{"Link": link})
-	if err != nil {
-		slog.Error("login email render failed", "err", err)
-	} else if err := s.mailer.SendMIME(email, "Your thesada sign-in link", textBody, htmlBody); err != nil {
-		slog.Error("magic link email failed", "email", email, "err", err)
 	}
 	s.render(w, r, "login.html", map[string]interface{}{"Sent": true, "Email": email})
 }
@@ -212,20 +190,6 @@ func (s *Server) notifyAdminWaitlist(email, note, ip string) {
 	}()
 }
 
-// allowMagicLink checks per-email and per-IP rate limiters; false = silent drop so the endpoint leaks no address info.
-// in: email, client ip. out: true if both limiters have headroom.
-func (s *Server) allowMagicLink(email, ip string) bool {
-	if !s.emailLimits.Allow("email:" + strings.ToLower(email)) {
-		slog.Warn("magic link email rate-limited", "email", email)
-		return false
-	}
-	if ip != "" && !s.ipLimits.Allow("ip:"+ip) {
-		slog.Warn("magic link ip rate-limited", "ip", ip)
-		return false
-	}
-	return true
-}
-
 // handleForgotForm renders the "enter your email" password-reset request page.
 // in: writer, request. out: HTML form.
 func (s *Server) handleForgotForm(w http.ResponseWriter, r *http.Request) {
@@ -244,35 +208,12 @@ func (s *Server) handleForgotSubmit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "forgot.html", map[string]interface{}{"Error": "Email is required."})
 		return
 	}
-	confirm := map[string]interface{}{"Sent": true, "Email": email}
-	if !s.allowMagicLink(email, s.clientIP(r)) {
-		s.render(w, r, "forgot.html", confirm)
-		return
-	}
-	u, err := s.services.Auth.GetUserByEmailAnyTenant(email)
-	if err != nil {
-		if errors.Is(err, service.ErrNotFound) {
-			s.render(w, r, "forgot.html", confirm)
-			return
-		}
-		slog.Error("forgot user lookup failed", "email", email, "err", err)
+	if err := s.notes.RequestResetLink(email, s.clientIP(r)); err != nil {
+		slog.Error("reset link failed", "email", email, "err", err)
 		http.Error(w, "reset failed", http.StatusInternalServerError)
 		return
 	}
-	token, _, err := s.services.Auth.CreateResetLink(u.ID)
-	if err != nil {
-		slog.Error("reset link create failed", "email", email, "err", err)
-		http.Error(w, "reset failed", http.StatusInternalServerError)
-		return
-	}
-	link := s.cfg.BaseURL + "/reset-password?token=" + token
-	textBody, htmlBody, err := s.renderEmail("reset_link", map[string]interface{}{"Link": link})
-	if err != nil {
-		slog.Error("reset email render failed", "err", err)
-	} else if err := s.mailer.SendMIME(email, "Your thesada password reset link", textBody, htmlBody); err != nil {
-		slog.Error("reset email failed", "email", email, "err", err)
-	}
-	s.render(w, r, "forgot.html", confirm)
+	s.render(w, r, "forgot.html", map[string]interface{}{"Sent": true, "Email": email})
 }
 
 // handleResetForm validates the reset token and renders the new-password form; token not consumed until handleResetSubmit succeeds.

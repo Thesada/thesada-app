@@ -29,7 +29,7 @@
         <td class="px-4 py-2 text-slate-500 text-xs hidden sm:table-cell">{{fmtTime .Entry.CreatedAt}}</td>
         <td class="px-4 py-2 text-right">
           <form method="POST" action="/admin/waitlist/{{.Entry.ID}}/convert" class="inline-flex flex-wrap gap-1 items-center"
-                onsubmit="return confirm('Convert {{.Entry.Email}} to a user in the selected tenant? They will get a password-reset email.');">
+                data-confirm="Convert {{.Entry.Email}} to a user in the selected tenant? They will get a password-reset email.">
             <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
             <select name="target_tenant" class="text-xs border border-slate-300 rounded px-2 py-1">
               {{$src := .Entry.TenantID}}
@@ -43,7 +43,7 @@
             <button type="submit" class="text-xs px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 text-white">convert</button>
           </form>
           <form method="POST" action="/admin/waitlist/{{.Entry.ID}}/delete" class="inline"
-                onsubmit="return confirm('Really delete {{.Entry.Email}} from the waitlist?');">
+                data-confirm="Really delete {{.Entry.Email}} from the waitlist?">
             <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
             <button type="submit" class="text-xs px-2 py-1 rounded bg-red-600 hover:bg-red-500 text-white">delete</button>
           </form>

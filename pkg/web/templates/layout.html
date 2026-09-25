@@ -4,6 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="htmx-config" content='{"inlineStyleNonce":"{{.CSPNonce}}"}'>
   <title>{{block "title" .}}thesada{{end}}</title>
   <link rel="stylesheet" href="/static/css/app.css">
   <!-- vendored JS - check quarterly, see  -->
@@ -52,14 +53,38 @@
   <footer class="max-w-5xl mx-auto px-4 py-6 text-xs text-slate-500">
     thesada-app dev build - {{.Now}}
   </footer>
-  <script>
+  <script nonce="{{.CSPNonce}}">
+    document.addEventListener('click', function (ev) {
+      var el = ev.target.closest('[data-act]');
+      if (!el) return;
+      var fn = window[el.getAttribute('data-act')];
+      if (typeof fn !== 'function') return;
+      var arg = el.getAttribute('data-arg');
+      if (arg === null) fn();
+      else if (arg === 'true') fn(true);
+      else if (arg === 'false') fn(false);
+      else fn(arg);
+    });
+    document.addEventListener('submit', function (ev) {
+      var form = ev.target;
+      if (!form || !form.getAttribute) return;
+      var msg = form.getAttribute('data-confirm');
+      if (msg && !window.confirm(msg)) {
+        ev.preventDefault();
+        return;
+      }
+      var name = form.getAttribute('data-submit');
+      if (!name) return;
+      var fn = window[name];
+      if (typeof fn === 'function' && fn(form) === false) ev.preventDefault();
+    }, true);
     document.querySelectorAll('time[datetime]').forEach(function (el) {
       var d = new Date(el.getAttribute('datetime'));
       if (!isNaN(d)) el.textContent = d.toLocaleString();
     });
   </script>
   {{if .User}}
-  <script>
+  <script nonce="{{.CSPNonce}}">
     (function () {
       var proto = location.protocol === "https:" ? "wss:" : "ws:";
       var url = proto + "//" + location.host + "/ws";

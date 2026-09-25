@@ -274,7 +274,7 @@ func (s *Server) handleEnrollCert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tenant := *e.ClaimedByTenant
-	device, err := s.services.Devices.GetByDeviceID(tenant, req.DeviceID)
+	device, err := s.services.Devices.GetByDeviceID(r.Context(), tenant, req.DeviceID)
 	if err != nil || device == nil {
 		// The claim step is responsible for creating this row. Its absence is
 		// a server-side inconsistency, logged loudly - but the answer is the

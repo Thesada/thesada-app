@@ -31,10 +31,9 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
-      # --build-tags integration so //go:build integration files lint too.
+        run: make lint-tools
       - name: Run lint
-        run: $(go env GOPATH)/bin/golangci-lint run --build-tags integration ./...
+        run: make lint
 
   # Forbid new pools.App.{Query,Exec,...} callers outside the pkg/db contract.
   pools-app-guard:
@@ -44,7 +43,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Guard pools.App direct callers
-        run: bash scripts/check-pools-app.sh
+        run: make pools
 
   # Unit tests (no DB). Integration lane needs a Docker-capable runner with
   # testcontainers; add when one is wired up.
@@ -75,7 +74,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Security-package coverage gate (>= 80%)
-        run: bash scripts/check-coverage.sh
+        run: make coverage
 
   govulncheck:
     runs-on: ubuntu-latest
@@ -87,9 +86,9 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+        run: make sec-tools
       - name: Run govulncheck
-        run: $(go env GOPATH)/bin/govulncheck ./...
+        run: make sec-vuln
 
   gosec:
     runs-on: ubuntu-latest
@@ -101,12 +100,11 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
-      # Full report to logs (non-gating), then gate on HIGH severity.
+        run: make sec-tools
       - name: Full report
-        run: $(go env GOPATH)/bin/gosec -fmt text ./... || true
+        run: make sec-full
       - name: Gate on HIGH severity
-        run: $(go env GOPATH)/bin/gosec -severity high -confidence medium -fmt text -quiet ./...
+        run: make sec-static
 
   # Every non-merge commit in a PR must carry Signed-off-by. PR-only: the
   # squash commit on dev/main is written by the merge box, not a contributor.

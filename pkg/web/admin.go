@@ -271,10 +271,7 @@ func (s *Server) handleAdminWaitlistConvert(w http.ResponseWriter, r *http.Reque
 		slog.Warn("admin waitlist reset link create failed", "user_id", u.ID, "err", err)
 	} else {
 		link := s.cfg.BaseURL + "/reset-password?token=" + token
-		textBody, htmlBody, rerr := s.renderEmail("reset_link", map[string]interface{}{"Link": link})
-		if rerr != nil {
-			slog.Warn("admin waitlist reset email render failed", "err", rerr)
-		} else if serr := s.mailer.SendMIME(u.Email, "Your thesada password reset link", textBody, htmlBody); serr != nil {
+		if serr := s.notes.SendResetLink(u.Email, link); serr != nil {
 			slog.Warn("admin waitlist reset email send failed", "user_id", u.ID, "err", serr)
 		}
 	}
@@ -491,13 +488,7 @@ func (s *Server) handleAdminTenantUserSendReset(w http.ResponseWriter, r *http.R
 		return
 	}
 	link := s.cfg.BaseURL + "/reset-password?token=" + token
-	textBody, htmlBody, rerr := s.renderEmail("reset_link", map[string]interface{}{"Link": link})
-	if rerr != nil {
-		slog.Error("admin send-reset email render failed", "err", rerr)
-		http.Redirect(w, r, "/admin/tenants/"+slug+"/users/"+uid.String()+"/edit?error=render+failed", http.StatusFound)
-		return
-	}
-	if serr := s.mailer.SendMIME(u.Email, "Your thesada password reset link", textBody, htmlBody); serr != nil {
+	if serr := s.notes.SendResetLink(u.Email, link); serr != nil {
 		slog.Error("admin send-reset email send failed", "user_id", uid, "email", u.Email, "err", serr)
 		http.Redirect(w, r, "/admin/tenants/"+slug+"/users/"+uid.String()+"/edit?error=smtp+failed", http.StatusFound)
 		return

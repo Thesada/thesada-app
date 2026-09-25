@@ -2,8 +2,10 @@ package config
 
 import (
 	"net"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestValidate_CookieSecretFloor pins the security contract that a weak session
@@ -95,5 +97,62 @@ func TestEnvBool(t *testing.T) {
 		if envBool("THESADA_TEST_BOOL") {
 			t.Errorf("envBool(%q) = true, want false", v)
 		}
+	}
+}
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	prev, had := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(key, prev)
+			return
+		}
+		_ = os.Unsetenv(key)
+	})
+}
+
+// TestEnvOrInt pins the silent fallback: a missing or unparseable value
+// returns the fallback instead of failing startup.
+func TestEnvOrInt(t *testing.T) {
+	const key = "THESADA_TEST_INT"
+	const fallback = 7
+	unsetEnv(t, key)
+	if got := envOrInt(key, fallback); got != fallback {
+		t.Errorf("unset = %d, want %d", got, fallback)
+	}
+	t.Setenv(key, "42")
+	if got := envOrInt(key, fallback); got != 42 {
+		t.Errorf("valid = %d, want 42", got)
+	}
+	t.Setenv(key, "12x")
+	if got := envOrInt(key, fallback); got != fallback {
+		t.Errorf("malformed = %d, want fallback %d", got, fallback)
+	}
+}
+
+// TestEnvOrDuration pins the same fallback, including a bare number with no
+// unit, which time.ParseDuration rejects.
+func TestEnvOrDuration(t *testing.T) {
+	const key = "THESADA_TEST_DURATION"
+	fallback := 5 * time.Second
+	unsetEnv(t, key)
+	if got := envOrDuration(key, fallback); got != fallback {
+		t.Errorf("unset = %s, want %s", got, fallback)
+	}
+	t.Setenv(key, "2m")
+	if got := envOrDuration(key, fallback); got != 2*time.Minute {
+		t.Errorf("valid = %s, want 2m", got)
+	}
+	t.Setenv(key, "nope")
+	if got := envOrDuration(key, fallback); got != fallback {
+		t.Errorf("malformed = %s, want fallback %s", got, fallback)
+	}
+	t.Setenv(key, "30")
+	if got := envOrDuration(key, fallback); got != fallback {
+		t.Errorf("bare number = %s, want fallback %s", got, fallback)
 	}
 }

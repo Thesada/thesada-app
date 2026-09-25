@@ -4,22 +4,21 @@
 package web
 
 import (
-	"bytes"
 	"context"
 	"embed"
-	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
-	texttemplate "text/template"
 	"time"
 
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/config"
 	"thesada.app/app/pkg/csrf"
+	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/mailer"
 	"thesada.app/app/pkg/mqtt"
+	"thesada.app/app/pkg/notify"
 	"thesada.app/app/pkg/pki"
 	"thesada.app/app/pkg/ratelimit"
 	"thesada.app/app/pkg/service"
@@ -29,13 +28,6 @@ import (
 // forgot-password) before a session exists. Today it is always "default";
 // when multi-tenant mode lands it will be resolved from request host or path.
 const bootstrapTenantID = "default"
-
-// magicLinkMaxPerHour caps how many login or reset emails can be created for
-// a given email (and, separately, a given source IP) inside a rolling hour.
-const magicLinkMaxPerHour = 5
-
-// magicLinkWindow is the rolling window for the rate limiter above.
-const magicLinkWindow = time.Hour
 
 // passwordFloorMsg is the form-level too-short message, kept in sync with service.MinPasswordLen.
 var passwordFloorMsg = fmt.Sprintf("Password must be at least %d characters.", service.MinPasswordLen)
@@ -56,10 +48,7 @@ type Server struct {
 	mux            *http.ServeMux
 	handler        http.Handler
 	templates      map[string]*template.Template
-	emailHTML      map[string]*template.Template     // html variant, auto-escaped
-	emailText      map[string]*texttemplate.Template // text variant, no escaping
-	emailLimits    *ratelimit.Limiter
-	ipLimits       *ratelimit.Limiter
+	notes          *notify.Mail
 	waitlistNotify *ratelimit.Limiter
 	// claimLimits bounds self-service device claim attempts per user.
 	claimLimits *ratelimit.Limiter
@@ -70,16 +59,15 @@ type Server struct {
 // The auth-resolver middleware wraps every request so CurrentUser works
 // inside any handler; individual routes opt into authmw.RequireAuth.
 // in: cfg, services bundle, mailer. out: ready *Server.
-func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mqttClient *mqtt.Client, ca *pki.CA) *Server {
+func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mqttClient *mqtt.Client, ca *pki.CA, notes *notify.Mail) *Server {
 	s := &Server{
 		cfg:            cfg,
 		services:       services,
 		mailer:         mail,
+		notes:          notes,
 		mqtt:           mqttClient,
 		ca:             ca,
 		mux:            http.NewServeMux(),
-		emailLimits:    ratelimit.New(magicLinkWindow, magicLinkMaxPerHour),
-		ipLimits:       ratelimit.New(magicLinkWindow, magicLinkMaxPerHour),
 		waitlistNotify: ratelimit.New(24*time.Hour, 1),
 		claimLimits:    newClaimLimiter(cfg),
 		cliRequests:    newCLIRequestStore(cfg.CLIRequestTimeout + 60*time.Second),
@@ -90,8 +78,6 @@ func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mq
 
 	// Sweep residual keys left by expired windows; without this the maps grow
 	// unbounded. context.Background: sweepers live for the process lifetime.
-	s.emailLimits.StartSweeper(context.Background())
-	s.ipLimits.StartSweeper(context.Background())
 	s.waitlistNotify.StartSweeper(context.Background())
 	s.claimLimits.StartSweeper(context.Background())
 
@@ -116,6 +102,7 @@ func (s *Server) parseTemplates() {
 		"admin-devices.html",
 		"admin-mqtt.html", "admin-waitlist.html",
 		"admin-device-config.html",
+		"admin-device-rules.html",
 		"admin-device-secrets.html",
 		"admin-tenant-secrets.html",
 		"admin-devices-pair.html",
@@ -129,40 +116,6 @@ func (s *Server) parseTemplates() {
 		t = template.Must(t.ParseFS(templatesFS, "templates/layout.html", "templates/"+page))
 		s.templates[page] = t
 	}
-	// Email templates: each logical email has a .txt (text/template - no
-	// escaping, plain bodies) and .html (html/template - auto-escape) pair.
-	emailNames := []string{"login_link", "reset_link"}
-	s.emailText = make(map[string]*texttemplate.Template, len(emailNames))
-	s.emailHTML = make(map[string]*template.Template, len(emailNames))
-	for _, name := range emailNames {
-		tt := texttemplate.Must(texttemplate.ParseFS(templatesFS, "templates/emails/"+name+".txt"))
-		s.emailText[name] = tt
-		ht := template.Must(template.ParseFS(templatesFS, "templates/emails/"+name+".html"))
-		s.emailHTML[name] = ht
-	}
-}
-
-// renderEmail executes the text and html variants of an email template with
-// the same data and returns both bodies. Returns an error if either variant
-// is not loaded or fails to execute.
-// in: template name (no extension), data. out: text body, html body, error.
-func (s *Server) renderEmail(name string, data interface{}) (string, string, error) {
-	tt, ok := s.emailText[name]
-	if !ok {
-		return "", "", errors.New("email text template not found: " + name)
-	}
-	ht, ok := s.emailHTML[name]
-	if !ok {
-		return "", "", errors.New("email html template not found: " + name)
-	}
-	var textBuf, htmlBuf bytes.Buffer
-	if err := tt.Execute(&textBuf, data); err != nil {
-		return "", "", err
-	}
-	if err := ht.Execute(&htmlBuf, data); err != nil {
-		return "", "", err
-	}
-	return textBuf.String(), htmlBuf.String(), nil
 }
 
 // routes registers every page URL the HTMX dashboard handles.
@@ -231,6 +184,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/devices/{id}/config/write", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigWrite))
 	s.mux.HandleFunc("POST /admin/devices/{id}/config/snapshot", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigSnapshot))
 	s.mux.HandleFunc("GET /admin/devices/{id}/config/history", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigHistory))
+	s.mux.HandleFunc("GET /admin/devices/{id}/rules", authmw.RequireSuperAdmin(s.handleAdminDeviceRules))
+	s.mux.HandleFunc("GET /admin/devices/{id}/rules/workspace", authmw.RequireSuperAdmin(s.handleAdminDeviceRulesWorkspaceGET))
+	s.mux.HandleFunc("POST /admin/devices/{id}/rules/workspace", authmw.RequireSuperAdmin(s.handleAdminDeviceRulesWorkspacePOST))
 	s.mux.HandleFunc("GET /admin/devices/{id}/secrets", authmw.RequireSuperAdmin(s.handleAdminDeviceSecrets))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/set", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsSet))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/clear", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsClear))
@@ -269,6 +225,9 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, dat
 	}
 	if _, set := data["CSRFToken"]; !set {
 		data["CSRFToken"] = csrf.Token(r)
+	}
+	if _, set := data["CSPNonce"]; !set {
+		data["CSPNonce"] = httpsec.Nonce(r.Context())
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := t.ExecuteTemplate(w, "layout", data); err != nil {

@@ -1,5 +1,7 @@
-# thesada-app Makefile
+# thesada-app. Bare `make` prints this list and changes nothing.
 # Build, run, and CSS pipeline. No node, no npm.
+.DEFAULT_GOAL := help
+SHELL := bash
 
 GO ?= go
 TAILWIND ?= ./tools/tailwindcss
@@ -12,16 +14,13 @@ TAILWIND_ARCH_RAW := $(shell uname -m)
 TAILWIND_ARCH := $(if $(filter x86_64,$(TAILWIND_ARCH_RAW)),x64,$(if $(filter aarch64 arm64,$(TAILWIND_ARCH_RAW)),arm64,$(TAILWIND_ARCH_RAW)))
 TAILWIND_URL := https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/tailwindcss-$(TAILWIND_OS)-$(TAILWIND_ARCH)
 
-.PHONY: build run css css-watch tailwind-cli tidy clean test test-integration cover sec sec-vuln sec-static sec-tools lint lint-tools
-
 # Security scanner versions. Pinned so a transient upstream change cannot
 # fail a CI run silently (e.g. gosec moved a default rule, govulncheck
 # upgraded the database format).
 GOVULNCHECK_VERSION ?= v1.1.4
 GOSEC_VERSION       ?= v2.25.0
 
-# Linter version. Pinned to match .github/workflows/ci.yml so local
-# `make lint` and CI never diverge.
+# Linter version. Pinned so local `make lint` and CI never diverge.
 GOLANGCI_VERSION ?= v2.11.4
 
 # Build metadata injected into pkg/buildinfo. VERSION
@@ -33,12 +32,22 @@ LDFLAGS := -X thesada.app/app/pkg/buildinfo.Version=$(VERSION) \
            -X thesada.app/app/pkg/buildinfo.Commit=$(COMMIT) \
            -X thesada.app/app/pkg/buildinfo.BuildTime=$(BUILD_TIME)
 
-# Build the Go binary. Depends on css so the embedded static/ is non-empty.
-build: css
-	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/thesada-app
+##@ General
 
-# Download pinned tailwind standalone CLI into tools/ if missing.
-tailwind-cli:
+.PHONY: help
+help: ## Show this help
+	@awk 'BEGIN {FS = ":.*##"; printf "\nusage: make <target>\n"} \
+	  /^[a-zA-Z0-9_.-]+:.*##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 } \
+	  /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
+
+##@ Setup
+
+.PHONY: setup
+setup: tailwind-cli ## Modules plus the pinned Tailwind CLI, enough for a clean clone to build
+	$(GO) mod download
+
+.PHONY: tailwind-cli
+tailwind-cli: ## Download the pinned Tailwind standalone CLI into tools/ when it is missing
 	@if [ ! -x $(TAILWIND) ]; then \
 		mkdir -p tools; \
 		echo "fetching tailwindcss $(TAILWIND_VERSION) from $(TAILWIND_URL)"; \
@@ -46,74 +55,86 @@ tailwind-cli:
 		chmod +x $(TAILWIND); \
 	fi
 
-# Build CSS once (minified) for production.
-css: tailwind-cli
-	$(TAILWIND) -i assets/css/app.css -o pkg/web/static/css/app.css --minify
-
-# Watch and rebuild CSS on template/go changes for dev.
-css-watch: tailwind-cli
-	$(TAILWIND) -i assets/css/app.css -o pkg/web/static/css/app.css --watch
-
-# Refresh go.sum and prune unused deps.
-tidy:
+.PHONY: tidy
+tidy: ## Refresh go.sum and prune unused modules
 	$(GO) mod tidy
 
-# Run the binary, env loaded from .env if present.
-run: build
-	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; $(BIN)
+.PHONY: lint-tools
+lint-tools: ## Install the pinned golangci-lint into GOPATH/bin
+	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
 
-# Run go tests (unit only - the default lane, no DB).
-test:
-	$(GO) test ./...
-
-# Run DB-backed integration tests. Spins a throwaway
-# TimescaleDB per package via testcontainers; needs a reachable Docker daemon.
-# Off the default lane behind the `integration` build tag.
-test-integration:
-	$(GO) test -tags integration -timeout 600s ./...
-
-# Per-package coverage for the security packages, enforced at 80%+ in CI
-# (ci.yml coverage job) via scripts/check-coverage.sh. Runs the integration
-# lane so oauth's DB-backed Start/LookupState count - real Postgres via
-# testcontainers, needs Docker. pkg/service (auth.go) is not gated here.
-cover:
-	$(GO) test -tags integration -cover -timeout 300s ./pkg/csrf/... ./pkg/oauth/... ./pkg/pki/... ./pkg/authmw/...
-
-# Remove build artifacts.
-clean:
-	rm -rf bin pkg/web/static/css/app.css
-
-# ── Security scanners ─────────────────────────────────────────
-# Two-tool stack:
-#   govulncheck - Go vuln DB, reachability-scoped (low FP rate)
-#   gosec       - SAST: hardcoded creds, weak crypto, SQLi-shaped concat
-# Trivy is deferred until the app has a Dockerfile.
-
-# Install pinned versions into $GOBIN (or $HOME/go/bin if unset).
-sec-tools:
+.PHONY: sec-tools
+sec-tools: ## Install the pinned govulncheck and gosec into GOPATH/bin
 	$(GO) install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	$(GO) install github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION)
 
-# Module-graph + reachable-symbol scan against the Go vuln database.
-sec-vuln:
+##@ Build
+
+.PHONY: css
+css: tailwind-cli ## Build minified CSS into the embedded static tree
+	$(TAILWIND) -i assets/css/app.css -o pkg/web/static/css/app.css --minify
+
+.PHONY: css-watch
+css-watch: tailwind-cli ## Rebuild CSS when templates or Go files change
+	$(TAILWIND) -i assets/css/app.css -o pkg/web/static/css/app.css --watch
+
+.PHONY: build
+build: css ## Build the Go binary (depends on css so the embedded static tree is non-empty)
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/thesada-app
+
+.PHONY: run
+run: build ## Run the binary, loading .env when that file is present
+	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; $(BIN)
+
+##@ Test
+
+.PHONY: test
+test: ## Unit tests, no database
+	$(GO) test ./...
+
+.PHONY: test-integration
+test-integration: ## DB-backed tests via testcontainers (needs Docker, 600s timeout)
+	$(GO) test -tags integration -timeout 600s ./...
+
+.PHONY: cover
+cover: ## Coverage of the security packages on the integration lane (needs Docker)
+	$(GO) test -tags integration -cover -timeout 300s ./pkg/csrf/... ./pkg/oauth/... ./pkg/pki/... ./pkg/authmw/...
+
+.PHONY: coverage
+coverage: ## 80% floor on the security packages, the CI gate (needs Docker)
+	bash scripts/check-coverage.sh
+
+##@ Lint
+
+.PHONY: fmt
+fmt: ## Rewrite Go files with gofmt
+	$(GO) fmt ./...
+
+.PHONY: lint
+lint: ## golangci-lint, including //go:build integration files (no database)
+	golangci-lint run --build-tags integration ./...
+
+.PHONY: pools
+pools: ## Forbid new pools.App callers outside the pkg/db contract
+	bash scripts/check-pools-app.sh
+
+.PHONY: sec-vuln
+sec-vuln: ## Reachability scan against the Go vulnerability database
 	govulncheck ./...
 
-# SAST scan. Severity threshold tuned to gate on HIGH+ only; medium/low
-# findings still print but do not fail the build. Tweak via .gosec.json
-# allowlist for vetted exceptions; new exceptions require a justification
-# comment in the file.
-sec-static:
-	gosec -severity high -confidence medium -fmt text ./...
+.PHONY: sec-full
+sec-full: ## Full gosec report; findings do not fail the run
+	gosec -fmt text ./... || true
 
-# Run both scanners. Use as a local pre-push gate or in CI alongside test.
-sec: sec-vuln sec-static
+.PHONY: sec-static
+sec-static: ## Fail on HIGH gosec findings
+	gosec -severity high -confidence medium -fmt text -quiet ./...
 
-# Install the pinned linter.
-lint-tools:
-	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
+.PHONY: sec
+sec: sec-vuln sec-static ## govulncheck, then the HIGH gosec gate
 
-# Lint with the integration build tag so //go:build integration files are
-# covered too (matches lint.yml CI). The tag only adds files; untagged files
-# are still linted. Lint typechecks, it does not run tests, so no DB needed.
-lint:
-	golangci-lint run --build-tags integration ./...
+##@ Housekeeping
+
+.PHONY: clean
+clean: ## Remove the binary and the generated CSS
+	rm -rf bin pkg/web/static/css/app.css

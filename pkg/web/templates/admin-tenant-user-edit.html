@@ -36,7 +36,7 @@
 <div class="bg-white border border-red-200 rounded-xl p-5">
   <h2 class="text-lg font-semibold text-red-700 mb-2">Danger zone</h2>
   <form method="POST" action="/admin/tenants/{{.Tenant.ID}}/users/{{.EditUser.ID}}/delete"
-        onsubmit="return confirm('Really delete {{.EditUser.Email}}? Sessions, magic links, and alert subscriptions cascade.');">
+        data-confirm="Really delete {{.EditUser.Email}}? Sessions, magic links, and alert subscriptions cascade.">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <button type="submit" class="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white text-sm">Delete user</button>
   </form>
