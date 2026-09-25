@@ -358,6 +358,11 @@
     var landed = JSON.parse(JSON.stringify(originalConfig));
     function applyLanded(obj, keyPath, value) {
       var parts = keyPath.split(".");
+      for (var j = 0; j < parts.length; j++) {
+        if (parts[j] === "__proto__" || parts[j] === "constructor" || parts[j] === "prototype") {
+          return;
+        }
+      }
       var node = obj;
       for (var i = 0; i < parts.length - 1; i++) {
         if (node[parts[i]] === undefined || node[parts[i]] === null) {
