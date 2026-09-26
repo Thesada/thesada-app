@@ -349,6 +349,22 @@ func TestClaimTokenDigestUsesHMACWhenKeyed(t *testing.T) {
 	}
 }
 
+func TestClaimLockClearsOnlyTheEarliestVerifiedRow(t *testing.T) {
+	now := time.Now()
+	if ClaimLockClears(true, nil, false) {
+		t.Fatal("an unverified row must not clear the device")
+	}
+	if ClaimLockClears(false, &now, false) {
+		t.Fatal("a different token must not clear the device")
+	}
+	if ClaimLockClears(true, &now, true) {
+		t.Fatal("a later verified key must not clear the device")
+	}
+	if !ClaimLockClears(true, &now, false) {
+		t.Fatal("the earliest verified row must clear the device")
+	}
+}
+
 func TestClaimFailuresExhaustedAtCap(t *testing.T) {
 	if ClaimFailuresExhausted(ClaimFailureCap - 1) {
 		t.Fatal("one below the cap must still be allowed")

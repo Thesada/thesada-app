@@ -74,13 +74,19 @@ func ClaimTokenMatches(presented, storedHash string) bool {
 }
 
 // ClaimFailureCap is how many wrong codes the claim form accepts for one
-// device id. The next announce clears the counter.
+// device id. Only the earliest verified row's announce clears the counter.
 const ClaimFailureCap = 10
 
 // ClaimFailuresExhausted reports whether a device id is locked out of the
 // claim form. in: failures so far. out: true when another try must wait.
 func ClaimFailuresExhausted(failures int) bool {
 	return failures >= ClaimFailureCap
+}
+
+// ClaimLockClears is true only for the earliest verified row that holds its token.
+// in: owns the stored token, verified_at, an older verified row exists. out: clear all.
+func ClaimLockClears(ownsCode bool, verifiedAt *time.Time, olderVerified bool) bool {
+	return ownsCode && verifiedAt != nil && !olderVerified
 }
 
 // ClaimFormPrefill keeps a device id and an 8-digit code only when each has

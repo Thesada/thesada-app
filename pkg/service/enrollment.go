@@ -50,7 +50,7 @@ var (
 	// and nothing on the request says which one the caller meant.
 	ErrEnrollAmbiguous = errors.New("enrollment: more than one row matches that claim token")
 	// ErrEnrollClaimLocked means the claim form has had too many wrong codes
-	// for this device id. The next announce clears it.
+	// for this device id. The earliest verified row's own announce clears it.
 	ErrEnrollClaimLocked = errors.New("enrollment: claim form locked until the device announces")
 )
 
@@ -182,10 +182,7 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 				         ELSE device_enrollments.claim_token_hash END,
 				       challenge            = EXCLUDED.challenge,
 				       challenge_expires_at = EXCLUDED.challenge_expires_at,
-				       last_seen_at         = now(),
-				       claim_failures       = CASE
-				         WHEN device_enrollments.claim_token_hash = EXCLUDED.claim_token_hash THEN 0
-				         ELSE device_enrollments.claim_failures END`,
+				       last_seen_at         = now()`,
 				deviceID, pubkeyHex, tokenHash, challenge, expires)
 			return err
 		case err != nil:
@@ -211,11 +208,25 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 			        challenge_expires_at = $5, last_seen_at = now()
 			  WHERE device_id = $1 AND pubkey_hex = $2`,
 			deviceID, pubkeyHex, storedToken, challenge, expires)
-		if err != nil || !ownsCode {
+		if err != nil {
 			return err
 		}
-		// Token matched, so clear every row. A squatter left at the cap
-		// would keep the lock after this announce.
+		older := false
+		if ownsCode && existing.VerifiedAt != nil {
+			err = tx.QueryRow(ctx,
+				`SELECT EXISTS (
+				    SELECT 1 FROM device_enrollments
+				     WHERE device_id = $1 AND pubkey_hex <> $2
+				       AND verified_at IS NOT NULL AND verified_at < $3)`,
+				deviceID, pubkeyHex, *existing.VerifiedAt).Scan(&older)
+			if err != nil {
+				return err
+			}
+		}
+		// Only the earliest verified row clears the device. A fresh key does not.
+		if !ClaimLockClears(ownsCode, existing.VerifiedAt, older) {
+			return nil
+		}
 		_, err = tx.Exec(ctx,
 			`UPDATE device_enrollments
 			    SET claim_failures = 0
@@ -359,7 +370,7 @@ func (s *EnrollmentService) FindForClaim(ctx context.Context, deviceID, claimTok
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment claim lookup", func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT `+enrollmentColumns+` FROM device_enrollments
-			  WHERE device_id = $1 ORDER BY pubkey_hex`, deviceID)
+			  WHERE device_id = $1 ORDER BY pubkey_hex FOR UPDATE`, deviceID)
 		if err != nil {
 			return err
 		}
