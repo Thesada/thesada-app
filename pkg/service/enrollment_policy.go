@@ -89,6 +89,15 @@ func ClaimLockClears(ownsCode bool, verifiedAt *time.Time, olderVerified bool) b
 	return ownsCode && verifiedAt != nil && !olderVerified
 }
 
+// ClaimLockOlder reports whether other blocks this row from clearing the lock.
+// in: this verified_at and pubkey, other verified_at and pubkey. out: other wins.
+func ClaimLockOlder(thisAt, otherAt time.Time, thisPub, otherPub string) bool {
+	if otherAt.Before(thisAt) {
+		return true
+	}
+	return otherAt.Equal(thisAt) && otherPub < thisPub
+}
+
 // ClaimFormPrefill keeps a device id and an 8-digit code only when each has
 // the shape the form can use. Anything else is dropped, not echoed.
 // in: raw device id, raw code. out: usable id, usable code; either may be "".

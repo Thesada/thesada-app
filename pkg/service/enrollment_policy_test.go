@@ -349,6 +349,23 @@ func TestClaimTokenDigestUsesHMACWhenKeyed(t *testing.T) {
 	}
 }
 
+func TestClaimLockOlderBreaksTimestampTiesByPubkey(t *testing.T) {
+	now := time.Now()
+	earlier := now.Add(-time.Minute)
+	if !ClaimLockOlder(now, earlier, "b", "a") {
+		t.Fatal("an earlier verified row must block")
+	}
+	if ClaimLockOlder(earlier, now, "a", "b") {
+		t.Fatal("a later verified row must not block")
+	}
+	if !ClaimLockOlder(now, now, "b", "a") {
+		t.Fatal("a tied row with the smaller pubkey must block")
+	}
+	if ClaimLockOlder(now, now, "a", "b") {
+		t.Fatal("a tied row with a larger pubkey must not block")
+	}
+}
+
 func TestClaimLockClearsOnlyTheEarliestVerifiedRow(t *testing.T) {
 	now := time.Now()
 	if ClaimLockClears(true, nil, false) {

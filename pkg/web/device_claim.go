@@ -91,9 +91,9 @@ func (s *Server) handleDeviceClaimSubmit(w http.ResponseWriter, r *http.Request)
 	e, err := s.services.Enrollments.FindForClaim(r.Context(), deviceID, claimToken)
 	if err != nil {
 		if errors.Is(err, service.ErrEnrollClaimLocked) {
-			slog.Info("device.enroll.claim_refused", "reason", "locked",
+			slog.Warn("device.enroll.claim_refused", "reason", "locked",
 				"user", user.ID, "device_id", deviceID)
-			s.claimError(w, r, "too many wrong codes for that device. Restart it so it announces again, then retry")
+			s.claimError(w, r, "too many wrong codes for that device. Restart the unit that enrolled first, then retry")
 			return
 		}
 		if errors.Is(err, service.ErrEnrollAmbiguous) {

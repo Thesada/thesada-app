@@ -217,13 +217,15 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 				`SELECT EXISTS (
 				    SELECT 1 FROM device_enrollments
 				     WHERE device_id = $1 AND pubkey_hex <> $2
-				       AND verified_at IS NOT NULL AND verified_at < $3)`,
+				       AND verified_at IS NOT NULL
+				       AND (verified_at < $3
+				            OR (verified_at = $3 AND pubkey_hex < $2)))`,
 				deviceID, pubkeyHex, *existing.VerifiedAt).Scan(&older)
 			if err != nil {
 				return err
 			}
 		}
-		// Only the earliest verified row clears the device. A fresh key does not.
+		// Same order as ClaimLockOlder: earlier verified_at, then smaller pubkey.
 		if !ClaimLockClears(ownsCode, existing.VerifiedAt, older) {
 			return nil
 		}
