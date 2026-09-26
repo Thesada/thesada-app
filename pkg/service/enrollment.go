@@ -49,6 +49,9 @@ var (
 	// ErrEnrollAmbiguous means several rows carry the presented claim token
 	// and nothing on the request says which one the caller meant.
 	ErrEnrollAmbiguous = errors.New("enrollment: more than one row matches that claim token")
+	// ErrEnrollClaimLocked means the claim form has had too many wrong codes
+	// for this device id. The next announce clears it.
+	ErrEnrollClaimLocked = errors.New("enrollment: claim form locked until the device announces")
 )
 
 // Enrollment is one unclaimed-or-claimed device announcement.
@@ -56,6 +59,7 @@ type Enrollment struct {
 	DeviceID           string
 	PubkeyHex          string
 	ClaimTokenHash     string
+	ClaimFailures      int
 	Challenge          *string
 	ChallengeExpiresAt *time.Time
 	VerifiedAt         *time.Time
@@ -66,13 +70,13 @@ type Enrollment struct {
 	LastSeenAt         time.Time
 }
 
-const enrollmentColumns = `device_id, pubkey_hex, claim_token_hash, challenge,
+const enrollmentColumns = `device_id, pubkey_hex, claim_token_hash, claim_failures, challenge,
 	challenge_expires_at, verified_at, claimed_by_tenant, claimed_at,
 	cert_delivered_at, first_seen_at, last_seen_at`
 
 func scanEnrollment(row pgx.Row) (*Enrollment, error) {
 	var e Enrollment
-	err := row.Scan(&e.DeviceID, &e.PubkeyHex, &e.ClaimTokenHash, &e.Challenge,
+	err := row.Scan(&e.DeviceID, &e.PubkeyHex, &e.ClaimTokenHash, &e.ClaimFailures, &e.Challenge,
 		&e.ChallengeExpiresAt, &e.VerifiedAt, &e.ClaimedByTenant, &e.ClaimedAt,
 		&e.CertDeliveredAt, &e.FirstSeenAt, &e.LastSeenAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -110,18 +114,33 @@ func scanEnrollments(rows pgx.Rows) ([]Enrollment, error) {
 	return out, rows.Err()
 }
 
-// claimTokenMatches returns every row whose stored hash matches token - all of
-// them, because claim_token_hash has no unique constraint. Every candidate is
-// compared in constant time, so the walk says nothing about which one matched.
-// in: candidate rows, presented plaintext token. out: matching rows.
-func claimTokenMatches(rows []Enrollment, token string) []*Enrollment {
+// claimKey is the HMAC key for a new claim-token digest. Empty keeps SHA-256.
+// in: none (reads config). out: key, or "".
+func (s *EnrollmentService) claimKey() string {
+	if s == nil || s.cfg == nil {
+		return ""
+	}
+	return s.cfg.ClaimHashKey
+}
+
+// claimTokenMatches returns every row whose stored hash matches token.
+// in: rows, presented plaintext, HMAC key. out: matching rows.
+func claimTokenMatches(rows []Enrollment, token, key string) []*Enrollment {
 	var out []*Enrollment
 	for i := range rows {
-		if ClaimTokenMatches(token, rows[i].ClaimTokenHash) {
+		if ClaimTokenAccepts(key, token, rows[i].ClaimTokenHash) {
 			out = append(out, &rows[i])
 		}
 	}
 	return out
+}
+
+// higherCount keeps the larger failure count. in: current, next. out: the max.
+func higherCount(current, next int) int {
+	if next > current {
+		return next
+	}
+	return current
 }
 
 // Announce records an announcement for (device_id, pubkey) and issues a fresh
@@ -141,7 +160,7 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 		return "", err
 	}
 	expires := time.Now().Add(ChallengeTTL)
-	tokenHash := HashClaimToken(claimToken)
+	tokenHash := ClaimTokenDigest(s.claimKey(), claimToken)
 
 	err = db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment announce", func(tx pgx.Tx) error {
 		existing, err := scanEnrollment(tx.QueryRow(ctx,
@@ -158,9 +177,15 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 				   (device_id, pubkey_hex, claim_token_hash, challenge, challenge_expires_at)
 				 VALUES ($1, $2, $3, $4, $5)
 				 ON CONFLICT (device_id, pubkey_hex) DO UPDATE
-				   SET challenge            = EXCLUDED.challenge,
+				   SET claim_token_hash = CASE
+				         WHEN device_enrollments.verified_at IS NULL THEN EXCLUDED.claim_token_hash
+				         ELSE device_enrollments.claim_token_hash END,
+				       challenge            = EXCLUDED.challenge,
 				       challenge_expires_at = EXCLUDED.challenge_expires_at,
-				       last_seen_at         = now()`,
+				       last_seen_at         = now(),
+				       claim_failures       = CASE
+				         WHEN device_enrollments.claim_token_hash = EXCLUDED.claim_token_hash THEN 0
+				         ELSE device_enrollments.claim_failures END`,
 				deviceID, pubkeyHex, tokenHash, challenge, expires)
 			return err
 		case err != nil:
@@ -175,6 +200,7 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 		// portal session. After proof the stored hash stands, and the refusal
 		// is silent: answering differently would tell an unauthenticated
 		// caller that this device_id is real and already verified.
+		ownsCode := ClaimTokenAccepts(s.claimKey(), claimToken, existing.ClaimTokenHash)
 		storedToken := existing.ClaimTokenHash
 		if !ClaimTokenFrozen(existing.VerifiedAt) {
 			storedToken = tokenHash
@@ -185,6 +211,15 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 			        challenge_expires_at = $5, last_seen_at = now()
 			  WHERE device_id = $1 AND pubkey_hex = $2`,
 			deviceID, pubkeyHex, storedToken, challenge, expires)
+		if err != nil || !ownsCode {
+			return err
+		}
+		// Token matched, so clear every row. A squatter left at the cap
+		// would keep the lock after this announce.
+		_, err = tx.Exec(ctx,
+			`UPDATE device_enrollments
+			    SET claim_failures = 0
+			  WHERE device_id = $1`, deviceID)
 		return err
 	})
 	if err != nil {
@@ -296,7 +331,7 @@ func (s *EnrollmentService) FindByDeviceKey(ctx context.Context, deviceID, pubke
 		if err != nil {
 			return err
 		}
-		if !ClaimTokenMatches(claimToken, e.ClaimTokenHash) {
+		if !ClaimTokenAccepts(s.claimKey(), claimToken, e.ClaimTokenHash) {
 			return ErrEnrollNotFound
 		}
 		out = e
@@ -320,6 +355,7 @@ func (s *EnrollmentService) FindForClaim(ctx context.Context, deviceID, claimTok
 	// pubkey to offer. Resolving it by ordering handed a user somebody else's
 	// row under a success page.
 	var out *Enrollment
+	var refused error
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment claim lookup", func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT `+enrollmentColumns+` FROM device_enrollments
@@ -331,10 +367,48 @@ func (s *EnrollmentService) FindForClaim(ctx context.Context, deviceID, claimTok
 		if err != nil {
 			return err
 		}
-		matches := claimTokenMatches(candidates, claimToken)
+		if len(candidates) == 0 {
+			refused = ErrEnrollNotFound
+			return nil
+		}
+		worst := 0
+		for i := range candidates {
+			worst = higherCount(worst, candidates[i].ClaimFailures)
+		}
+		if ClaimFailuresExhausted(worst) {
+			refused = ErrEnrollClaimLocked
+			return nil
+		}
+		matches := claimTokenMatches(candidates, claimToken, s.claimKey())
+		if len(matches) == 0 {
+			bumped, err := tx.Query(ctx,
+				`UPDATE device_enrollments
+				    SET claim_failures = claim_failures + 1
+				  WHERE device_id = $1
+				  RETURNING claim_failures`, deviceID)
+			if err != nil {
+				return err
+			}
+			defer bumped.Close()
+			next := 0
+			for bumped.Next() {
+				var n int
+				if err := bumped.Scan(&n); err != nil {
+					return err
+				}
+				next = higherCount(next, n)
+			}
+			if err := bumped.Err(); err != nil {
+				return err
+			}
+			if ClaimFailuresExhausted(next) {
+				refused = ErrEnrollClaimLocked
+			} else {
+				refused = ErrEnrollNotFound
+			}
+			return nil
+		}
 		switch len(matches) {
-		case 0:
-			return ErrEnrollNotFound
 		case 1:
 			out = matches[0]
 			return nil
@@ -358,6 +432,9 @@ func (s *EnrollmentService) FindForClaim(ctx context.Context, deviceID, claimTok
 	if err != nil {
 		return nil, err
 	}
+	if refused != nil {
+		return nil, refused
+	}
 	return out, nil
 }
 
@@ -378,7 +455,7 @@ func (s *EnrollmentService) MarkDelivered(ctx context.Context, deviceID, pubkeyH
 		// The pubkey is public - it is on the QR and on chip.info - so sealing
 		// needs the token as well. Otherwise anyone who has read a key can
 		// seal the row before the device collects its certificate.
-		if !ClaimTokenMatches(claimToken, e.ClaimTokenHash) {
+		if !ClaimTokenAccepts(s.claimKey(), claimToken, e.ClaimTokenHash) {
 			return ErrEnrollNotFound
 		}
 		if !DeliverAllowed(e.VerifiedAt, e.ClaimedAt, e.CertDeliveredAt) {

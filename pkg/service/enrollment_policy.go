@@ -1,11 +1,15 @@
 package service
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
+
+	"thesada.app/app/pkg/pki"
 )
 
 // Enrollment decision rules, kept pure and separate from the storage in
@@ -34,16 +38,69 @@ func HashClaimToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ClaimTokenMatches compares a presented token against a stored hash in
+// ClaimTokenDigest is what Announce stores. A key produces HMAC-SHA256; an
+// empty key keeps the legacy unsalted SHA-256 so existing rows stay valid.
+// in: HMAC key (may be empty), plaintext token. out: lowercase hex digest.
+func ClaimTokenDigest(key, token string) string {
+	if key == "" {
+		return HashClaimToken(token)
+	}
+	mac := hmac.New(sha256.New, []byte(key))
+	_, _ = mac.Write([]byte(token))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// ClaimTokenAccepts reports whether presented is the token behind stored.
+// Both the legacy SHA-256 and the keyed HMAC are tried, so a row written
+// before the key was set still matches. Neither compare short-circuits.
+// in: HMAC key, presented plaintext, stored hex digest. out: true on match.
+func ClaimTokenAccepts(key, presented, storedHash string) bool {
+	if presented == "" || storedHash == "" {
+		return false
+	}
+	legacy := HashClaimToken(presented)
+	keyed := ClaimTokenDigest(key, presented)
+	a := subtle.ConstantTimeCompare([]byte(legacy), []byte(storedHash))
+	b := subtle.ConstantTimeCompare([]byte(keyed), []byte(storedHash))
+	return (a | b) == 1
+}
+
+// ClaimTokenMatches compares a presented token against a stored SHA-256 in
 // constant time. A byte-by-byte early exit here leaks the token one character
 // at a time to anyone who can measure the endpoint.
 // in: presented plaintext token, stored hex hash. out: true on match.
 func ClaimTokenMatches(presented, storedHash string) bool {
-	if presented == "" || storedHash == "" {
-		return false
+	return ClaimTokenAccepts("", presented, storedHash)
+}
+
+// ClaimFailureCap is how many wrong codes the claim form accepts for one
+// device id. The next announce clears the counter.
+const ClaimFailureCap = 10
+
+// ClaimFailuresExhausted reports whether a device id is locked out of the
+// claim form. in: failures so far. out: true when another try must wait.
+func ClaimFailuresExhausted(failures int) bool {
+	return failures >= ClaimFailureCap
+}
+
+// ClaimFormPrefill keeps a device id and an 8-digit code only when each has
+// the shape the form can use. Anything else is dropped, not echoed.
+// in: raw device id, raw code. out: usable id, usable code; either may be "".
+func ClaimFormPrefill(deviceID, code string) (string, string) {
+	deviceID = strings.TrimSpace(deviceID)
+	code = strings.TrimSpace(code)
+	if !pki.ValidDeviceID(deviceID) {
+		deviceID = ""
 	}
-	return subtle.ConstantTimeCompare(
-		[]byte(HashClaimToken(presented)), []byte(storedHash)) == 1
+	if len(code) != 8 {
+		return deviceID, ""
+	}
+	for _, c := range code {
+		if c < '0' || c > '9' {
+			return deviceID, ""
+		}
+	}
+	return deviceID, code
 }
 
 // ChallengeUsable reports whether a stored challenge may still be answered.

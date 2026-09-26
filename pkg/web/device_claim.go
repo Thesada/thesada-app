@@ -42,8 +42,11 @@ const claimRateFallback = 5
 
 // handleDeviceClaimForm renders the claim form.
 func (s *Server) handleDeviceClaimForm(w http.ResponseWriter, r *http.Request) {
+	id, code := service.ClaimFormPrefill(r.URL.Query().Get("device_id"), r.URL.Query().Get("code"))
 	s.render(w, r, "device-claim.html", map[string]interface{}{
-		"Title": "Claim a device",
+		"Title":     "Claim a device",
+		"DeviceID":  id,
+		"ClaimCode": code,
 	})
 }
 
@@ -87,6 +90,12 @@ func (s *Server) handleDeviceClaimSubmit(w http.ResponseWriter, r *http.Request)
 	// so an ambiguous match is refused rather than resolved.
 	e, err := s.services.Enrollments.FindForClaim(r.Context(), deviceID, claimToken)
 	if err != nil {
+		if errors.Is(err, service.ErrEnrollClaimLocked) {
+			slog.Info("device.enroll.claim_refused", "reason", "locked",
+				"user", user.ID, "device_id", deviceID)
+			s.claimError(w, r, "too many wrong codes for that device. Restart it so it announces again, then retry")
+			return
+		}
 		if errors.Is(err, service.ErrEnrollAmbiguous) {
 			slog.Warn("device.enroll.claim_refused", "reason", "ambiguous_token",
 				"user", user.ID, "device_id", deviceID)
@@ -155,13 +164,16 @@ func (s *Server) deviceClaimTopicPrefix(tenantID, deviceID string) string {
 	return service.DeviceTopicPrefix(root, tenantID, deviceID)
 }
 
-// claimError re-renders the form with a message. Deliberately vague about
-// which half was wrong.
+// claimError re-renders the form. The device id is kept. The code is not,
+// so a wrong guess is not written back into the page.
 func (s *Server) claimError(w http.ResponseWriter, r *http.Request, msg string) {
+	id, _ := service.ClaimFormPrefill(r.FormValue("device_id"), "")
 	w.WriteHeader(http.StatusBadRequest)
 	s.render(w, r, "device-claim.html", map[string]interface{}{
-		"Title": "Claim a device",
-		"Error": msg,
+		"Title":     "Claim a device",
+		"Error":     msg,
+		"DeviceID":  id,
+		"ClaimCode": "",
 	})
 }
 

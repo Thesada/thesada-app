@@ -156,3 +156,24 @@ func TestEnvOrDuration(t *testing.T) {
 		t.Errorf("bare number = %s, want fallback %s", got, fallback)
 	}
 }
+
+func TestDeviceBrokerHostIgnoresTheAppURL(t *testing.T) {
+	c := &Config{MQTTBrokerURL: "tls://mosquitto:8883", MQTTDeviceHost: "mqtt.example.com"}
+	if got := c.DeviceBrokerHost(); got != "mqtt.example.com" {
+		t.Fatalf("device host = %q", got)
+	}
+	if got := c.BrokerHost(); got != "mosquitto" {
+		t.Fatalf("app host = %q, the internal URL must stay as it is", got)
+	}
+	c.MQTTDeviceHost = ""
+	if got := c.DeviceBrokerHost(); got != "" {
+		t.Fatalf("unset device host = %q, want empty", got)
+	}
+	c.MQTTDeviceHost = "mqtt.example.com:8884"
+	if got := c.DeviceBrokerHost(); got != "" {
+		t.Fatalf("a host with a port = %q, want empty", got)
+	}
+	if got := (*Config)(nil).DeviceBrokerHost(); got != "" {
+		t.Fatalf("nil config = %q", got)
+	}
+}

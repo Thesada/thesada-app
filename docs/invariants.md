@@ -4,7 +4,7 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, an address rejection does not spend the client's cap, and the two caps are reserved together). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
+Dated 2026-09-25 (a device is told THESADA_MQTT_DEVICE_HOST, never the app's broker URL; a new claim token is stored as an HMAC when THESADA_CLAIM_HASH_KEY is set and a legacy SHA-256 still matches; ten wrong claim-form codes lock that device id until it announces again). Previously 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, an address rejection does not spend the client's cap, and the two caps are reserved together). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
 recovery refuses to run when the shared fallback credential is not
 connectable; unauthenticated device enrollment surface; device-facing
 enrollment endpoints address the row by its primary key and the claim
@@ -81,6 +81,9 @@ the guards are rate limits, a claim token and an Ed25519 proof instead.
 | every revoke path calls `EnrollmentService.Reset` | `device_enrollments` has no FK to `devices`, so the delete cascade misses it. A sealed row refuses announce forever, which is a revoked device bricked short of manual SQL. The spec: "next POST starts a fresh cycle" |
 | the enrollment is sealed by the device's ack, never by the handler that returns the cert | sealing before the body is flushed bricks the device on any mid-flight failure; letting the device close the loop makes the failure mode a retry, and `Issue` revokes the superseded cert |
 | the cert response carries tenant, topic prefix, broker host and port | the CN, the broker ACL and ingest are all keyed on tenant, and the firmware default prefix belongs to no tenant - without these the device holds a valid cert it cannot use |
+| the broker host in that response is `THESADA_MQTT_DEVICE_HOST`, and an unset or unusable value refuses the cert | the app's own broker URL is how this process reaches the broker. On a compose network that name does not resolve for a device, so deriving the host from it strands a unit that just stored a good certificate |
+| a new claim token is stored as HMAC-SHA256 under `THESADA_CLAIM_HASH_KEY` when that key is set; verification accepts that digest or the legacy unsalted SHA-256 | the token is the bearer credential for the certificate. A database read of an unsalted hash of an 8-digit code is a lookup table. Rows written before the key existed must keep matching |
+| ten wrong codes on the claim form lock that device id until an announce presents the token already stored for that key | the code is short on purpose. The counter is the worst `claim_failures` across the id's rows, so a squatter row cannot hide a locked real one. That announce clears every row for the id. A different token does not |
 | the response never carries the device CA | it is the broker's client-verification CA; a device that installed it over its own trust anchor loses MQTT and OTA |
 
 `device_enrollments` carries no tenant and no RLS, which is deliberate and

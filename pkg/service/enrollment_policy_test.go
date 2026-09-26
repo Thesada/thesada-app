@@ -164,14 +164,14 @@ func TestClaimTokenMatchesSelectsOnlyItsOwnRow(t *testing.T) {
 			VerifiedAt:     &now,
 		},
 	}
-	got := claimTokenMatches(rows, "real-token")
+	got := claimTokenMatches(rows, "real-token", "")
 	if len(got) != 1 || got[0].PubkeyHex != "real" {
 		t.Fatalf("real token must select the real row, got %+v", got)
 	}
-	if got := claimTokenMatches(rows, "some-other-token"); len(got) != 0 {
+	if got := claimTokenMatches(rows, "some-other-token", ""); len(got) != 0 {
 		t.Fatalf("an unknown token must select nothing, got %+v", got)
 	}
-	if got := claimTokenMatches(nil, "real-token"); len(got) != 0 {
+	if got := claimTokenMatches(nil, "real-token", ""); len(got) != 0 {
 		t.Fatal("no rows must select nothing")
 	}
 }
@@ -186,7 +186,7 @@ func TestClaimTokenMatchesReturnsEveryDuplicate(t *testing.T) {
 		{PubkeyHex: "0000", ClaimTokenHash: HashClaimToken("shared"), VerifiedAt: &now},
 		{PubkeyHex: "ffff", ClaimTokenHash: HashClaimToken("shared"), VerifiedAt: &now},
 	}
-	got := claimTokenMatches(rows, "shared")
+	got := claimTokenMatches(rows, "shared", "")
 	if len(got) != 2 {
 		t.Fatalf("both rows carry the token, got %d matches", len(got))
 	}
@@ -195,7 +195,7 @@ func TestClaimTokenMatchesReturnsEveryDuplicate(t *testing.T) {
 // An empty token must not match a row, however the row was written.
 func TestClaimTokenMatchesRejectsEmptyToken(t *testing.T) {
 	rows := []Enrollment{{PubkeyHex: "real", ClaimTokenHash: HashClaimToken("t")}}
-	if got := claimTokenMatches(rows, ""); len(got) != 0 {
+	if got := claimTokenMatches(rows, "", ""); len(got) != 0 {
 		t.Fatalf("empty token must match nothing, got %+v", got)
 	}
 }
@@ -323,5 +323,52 @@ func TestDeviceTopicPrefixDefaultsRoot(t *testing.T) {
 func TestDeviceTopicPrefixHonoursCustomRoot(t *testing.T) {
 	if got := DeviceTopicPrefix("iot", "acme", "dev"); got != "iot/acme/dev" {
 		t.Fatalf("custom root must be used, got %q", got)
+	}
+}
+
+func TestClaimTokenDigestUsesHMACWhenKeyed(t *testing.T) {
+	plain := ClaimTokenDigest("", "48271935")
+	keyed := ClaimTokenDigest("claim-key", "48271935")
+	if plain == keyed {
+		t.Fatal("a key must change the stored digest")
+	}
+	if plain != HashClaimToken("48271935") {
+		t.Fatal("an empty key must keep the legacy SHA-256")
+	}
+	if !ClaimTokenAccepts("claim-key", "48271935", keyed) {
+		t.Fatal("the keyed digest must match the token")
+	}
+	if !ClaimTokenAccepts("claim-key", "48271935", plain) {
+		t.Fatal("a legacy digest must still match after a key is set")
+	}
+	if ClaimTokenAccepts("claim-key", keyed, keyed) {
+		t.Fatal("presenting the stored digest must not match")
+	}
+	if ClaimTokenAccepts("other-key", "48271935", keyed) {
+		t.Fatal("a different key must not match")
+	}
+}
+
+func TestClaimFailuresExhaustedAtCap(t *testing.T) {
+	if ClaimFailuresExhausted(ClaimFailureCap - 1) {
+		t.Fatal("one below the cap must still be allowed")
+	}
+	if !ClaimFailuresExhausted(ClaimFailureCap) {
+		t.Fatal("the cap itself must lock")
+	}
+}
+
+func TestClaimFormPrefillKeepsOnlyUsableValues(t *testing.T) {
+	id, code := ClaimFormPrefill(" thesada-0123456789ab ", " 48271935 ")
+	if id != "thesada-0123456789ab" || code != "48271935" {
+		t.Fatalf("prefill = %q %q", id, code)
+	}
+	id, code = ClaimFormPrefill("not-an-id", "4827193")
+	if id != "" || code != "" {
+		t.Fatalf("junk must be dropped, got %q %q", id, code)
+	}
+	id, code = ClaimFormPrefill("thesada-0123456789ab", "4827193a")
+	if id != "thesada-0123456789ab" || code != "" {
+		t.Fatalf("a non-digit code must be dropped, got %q %q", id, code)
 	}
 }
