@@ -25,8 +25,11 @@ func TestClaimTemplateHasNoDeviceListing(t *testing.T) {
 	if !strings.Contains(body, `name="claim_token"`) {
 		t.Fatal("claim form must require a claim token")
 	}
-	if !strings.Contains(body, `name="csrf_token"`) {
+	if !strings.Contains(body, `name="_csrf"`) {
 		t.Fatal("state-changing form must carry a CSRF token")
+	}
+	if !strings.Contains(body, `value="{{.DeviceID}}"`) || !strings.Contains(body, `value="{{.ClaimCode}}"`) {
+		t.Fatal("claim form must prefill the device id and the code from the link")
 	}
 }
 
