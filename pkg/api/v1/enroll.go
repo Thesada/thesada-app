@@ -339,6 +339,7 @@ func (s *Server) handleEnrollCert(w http.ResponseWriter, r *http.Request) {
 }
 
 // enrollBrokerEndpoint is the broker host + mTLS port handed to the device.
+// The host is the public device hostname, never the URL this process uses.
 // Nil-guarded like enrollTopicPrefix below: a Server built without cfg must
 // refuse, not panic.
 // in: receiver. out: hostname ("" when unconfigured), mTLS port.
@@ -346,7 +347,7 @@ func (s *Server) enrollBrokerEndpoint() (string, int) {
 	if s.cfg == nil {
 		return "", 0
 	}
-	return s.cfg.BrokerHost(), s.cfg.MQTTDeviceMTLSPort
+	return s.cfg.DeviceBrokerHost(), s.cfg.MQTTDeviceMTLSPort
 }
 
 // enrollTopicPrefix delegates to the shared builder the claim path also uses.
