@@ -4,7 +4,7 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-09-26 (ten wrong claim-form codes lock that device id until the earliest verified row announces the token already stored for it; an unverified or later key does not clear the lock). Previously 2026-09-25 (a device is told THESADA_MQTT_DEVICE_HOST, never the app's broker URL; a new claim token is stored as an HMAC when THESADA_CLAIM_HASH_KEY is set and a legacy SHA-256 still matches). Previously 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, an address rejection does not spend the client's cap, and the two caps are reserved together). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
+Dated 2026-09-28 (the owner of a claimed device can revoke it; that path clears enrollment under a row lock that refuses another tenant's claim, before the cert revoke and cert.clear, and never hands the device to the fallback credential). Previously 2026-09-26 (ten wrong claim-form codes lock that device id until the earliest verified row announces the token already stored for it; an unverified or later key does not clear the lock). Previously 2026-09-25 (a device is told THESADA_MQTT_DEVICE_HOST, never the app's broker URL; a new claim token is stored as an HMAC when THESADA_CLAIM_HASH_KEY is set and a legacy SHA-256 still matches). Previously 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, an address rejection does not spend the client's cap, and the two caps are reserved together). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
 recovery refuses to run when the shared fallback credential is not
 connectable; unauthenticated device enrollment surface; device-facing
 enrollment endpoints address the row by its primary key and the claim
@@ -899,8 +899,8 @@ Source: `pkg/web/admin_pair.go`, `pkg/mqtt/dynsec.go`.
 ### Revoke and delete refuse to strand a paired device
 
 A paired device walked off mTLS needs the shared fallback credential to get
-back onto the broker. Single delete, bulk delete and revoke all probe that
-credential first (`recoveryPath`) and, for a paired device with
+back onto the broker. Single delete, bulk delete and admin revoke all probe
+that credential first (`recoveryPath`) and, for a paired device with
 an unusable path, refuses before the certificate is touched. The operator
 can override with `accept_serial_recovery=true`, which is logged; the
 override exists because the fallback credential was removed from the broker
@@ -914,7 +914,48 @@ path, box ticked. An unpaired device passes the gate with nothing recorded.
 
 How enforced: `destructiveAllowed` (`pkg/web/admin_devices_bulk.go`) is the
 one gate, unit-tested for all eight input shapes; `recoveryGate` is the
-only way a single-device handler reaches it.
+only way a single-device handler reaches it. Owner revoke is the one
+exception, below: it never walks the device to the fallback credential.
+
+### Owner revoke re-enrolls, it does not fall back
+
+`POST /devices/{id}/revoke` looks the device up through `deviceInScope`
+with `CertRevoke`, so only a super-admin reaches outside the effective
+tenant. Only the device's `owner_user_id` or a super-admin passes; anyone
+else, including a user of another tenant, gets a 404. The outcomes:
+
+| Device state                                   | Result                                    |
+| ---------------------------------------------- | ----------------------------------------- |
+| No owner (admin-paired)                        | `revoke_no_owner`, for everyone who passes; admin path only |
+| Another tenant has claimed the device id       | `revoke_not_held`; that tenant's rows survive |
+| Unpaired and no claim anywhere                 | `revoke_already`; nothing is sent again   |
+| Paired here, or claimed only by this tenant    | revoked                                   |
+
+Order on success: `EnrollmentService.ResetForTenant`, then
+`Certificates.Revoke`, the audit row, `cert.clear` (QoS 0, then 800 ms so
+the broker client outlives delivery), and the dynsec teardown last.
+`ResetForTenant` locks the device id's rows before its claim check, so a
+claim by another tenant that lands after the page check is refused with
+nothing changed; running it first also means the rows are gone before the
+device announces again. `cert.clear` is the only command: the firmware drops
+the session on it, so nothing sent after it arrives. No port flip and no
+fallback credential, so the recovery-path gate does not apply: a claimed
+device got its cert over HTTPS enrollment and gets the next one the same
+way. A failed reset shows `revoke_failed` with nothing changed. A cert
+revoke that fails after the reset shows `revoke_cert_failed`: the rows are
+gone and the cert is live, and the audit row records `cert_revoked: false`
+so the state is visible. A publish that did not go out shows
+`revoke_unsent`. The
+firmware does not yet reboot on `cert.clear`: it re-enters enrollment on
+its next restart, so success means the device was told, not that it has
+re-enrolled.
+
+How enforced: `revokeGate`, `decideRevoke`, `revokeConfirmed` (`pkg/web/device_revoke.go`)
+and `DeviceHolder` (`pkg/service/enrollment_policy.go`), unit-tested;
+`ResetForTenant` and the handler, integration-tested
+(`TestEnrollmentResetForTenant_RefusesAnotherTenantsClaim`,
+`TestOwnerRevoke_*`).
+
 ### Retained MQTT deliveries are never acted on as live
 
 A retained flag on delivery means the broker replayed a device's last

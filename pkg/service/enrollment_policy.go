@@ -73,6 +73,31 @@ func ClaimTokenMatches(presented, storedHash string) bool {
 	return ClaimTokenAccepts("", presented, storedHash)
 }
 
+// DeviceHold is who holds a device id, seen from one tenant's devices row.
+type DeviceHold int
+
+const (
+	HoldNone      DeviceHold = iota // unpaired and unclaimed: already revoked
+	HoldHere                        // paired here, or claimed only by this tenant
+	HoldElsewhere                   // another tenant has claimed the id
+)
+
+// DeviceHolder: a claim by any other tenant means the unit moved on, whatever
+// this row still says. in: tenant, row paired, claimed-by tenants. out: hold.
+func DeviceHolder(tenantID string, paired bool, claimedBy []string) DeviceHold {
+	hold := HoldNone
+	if paired {
+		hold = HoldHere
+	}
+	for _, t := range claimedBy {
+		if t != tenantID {
+			return HoldElsewhere
+		}
+		hold = HoldHere
+	}
+	return hold
+}
+
 // ClaimFailureCap is how many wrong codes the claim form accepts for one
 // device id. Only the earliest verified row's announce clears the counter.
 const ClaimFailureCap = 10

@@ -52,6 +52,9 @@ var (
 	// ErrEnrollClaimLocked means the claim form has had too many wrong codes
 	// for this device id. The earliest verified row's own announce clears it.
 	ErrEnrollClaimLocked = errors.New("enrollment: claim form locked until the device announces")
+	// ErrEnrollClaimedElsewhere means another tenant has claimed the device id,
+	// so its rows are not the caller's to clear.
+	ErrEnrollClaimedElsewhere = errors.New("enrollment: device id claimed by another tenant")
 )
 
 // Enrollment is one unclaimed-or-claimed device announcement.
@@ -548,18 +551,74 @@ func (s *EnrollmentService) ClaimInto(ctx context.Context, deviceID, pubkeyHex, 
 	return devicePk, err
 }
 
+// ClaimedTenants lists the distinct tenants holding a claimed enrollment row
+// for a device_id; cross-tenant by design, the answer is the tenant.
+// in: ctx, device id. out: tenant ids, error.
+func (s *EnrollmentService) ClaimedTenants(ctx context.Context, deviceID string) ([]string, error) {
+	var out []string
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment claimed tenants", func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT DISTINCT claimed_by_tenant FROM device_enrollments
+			  WHERE device_id = $1 AND claimed_by_tenant IS NOT NULL
+			  ORDER BY claimed_by_tenant`, deviceID)
+		if err != nil {
+			return err
+		}
+		out, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("enrollment: claimed tenants for %s: %w", deviceID, err)
+	}
+	return out, nil
+}
+
 // Reset deletes every enrollment row for a device_id so it can start over.
 //
-// Wired into all three revoke paths. Without it a revoked device is bricked:
-// cert_delivered_at stays set, so the row stays sealed and the device can
-// never prove itself again. The spec requires the opposite - "next POST starts a
-// fresh cycle". It also clears any squatter rows that accumulated under the
-// same id.
+// Without it a revoked device is bricked: cert_delivered_at stays set, so the
+// row stays sealed and the device can never prove itself again. The spec
+// requires the opposite - "next POST starts a fresh cycle". It also clears any
+// squatter rows that accumulated under the same id.
 // in: ctx, device id. out: rows removed, error.
 func (s *EnrollmentService) Reset(ctx context.Context, deviceID string) (int64, error) {
 	var removed int64
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment reset", func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `DELETE FROM device_enrollments WHERE device_id = $1`, deviceID)
+		if err != nil {
+			return err
+		}
+		removed = tag.RowsAffected()
+		return nil
+	})
+	return removed, err
+}
+
+// ResetForTenant is Reset under a row lock that refuses another tenant's claim.
+// in: ctx, device id, acting tenant. out: rows removed, error
+// (ErrEnrollClaimedElsewhere when another tenant holds a claim).
+func (s *EnrollmentService) ResetForTenant(ctx context.Context, deviceID, tenantID string) (int64, error) {
+	var removed int64
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment reset for tenant", func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT claimed_by_tenant FROM device_enrollments
+			  WHERE device_id = $1 FOR UPDATE`, deviceID)
+		if err != nil {
+			return err
+		}
+		claimedBy, err := pgx.CollectRows(rows, pgx.RowTo[*string])
+		if err != nil {
+			return err
+		}
+		for _, t := range claimedBy {
+			if t != nil && *t != tenantID {
+				return ErrEnrollClaimedElsewhere
+			}
+		}
+		// A row inserted after the lock escapes the check; the filter keeps its claim.
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM device_enrollments
+			  WHERE device_id = $1
+			    AND (claimed_by_tenant IS NULL OR claimed_by_tenant = $2)`, deviceID, tenantID)
 		if err != nil {
 			return err
 		}
