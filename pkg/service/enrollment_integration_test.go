@@ -679,6 +679,81 @@ func TestEnrollmentResetStartsAFreshCycle(t *testing.T) {
 	}
 }
 
+// TestEnrollmentClaimedTenants_ListsOnlyTenantsThatClaimed - the owner-revoke
+// gate reads this to know whether the unit moved to another tenant.
+func TestEnrollmentClaimedTenants_ListsOnlyTenantsThatClaimed(t *testing.T) {
+	env := servicetest.Start(t)
+	enroll := env.Services.Enrollments
+	ctx := context.Background()
+
+	const tenant = "enroll-claimed"
+	env.SeedTenant(t, tenant)
+	owner := seedUser(t, env, tenant, "owner@enroll-claimed.test")
+
+	if got, err := enroll.ClaimedTenants(ctx, enrollDeviceID); err != nil || len(got) != 0 {
+		t.Fatalf("no rows = %v, %v; want empty", got, err)
+	}
+	claimedPub, claimedPriv := newDeviceKey(t)
+	announceAndVerify(t, enroll, enrollDeviceID, claimedPub, claimedPriv, "claimed-code")
+	squatPub, squatPriv := newDeviceKey(t)
+	announceAndVerify(t, enroll, enrollDeviceID, squatPub, squatPriv, "squat-code")
+	if got, _ := enroll.ClaimedTenants(ctx, enrollDeviceID); len(got) != 0 {
+		t.Fatalf("verified but unclaimed rows = %v, want empty", got)
+	}
+	prefix := service.DeviceTopicPrefix("thesada", tenant, enrollDeviceID)
+	if _, err := enroll.ClaimInto(ctx, enrollDeviceID, claimedPub, tenant, owner, prefix); err != nil {
+		t.Fatalf("ClaimInto: %v", err)
+	}
+	got, err := enroll.ClaimedTenants(ctx, enrollDeviceID)
+	if err != nil || len(got) != 1 || got[0] != tenant {
+		t.Fatalf("after claim = %v, %v; want [%s]", got, err, tenant)
+	}
+}
+
+// TestEnrollmentResetForTenant_RefusesAnotherTenantsClaim - owner revoke clears
+// rows from inside one tenant; a claim held by any other tenant must survive.
+func TestEnrollmentResetForTenant_RefusesAnotherTenantsClaim(t *testing.T) {
+	env := servicetest.Start(t)
+	enroll := env.Services.Enrollments
+	ctx := context.Background()
+
+	const holder, stale = "enroll-holder", "enroll-stale"
+	env.SeedTenant(t, holder)
+	env.SeedTenant(t, stale)
+	owner := seedUser(t, env, holder, "owner@enroll-holder.test")
+
+	claimedPub, claimedPriv := newDeviceKey(t)
+	announceAndVerify(t, enroll, enrollDeviceID, claimedPub, claimedPriv, "claimed-code")
+	squatPub, squatPriv := newDeviceKey(t)
+	announceAndVerify(t, enroll, enrollDeviceID, squatPub, squatPriv, "squat-code")
+	prefix := service.DeviceTopicPrefix("thesada", holder, enrollDeviceID)
+	if _, err := enroll.ClaimInto(ctx, enrollDeviceID, claimedPub, holder, owner, prefix); err != nil {
+		t.Fatalf("ClaimInto: %v", err)
+	}
+	rowCount := func() int {
+		var n int
+		if err := env.Super.QueryRow(ctx,
+			`SELECT count(*) FROM device_enrollments WHERE device_id = $1`, enrollDeviceID).Scan(&n); err != nil {
+			t.Fatalf("count rows: %v", err)
+		}
+		return n
+	}
+
+	if _, err := enroll.ResetForTenant(ctx, enrollDeviceID, stale); !errors.Is(err, service.ErrEnrollClaimedElsewhere) {
+		t.Fatalf("reset from the stale tenant = %v, want ErrEnrollClaimedElsewhere", err)
+	}
+	if n := rowCount(); n != 2 {
+		t.Fatalf("%d rows after a refused reset, want 2", n)
+	}
+	removed, err := enroll.ResetForTenant(ctx, enrollDeviceID, holder)
+	if err != nil || removed != 2 {
+		t.Fatalf("reset from the holder = %d, %v; want 2 rows removed", removed, err)
+	}
+	if n := rowCount(); n != 0 {
+		t.Fatalf("%d rows after the holder's reset, want 0", n)
+	}
+}
+
 // TestEnrollmentPrune - announce is unauthenticated, so these rows are the one
 // thing in the schema any caller on the internet can create. They have to age
 // out on their own; a claimed row is the record of a real device and stays.

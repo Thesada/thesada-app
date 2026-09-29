@@ -105,20 +105,8 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	// the per-step timeouts as the bound.
 	ctx := context.WithoutCancel(r.Context())
 
-	// Step 2: dynsec teardown. Best-effort. Bound the time we wait so a
-	// broker outage can't pin the request handler.
-	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
-	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
-	dynsecCtx, dynsecCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer dynsecCancel()
-	if derr := s.mqtt.DeleteDynsecClient(dynsecCtx, cn); derr != nil {
-		slog.Warn("device delete: dynsec deleteClient failed",
-			"device", device.ID, "cn", cn, "err", derr)
-	}
-	if derr := s.mqtt.DeleteDynsecRole(dynsecCtx, roleName); derr != nil {
-		slog.Warn("device delete: dynsec deleteRole failed",
-			"device", device.ID, "role", roleName, "err", derr)
-	}
+	// Step 2: dynsec teardown.
+	s.teardownDeviceDynsec(ctx, device, "device_delete")
 
 	// Step 3: clear retained MQTT topics owned by this device.
 	// Best-effort, logged. Reads cached manifest from the firmware

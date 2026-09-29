@@ -26,7 +26,6 @@ import (
 
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/authz"
-	"thesada.app/app/pkg/service"
 )
 
 // handleDeviceSensorDelete deletes every device_telemetry row for one
@@ -48,28 +47,19 @@ func (s *Server) handleDeviceSensorDelete(w http.ResponseWriter, r *http.Request
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
+	back := "/devices/" + id.String()
 	metric := strings.TrimSpace(r.PostFormValue("metric"))
 	if metric == "" {
-		http.Redirect(w, r,
-			"/devices/"+id.String()+"?error=metric+required",
-			http.StatusFound)
+		http.Redirect(w, r, flashMetricRequired.on(back), http.StatusFound)
 		return
 	}
 	if r.PostFormValue("confirm_metric") != metric {
-		http.Redirect(w, r,
-			"/devices/"+id.String()+"?error=confirm+metric+did+not+match",
-			http.StatusFound)
+		http.Redirect(w, r, flashConfirmMetric.on(back), http.StatusFound)
 		return
 	}
 
-	// Tenant scope - mirror handleDeviceDetail.
 	me := authmw.CurrentUser(r)
-	var device *service.Device
-	if authz.Can(me, authz.SensorDeleteCrossTenant) {
-		device, err = s.services.Devices.GetByIDAny(r.Context(), id)
-	} else {
-		device, err = s.services.Devices.GetByID(id, authmw.EffectiveTenantID(r))
-	}
+	device, err := s.deviceInScope(r, id, authz.SensorDeleteCrossTenant)
 	if err != nil {
 		slog.Error("sensor delete: device get failed", "id", id, "err", err)
 		http.Error(w, "device get failed", http.StatusInternalServerError)
@@ -84,9 +74,7 @@ func (s *Server) handleDeviceSensorDelete(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		slog.Error("sensor delete: db delete failed",
 			"user", me.Email, "device", device.ID, "metric", metric, "err", err)
-		http.Redirect(w, r,
-			"/devices/"+id.String()+"?error=delete+failed",
-			http.StatusFound)
+		http.Redirect(w, r, flashSensorDeleteFailed.on(back), http.StatusFound)
 		return
 	}
 
@@ -94,7 +82,5 @@ func (s *Server) handleDeviceSensorDelete(w http.ResponseWriter, r *http.Request
 		"user", me.Email, "device", device.DeviceID, "tenant", device.TenantID,
 		"metric", metric, "rows", count)
 
-	http.Redirect(w, r,
-		"/devices/"+id.String()+"?ok=cleared+"+metric,
-		http.StatusFound)
+	http.Redirect(w, r, flashSensorCleared.on(back), http.StatusFound)
 }

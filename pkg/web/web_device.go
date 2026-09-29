@@ -29,6 +29,16 @@ func (s *Server) handleDeviceList(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "devices.html", map[string]interface{}{"Devices": devices})
 }
 
+// deviceInScope is the one tenant-scope rule for /devices/{id} handlers:
+// cross only when crossTenant is granted, else the effective tenant.
+// in: request, device pk, action that grants cross-tenant. out: device or nil, error.
+func (s *Server) deviceInScope(r *http.Request, id uuid.UUID, crossTenant authz.Action) (*service.Device, error) {
+	if authz.Can(authmw.CurrentUser(r), crossTenant) {
+		return s.services.Devices.GetByIDAny(r.Context(), id)
+	}
+	return s.services.Devices.GetByID(id, authmw.EffectiveTenantID(r))
+}
+
 // handleDeviceDetail renders one device with its recent heartbeats and alerts.
 // in: writer, request with path value "id" (UUID). out: HTML page or 404.
 func (s *Server) handleDeviceDetail(w http.ResponseWriter, r *http.Request) {
@@ -37,16 +47,8 @@ func (s *Server) handleDeviceDetail(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// Super-admins follow links out of /admin/devices that span tenants, so
-	// they bypass the tenant scope on the lookup. Tenant users stay scoped to
-	// their own (or impersonated) tenant.
 	me := authmw.CurrentUser(r)
-	var device *service.Device
-	if authz.Can(me, authz.DeviceReadCrossTenant) {
-		device, err = s.services.Devices.GetByIDAny(r.Context(), id)
-	} else {
-		device, err = s.services.Devices.GetByID(id, authmw.EffectiveTenantID(r))
-	}
+	device, err := s.deviceInScope(r, id, authz.DeviceReadCrossTenant)
 	if err != nil {
 		slog.Error("device get failed", "id", id, "err", err)
 		http.Error(w, "device get failed", http.StatusInternalServerError)
@@ -86,6 +88,20 @@ func (s *Server) handleDeviceDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(numericMetrics)
 
+	// The revoke card sits outside #device-live, so HTMX refreshes skip the
+	// audited claim read. The card is only an offer; the POST re-checks, so a
+	// failed read hides it instead of failing the page.
+	canRevoke := false
+	if r.Header.Get("HX-Request") != "true" {
+		verdict, err := s.revokeCheck(r.Context(), me, device)
+		if err != nil {
+			slog.Warn("device.revoke.check_failed", "id", id, "err", err)
+		} else {
+			canRevoke = verdict == revokeAllowed
+		}
+	}
+	flash, flashErr := deviceFlash(r.URL.Query())
+
 	// If a super-admin landed here from /admin/devices, send the back link
 	// there instead of the tenant-scoped /devices list. Avoids the
 	// "Admin -> Devices -> click a row -> back -> wrong page" surprise.
@@ -107,6 +123,9 @@ func (s *Server) handleDeviceDetail(w http.ResponseWriter, r *http.Request) {
 		"NumericMetrics": numericMetrics,
 		"BackHref":       backHref,
 		"BackLabel":      backLabel,
+		"CanRevoke":      canRevoke,
+		"Flash":          flash,
+		"FlashErr":       flashErr,
 	})
 }
 
@@ -121,13 +140,7 @@ func (s *Server) handleDeviceChartJSON(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	me := authmw.CurrentUser(r)
-	var device *service.Device
-	if authz.Can(me, authz.DeviceReadCrossTenant) {
-		device, err = s.services.Devices.GetByIDAny(r.Context(), id)
-	} else {
-		device, err = s.services.Devices.GetByID(id, authmw.EffectiveTenantID(r))
-	}
+	device, err := s.deviceInScope(r, id, authz.DeviceReadCrossTenant)
 	if err != nil {
 		slog.Error("chart device get failed", "id", id, "err", err)
 		http.Error(w, "device get failed", http.StatusInternalServerError)

@@ -122,6 +122,24 @@ func (s *Server) provisionDeviceDynsec(ctx context.Context, tenantID, deviceID, 
 	return "", nil
 }
 
+// teardownDeviceDynsec removes the device's broker client and role, the
+// inverse of provisionDeviceDynsec. Best-effort: the caller's revoke is committed.
+// in: ctx, device, calling path (for slog). out: none.
+func (s *Server) teardownDeviceDynsec(ctx context.Context, device *service.Device, op string) {
+	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
+	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := s.mqtt.DeleteDynsecClient(ctx, cn); err != nil {
+		slog.Warn("mqtt.dynsec.teardown_failed", "op", op, "step", "delete_client",
+			"device", device.ID, "cn", cn, "err", err)
+	}
+	if err := s.mqtt.DeleteDynsecRole(ctx, roleName); err != nil {
+		slog.Warn("mqtt.dynsec.teardown_failed", "op", op, "step", "delete_role",
+			"device", device.ID, "role", roleName, "err", err)
+	}
+}
+
 // resetDeviceEnrollment clears every device_enrollments row for a device_id.
 //
 // Revoking tears down the certificate and the broker client but leaves the
@@ -636,20 +654,7 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 	// no ordering race, recovery in ~10s.
 	preemptiveCertClear(ctx, s, device, "revoke", v.usable)
 
-	// Tear down dynsec client + role so the broker refuses the old CN even
-	// if the cert somehow re-appears in NVS. Role delete is best-effort -
-	// a failure here is logged but does not block the revoke since the
-	// cert revocation in the db is already done.
-	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
-	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
-	dynsecCtx, dynsecCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer dynsecCancel()
-	if derr := s.mqtt.DeleteDynsecClient(dynsecCtx, cn); derr != nil {
-		slog.Warn("dynsec deleteClient failed", "device", device.ID, "cn", cn, "err", derr)
-	}
-	if derr := s.mqtt.DeleteDynsecRole(dynsecCtx, roleName); derr != nil {
-		slog.Warn("dynsec deleteRole failed", "device", device.ID, "role", roleName, "err", derr)
-	}
+	s.teardownDeviceDynsec(ctx, device, "admin_revoke")
 
 	user := authmw.CurrentUser(r)
 	if device.PairedAt != nil {

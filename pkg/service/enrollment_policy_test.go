@@ -382,6 +382,28 @@ func TestClaimLockClearsOnlyTheEarliestVerifiedRow(t *testing.T) {
 	}
 }
 
+func TestDeviceHolder_AnyOtherTenantsClaimMovesTheUnit(t *testing.T) {
+	cases := []struct {
+		name      string
+		paired    bool
+		claimedBy []string
+		want      DeviceHold
+	}{
+		{"paired, no enrollment rows (legacy pair)", true, nil, HoldHere},
+		{"claimed here, cert not delivered yet", false, []string{"a"}, HoldHere},
+		{"paired and claimed here", true, []string{"a"}, HoldHere},
+		{"revoked here, nothing since", false, nil, HoldNone},
+		{"re-claimed by another tenant", false, []string{"b"}, HoldElsewhere},
+		{"row still paired, another tenant claimed after a wipe", true, []string{"b"}, HoldElsewhere},
+		{"claimed here and elsewhere", true, []string{"a", "b"}, HoldElsewhere},
+	}
+	for _, c := range cases {
+		if got := DeviceHolder("a", c.paired, c.claimedBy); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestClaimFailuresExhaustedAtCap(t *testing.T) {
 	if ClaimFailuresExhausted(ClaimFailureCap - 1) {
 		t.Fatal("one below the cap must still be allowed")
