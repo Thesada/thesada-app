@@ -501,18 +501,7 @@ func (s *Server) cascadeDeleteOne(ctx context.Context, opEmail string, device *s
 		logPairStateChange(device, "paired", "revoked", opEmail, "bulk_delete")
 	}
 
-	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
-	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
-	dynsecCtx, dynsecCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer dynsecCancel()
-	if derr := s.mqtt.DeleteDynsecClient(dynsecCtx, cn); derr != nil {
-		slog.Warn("bulk delete: dynsec deleteClient failed",
-			"device", device.ID, "cn", cn, "err", derr)
-	}
-	if derr := s.mqtt.DeleteDynsecRole(dynsecCtx, roleName); derr != nil {
-		slog.Warn("bulk delete: dynsec deleteRole failed",
-			"device", device.ID, "role", roleName, "err", derr)
-	}
+	s.teardownDeviceDynsec(ctx, device, "bulk_delete")
 
 	// Clear retained MQTT topics owned by this device.
 	// Best-effort, identical semantics to the single-device path.
