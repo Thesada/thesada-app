@@ -139,7 +139,11 @@ func (s *Server) teardownDeviceDynsec(ctx context.Context, device *service.Devic
 			"device", device.ID, "cn", cn, "err", clientErr)
 		s.alertDynsecTeardown(ctx, device, op)
 	}
-	roleErr := mqtt.RetryDynsecDelete(ctx, func(ctx context.Context) error {
+	// The client attempts can burn the whole deadline. The role delete still
+	// has to run, so it gets its own window.
+	roleCtx, roleCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer roleCancel()
+	roleErr := mqtt.RetryDynsecDelete(roleCtx, func(ctx context.Context) error {
 		return s.mqtt.DeleteDynsecRole(ctx, roleName)
 	})
 	if roleErr != nil {
@@ -155,7 +159,10 @@ func (s *Server) alertDynsecTeardown(ctx context.Context, device *service.Device
 	if s.services == nil || s.services.Alerts == nil {
 		return
 	}
-	_, err := s.services.Alerts.InsertAlert(ctx, device.TenantID, device.ID, "crit",
+	// The teardown deadline may already be spent. The alert still has to land.
+	alertCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	_, err := s.services.Alerts.InsertAlert(alertCtx, device.TenantID, device.ID, "crit",
 		"dynsec_teardown_failed",
 		"The certificate was revoked, but the broker may still accept it.",
 		[]byte(`{"step":"delete_client"}`))

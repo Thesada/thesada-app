@@ -6,6 +6,10 @@ import (
 )
 
 func TestCanonicalCertSerial(t *testing.T) {
+	ok40 := "1234567890abcdef1234567890abcdef12345678"
+	if len(ok40) != 40 {
+		t.Fatalf("fixture length %d", len(ok40))
+	}
 	cases := []struct {
 		in   string
 		want string
@@ -18,22 +22,9 @@ func TestCanonicalCertSerial(t *testing.T) {
 		{"AB", "", false},
 		{"", "", false},
 		{"zz", "", false},
+		{ok40, ok40, true},
+		{ok40 + "a", "", false},
 	}
-	// 40 hex chars is the firmware cap. 41 is not.
-	ok40 := "1234567890abcdef1234567890abcdef12345678"
-	if len(ok40) != 40 {
-		t.Fatalf("fixture length %d", len(ok40))
-	}
-	cases = append(cases,
-		struct {
-			in, want string
-			ok       bool
-		}{ok40, ok40, true},
-		struct {
-			in, want string
-			ok       bool
-		}{ok40 + "a", "", false},
-	)
 	for _, c := range cases {
 		got, ok := CanonicalCertSerial(c.in)
 		if ok != c.ok || got != c.want {
