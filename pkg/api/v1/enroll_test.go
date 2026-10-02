@@ -1,6 +1,8 @@
 package v1
 
 import (
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -8,8 +10,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"thesada.app/app/pkg/config"
+	"thesada.app/app/pkg/service"
 )
 
 func newEnrollTestServer() *Server {
@@ -340,4 +344,62 @@ func pad(i int) string {
 // parsed-IP path it means to.
 func testIP(i int) string {
 	return fmt.Sprintf("203.0.%d.%d:1", 113+i/254, 1+i%254)
+}
+
+func statusBody(t *testing.T, priv ed25519.PrivateKey, pub, deviceID, serial string, ts int64) string {
+	t.Helper()
+	msg := service.EnrollStatusMessage(deviceID, serial, ts)
+	sig := ed25519.Sign(priv, []byte(msg))
+	raw, err := json.Marshal(map[string]any{
+		"device_id": deviceID,
+		"pubkey":    pub,
+		"serial":    serial,
+		"ts":        ts,
+		"signature": hex.EncodeToString(sig),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(raw)
+}
+
+func TestEnrollStatusRejectsBeforeTheDatabase(t *testing.T) {
+	s := newEnrollTestServer()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubHex := hex.EncodeToString(pub)
+	const id = "thesada-aabbccddeeff"
+	now := time.Now().Unix()
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"malformed", "{not json"},
+		{"stale", statusBody(t, priv, pubHex, id, "ab", now-int64(service.EnrollStatusSkew/time.Second)-5)},
+		{"bad signature", func() string {
+			b := statusBody(t, priv, pubHex, id, "ab", now)
+			// Flip the last signature nibble so the proof fails and the
+			// length stays 128. This server has no services; a proof that
+			// passed would panic on the nil certificate service.
+			last := len(b) - 3
+			if b[last] == '0' {
+				return b[:last] + "1" + b[last+1:]
+			}
+			return b[:last] + "0" + b[last+1:]
+		}()},
+	}
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/devices/enroll/status", strings.NewReader(c.body))
+			r.RemoteAddr = testIP(i)
+			w := httptest.NewRecorder()
+			s.handleEnrollStatus(w, r)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("want 403, got %d body %s", w.Code, w.Body.String())
+			}
+		})
+	}
 }

@@ -10,7 +10,6 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -194,13 +193,14 @@ func (s *Server) handleAdminDeviceSecrets(w http.ResponseWriter, r *http.Request
 		})
 	}
 
+	ok, bad := adminFlash(r.URL.Query())
 	s.render(w, r, "admin-device-secrets.html", map[string]interface{}{
 		"Device":         device,
 		"Enabled":        s.services.Secrets.Enabled(),
 		"Fields":         fields,
 		"DeviceReported": reachable,
-		"Ok":             r.URL.Query().Get("ok"),
-		"Error":          r.URL.Query().Get("error"),
+		"Ok":             ok,
+		"Error":          bad,
 	})
 }
 
@@ -228,7 +228,7 @@ func (s *Server) handleAdminDeviceSecretsProvision(w http.ResponseWriter, r *htt
 	dest := "/admin/devices/" + device.ID.String() + "/secrets"
 
 	if !s.services.Secrets.Enabled() {
-		http.Redirect(w, r, dest+"?error=secrets+disabled", http.StatusFound)
+		http.Redirect(w, r, flashSecretDisabled.on(dest), http.StatusFound)
 		return
 	}
 
@@ -249,7 +249,7 @@ func (s *Server) handleAdminDeviceSecretsProvision(w http.ResponseWriter, r *htt
 	if outcome.AbortMsg != "" {
 		slog.Error("device_secret.provision aborted",
 			"tenant", device.TenantID, "device", device.DeviceID, "reason", outcome.AbortMsg)
-		http.Redirect(w, r, dest+"?error="+url.QueryEscape(outcome.AbortMsg), http.StatusFound)
+		http.Redirect(w, r, secretAbortFlash(outcome.AbortMsg).on(dest), http.StatusFound)
 		return
 	}
 
@@ -270,11 +270,11 @@ func (s *Server) handleAdminDeviceSecretsProvision(w http.ResponseWriter, r *htt
 		},
 	})
 
-	msg := "provisioned+" + itoa(len(outcome.Pushed))
+	done := flashSecretProvisioned
 	if len(outcome.SkippedUnset)+len(outcome.SkippedNoSSID) > 0 {
-		msg += "+(skipped+" + itoa(len(outcome.SkippedUnset)+len(outcome.SkippedNoSSID)) + ")"
+		done = flashSecretProvisionedMix
 	}
-	http.Redirect(w, r, dest+"?ok="+msg, http.StatusFound)
+	http.Redirect(w, r, done.on(dest), http.StatusFound)
 }
 
 // handleAdminDeviceSecretsSet stores (or overwrites) one secret value, then
@@ -307,7 +307,7 @@ func (s *Server) handleAdminDeviceSecretsSet(w http.ResponseWriter, r *http.Requ
 	dest := "/admin/devices/" + device.ID.String() + "/secrets"
 
 	if field == "" || value == "" {
-		http.Redirect(w, r, dest+"?error=field+and+value+required", http.StatusFound)
+		http.Redirect(w, r, flashSecretFieldValue.on(dest), http.StatusFound)
 		return
 	}
 
@@ -315,7 +315,7 @@ func (s *Server) handleAdminDeviceSecretsSet(w http.ResponseWriter, r *http.Requ
 		// ErrSecretsDisabled or an unknown field (validSecretField) both land
 		// here; surface a short message, never the value.
 		slog.Warn("set device secret failed", "device", device.ID, "field", field, "err", err)
-		http.Redirect(w, r, dest+"?error=set+failed", http.StatusFound)
+		http.Redirect(w, r, flashSecretSetFailed.on(dest), http.StatusFound)
 		return
 	}
 
@@ -334,7 +334,7 @@ func (s *Server) handleAdminDeviceSecretsSet(w http.ResponseWriter, r *http.Requ
 	})
 
 	// Escaped: a per-SSID field carries the SSID, which may hold &, # or spaces.
-	http.Redirect(w, r, dest+"?ok=set+"+url.QueryEscape(field), http.StatusFound)
+	http.Redirect(w, r, flashSecretSet.on(dest), http.StatusFound)
 }
 
 // handleAdminDeviceSecretsClear drops this device's override for one field so
@@ -365,18 +365,18 @@ func (s *Server) handleAdminDeviceSecretsClear(w http.ResponseWriter, r *http.Re
 	field := r.PostFormValue("field")
 	dest := "/admin/devices/" + device.ID.String() + "/secrets"
 	if field == "" {
-		http.Redirect(w, r, dest+"?error=field+required", http.StatusFound)
+		http.Redirect(w, r, flashSecretField.on(dest), http.StatusFound)
 		return
 	}
 
 	deleted, err := s.services.Secrets.ClearDeviceSecret(r.Context(), device.TenantID, device.ID, field)
 	if err != nil {
 		slog.Warn("clear device secret failed", "device", device.ID, "field", field, "err", err)
-		http.Redirect(w, r, dest+"?error=clear+failed", http.StatusFound)
+		http.Redirect(w, r, flashSecretClearFailed.on(dest), http.StatusFound)
 		return
 	}
 	if !deleted {
-		http.Redirect(w, r, dest+"?error=no+override+to+clear", http.StatusFound)
+		http.Redirect(w, r, flashSecretNoOverride.on(dest), http.StatusFound)
 		return
 	}
 
@@ -392,5 +392,5 @@ func (s *Server) handleAdminDeviceSecretsClear(w http.ResponseWriter, r *http.Re
 		Detail: map[string]any{"device_id": device.DeviceID, "field": field},
 	})
 
-	http.Redirect(w, r, dest+"?ok=override+cleared+(device+NVS+unchanged+until+provisioned)", http.StatusFound)
+	http.Redirect(w, r, flashSecretCleared.on(dest), http.StatusFound)
 }

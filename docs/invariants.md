@@ -4,7 +4,7 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-09-28 (the owner of a claimed device can revoke it; that path clears enrollment under a row lock that refuses another tenant's claim, before the cert revoke and cert.clear, and never hands the device to the fallback credential). Previously 2026-09-26 (ten wrong claim-form codes lock that device id until the earliest verified row announces the token already stored for it; an unverified or later key does not clear the lock). Previously 2026-09-25 (a device is told THESADA_MQTT_DEVICE_HOST, never the app's broker URL; a new claim token is stored as an HMAC when THESADA_CLAIM_HASH_KEY is set and a legacy SHA-256 still matches). Previously 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, an address rejection does not spend the client's cap, and the two caps are reserved together). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
+Dated 2026-09-29 (admin list, pair, and secret pages render flash from a registered code, so a crafted query cannot put words on the page). Previously 2026-09-29 (a device asks POST /devices/enroll/status with a signed serial and is told active, revoked, or unknown; only revoked for that serial wipes the cert, and a deleted device's serial is kept so the answer survives the row). Previously 2026-09-28 (the owner of a claimed device can revoke it; that path clears enrollment under a row lock that refuses another tenant's claim, before the cert revoke and cert.clear, and never hands the device to the fallback credential). Previously 2026-09-26 (ten wrong claim-form codes lock that device id until the earliest verified row announces the token already stored for it; an unverified or later key does not clear the lock). Previously 2026-09-25 (a device is told THESADA_MQTT_DEVICE_HOST, never the app's broker URL; a new claim token is stored as an HMAC when THESADA_CLAIM_HASH_KEY is set and a legacy SHA-256 still matches). Previously 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, an address rejection does not spend the client's cap, and the two caps are reserved together). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
 recovery refuses to run when the shared fallback credential is not
 connectable; unauthenticated device enrollment surface; device-facing
 enrollment endpoints address the row by its primary key and the claim
@@ -54,10 +54,12 @@ fallback: guessing "paired" costs a burst of refused CLI requests.
 
 ### The device enrollment surface is an oracle for nothing
 
-`POST /devices/enroll`, `/enroll/verify`, `/enroll/cert` and `/enroll/ack` are
-the four unauthenticated device-facing endpoints, and they answer from the
-public internet. A factory-fresh device has no credential to authenticate with, so
-the guards are rate limits, a claim token and an Ed25519 proof instead.
+`POST /devices/enroll`, `/enroll/verify`, `/enroll/cert`, `/enroll/ack` and
+`/enroll/status` are the unauthenticated device-facing endpoints, and they
+answer from the public internet. A factory-fresh device has no credential to
+authenticate with, so the guards are rate limits, a claim token and an Ed25519
+proof instead. The status check is the one call a device makes after it
+holds a cert: see "A stored cert is wiped only on an explicit revoked" below.
 
 | Rule | Why |
 |---|---|
@@ -126,6 +128,47 @@ same transaction as the enrollment flip.
 Source: `pkg/api/v1/enroll.go`, `pkg/service/enrollment.go`,
 `pkg/service/enrollment_policy.go`, `pkg/web/device_claim.go`,
 `migrations/0028_device_enrollments.sql`.
+
+### A stored cert is wiped only on an explicit revoked
+
+A unit that missed `cert.clear` cannot see the broker refuse it, so it asks
+`POST /devices/enroll/status`. The body is device id, pubkey, cert serial,
+unix seconds, and an Ed25519 signature over
+`thesada-enroll-status\n<device_id>\n<serial>\n<ts>`. The serial in that
+statement is canonical: lowercase hex, no leading zeros. The reply's `serial`
+is that same form.
+
+| Answer | What the device does |
+|---|---|
+| 200, `status` `revoked`, `serial` equal to the one it signed | wipe the cert and reboot into enrollment |
+| 200, anything else (`active`, `unknown`) | keep the cert |
+| non-200, including a database error | keep the cert |
+
+| Rule | Why |
+|---|---|
+| the signature is checked against the pubkey in the body, and that pubkey must be the one stored with the serial | a signature only proves possession of some key. Accepting a caller-chosen key would make the endpoint a serial oracle, and would let a stranger answer revoked for a serial they do not hold |
+| the timestamp must fall within 5 minutes of now | the firmware will not ask until NTP has synced, and a captured request must not stay reusable. The bound is the claim-challenge TTL |
+| unknown covers a missing serial, a pubkey or device id that does not match, a pending or failed cert, and a cert issued with no identity key | the firmware wipes only on revoked. A null pubkey never matches, so admin pairing (no identity key) cannot be wiped by this path |
+| a database error is 500, not 200 unknown | both keep the cert, and 500 is the firmware's backoff rather than a six-hour wait |
+| status has its own limits: 600 requests per source IP per hour, 30 per `(device_id, pubkey)` per hour, and it does not spend the enrollment buckets | the firmware backs off at 150 seconds, which is 24 asks an hour. Sharing the enrollment budget would let a fleet's checks starve a first boot |
+| enrollment stores the identity pubkey on the certificate | owner revoke deletes the enrollment rows, and the status check still has to know which key may speak for that serial |
+| device delete copies those serials into `device_cert_serial_tombstones` in the same transaction, before the certificate rows cascade away | a deleted device must answer revoked. A serial with no pubkey is not copied, because nothing could prove the request |
+
+Source: `pkg/api/v1/enroll.go` (`handleEnrollStatus`),
+`pkg/service/cert_status.go`, `pkg/service/cert_status_policy.go`,
+`pkg/service/device_delete.go`, `migrations/0031_cert_serial_tombstones.sql`.
+
+### Admin flash is a registered code
+
+The device list, the pair page, and the device and tenant secret pages
+render `ok` and `error` only when the code was registered in
+`pkg/web/admin_flash.go`. Anything else is blank. Counts, device ids,
+field names, and broker errors stay in the log. They are not part of the
+URL, because the URL is the one string a visitor can choose.
+
+Source: `pkg/web/admin_flash.go`, `pkg/web/admin.go`, `pkg/web/admin_pair.go`,
+`pkg/web/admin_secrets.go`, `pkg/web/admin_tenant_secrets.go`,
+`pkg/web/admin_devices_bulk.go`, `pkg/web/admin_device_delete.go`.
 
 ### Claiming a device requires proof of key possession, not the QR alone
 
@@ -945,10 +988,10 @@ way. A failed reset shows `revoke_failed` with nothing changed. A cert
 revoke that fails after the reset shows `revoke_cert_failed`: the rows are
 gone and the cert is live, and the audit row records `cert_revoked: false`
 so the state is visible. A publish that did not go out shows
-`revoke_unsent`. The
-firmware does not yet reboot on `cert.clear`: it re-enters enrollment on
-its next restart, so success means the device was told, not that it has
-re-enrolled.
+`revoke_unsent`. A `cert.clear` that removed a cert reboots the unit
+about 3 seconds later, and that boot starts enrollment again. Success means
+the device was told. A unit still on a build from before that reboot waits
+for its next restart.
 
 How enforced: `revokeGate`, `decideRevoke`, `revokeConfirmed` (`pkg/web/device_revoke.go`)
 and `DeviceHolder` (`pkg/service/enrollment_policy.go`), unit-tested;

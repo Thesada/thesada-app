@@ -75,13 +75,14 @@ func (s *Server) handleAdminTenantSecrets(w http.ResponseWriter, r *http.Request
 		})
 	}
 
+	flashOK, flashErr := adminFlash(r.URL.Query())
 	s.render(w, r, "admin-tenant-secrets.html", map[string]interface{}{
 		"Tenant":      tenant,
 		"Enabled":     s.services.Secrets.Enabled(),
 		"Fields":      fields,
 		"CountsKnown": countsKnown,
-		"Ok":          r.URL.Query().Get("ok"),
-		"Error":       r.URL.Query().Get("error"),
+		"Ok":          flashOK,
+		"Error":       flashErr,
 	})
 }
 
@@ -102,13 +103,13 @@ func (s *Server) handleAdminTenantSecretsSet(w http.ResponseWriter, r *http.Requ
 	field := r.PostFormValue("field")
 	value := r.PostFormValue("value")
 	if field == "" || value == "" {
-		http.Redirect(w, r, dest+"?error=field+and+value+required", http.StatusFound)
+		http.Redirect(w, r, flashSecretFieldValue.on(dest), http.StatusFound)
 		return
 	}
 
 	if err := s.services.Secrets.SetTenantSecret(r.Context(), tenant.ID, field, value); err != nil {
 		slog.Warn("set tenant secret failed", "tenant", tenant.ID, "field", field, "err", err)
-		http.Redirect(w, r, dest+"?error=set+failed", http.StatusFound)
+		http.Redirect(w, r, flashSecretSetFailed.on(dest), http.StatusFound)
 		return
 	}
 
@@ -138,15 +139,14 @@ func (s *Server) handleAdminTenantSecretsSet(w http.ResponseWriter, r *http.Requ
 	})
 
 	if !countKnown {
-		http.Redirect(w, r,
-			dest+"?ok=default+set+"+url.QueryEscape(field)+
-				"&error=inheritor+count+unavailable+-+run+Push+to+devices",
-			http.StatusFound)
+		http.Redirect(w, r, flashTenantDefaultPending.on(dest)+"&"+flashTenantCountUnknown.query(), http.StatusFound)
 		return
 	}
-	http.Redirect(w, r,
-		dest+"?ok=default+set+"+url.QueryEscape(field)+"+("+itoa(len(targets))+"+devices+need+provisioning)",
-		http.StatusFound)
+	done := flashTenantDefaultSet
+	if len(targets) > 0 {
+		done = flashTenantDefaultPending
+	}
+	http.Redirect(w, r, done.on(dest), http.StatusFound)
 }
 
 // handleAdminTenantSecretsSetWifi stores a per-SSID WiFi default. The field is
@@ -167,14 +167,14 @@ func (s *Server) handleAdminTenantSecretsSetWifi(w http.ResponseWriter, r *http.
 	ssid := strings.TrimSpace(r.PostFormValue("ssid"))
 	value := r.PostFormValue("value")
 	if ssid == "" || value == "" {
-		http.Redirect(w, r, dest+"?error=ssid+and+password+required", http.StatusFound)
+		http.Redirect(w, r, flashSecretSSID.on(dest), http.StatusFound)
 		return
 	}
 	field := service.WifiSecretField(ssid)
 
 	if err := s.services.Secrets.SetTenantSecret(r.Context(), tenant.ID, field, value); err != nil {
 		slog.Warn("set tenant wifi secret failed", "tenant", tenant.ID, "ssid", ssid, "err", err)
-		http.Redirect(w, r, dest+"?error=set+failed", http.StatusFound)
+		http.Redirect(w, r, flashSecretSetFailed.on(dest), http.StatusFound)
 		return
 	}
 
@@ -190,7 +190,7 @@ func (s *Server) handleAdminTenantSecretsSetWifi(w http.ResponseWriter, r *http.
 		Detail: map[string]any{"field": field},
 	})
 
-	http.Redirect(w, r, dest+"?ok=default+set+"+url.QueryEscape(field), http.StatusFound)
+	http.Redirect(w, r, flashTenantWifiSet.on(dest), http.StatusFound)
 }
 
 // handleAdminTenantSecretsClear deletes a tenant default. Devices with an
@@ -208,18 +208,18 @@ func (s *Server) handleAdminTenantSecretsClear(w http.ResponseWriter, r *http.Re
 	}
 	field := r.PostFormValue("field")
 	if field == "" {
-		http.Redirect(w, r, dest+"?error=field+required", http.StatusFound)
+		http.Redirect(w, r, flashSecretField.on(dest), http.StatusFound)
 		return
 	}
 
 	deleted, err := s.services.Secrets.ClearTenantSecret(r.Context(), tenant.ID, field)
 	if err != nil {
 		slog.Warn("clear tenant secret failed", "tenant", tenant.ID, "field", field, "err", err)
-		http.Redirect(w, r, dest+"?error=clear+failed", http.StatusFound)
+		http.Redirect(w, r, flashSecretClearFailed.on(dest), http.StatusFound)
 		return
 	}
 	if !deleted {
-		http.Redirect(w, r, dest+"?error=no+default+to+clear", http.StatusFound)
+		http.Redirect(w, r, flashSecretNoDefault.on(dest), http.StatusFound)
 		return
 	}
 
@@ -235,7 +235,7 @@ func (s *Server) handleAdminTenantSecretsClear(w http.ResponseWriter, r *http.Re
 		Detail: map[string]any{"field": field},
 	})
 
-	http.Redirect(w, r, dest+"?ok=default+cleared+(device+NVS+unchanged)", http.StatusFound)
+	http.Redirect(w, r, flashTenantCleared.on(dest), http.StatusFound)
 }
 
 // handleAdminTenantSecretsProvision is the rotation fan-out: push the tenant
@@ -254,7 +254,7 @@ func (s *Server) handleAdminTenantSecretsProvision(w http.ResponseWriter, r *htt
 		return
 	}
 	if !s.services.Secrets.Enabled() {
-		http.Redirect(w, r, dest+"?error=secrets+disabled", http.StatusFound)
+		http.Redirect(w, r, flashSecretDisabled.on(dest), http.StatusFound)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -263,25 +263,25 @@ func (s *Server) handleAdminTenantSecretsProvision(w http.ResponseWriter, r *htt
 	}
 	field := r.PostFormValue("field")
 	if field == "" {
-		http.Redirect(w, r, dest+"?error=field+required", http.StatusFound)
+		http.Redirect(w, r, flashSecretField.on(dest), http.StatusFound)
 		return
 	}
 
 	value, found, err := s.services.Secrets.RevealTenantSecret(r.Context(), tenant.ID, field)
 	if err != nil {
 		slog.Error("reveal tenant secret failed", "tenant", tenant.ID, "field", field, "err", err)
-		http.Redirect(w, r, dest+"?error=decrypt+failed", http.StatusFound)
+		http.Redirect(w, r, flashTenantDecrypt.on(dest), http.StatusFound)
 		return
 	}
 	if !found {
-		http.Redirect(w, r, dest+"?error=no+default+set", http.StatusFound)
+		http.Redirect(w, r, flashTenantNoneSet.on(dest), http.StatusFound)
 		return
 	}
 
 	targets, err := s.services.Secrets.ProvisionTargets(r.Context(), tenant.ID, field)
 	if err != nil {
 		slog.Error("tenant secret targets failed", "tenant", tenant.ID, "field", field, "err", err)
-		http.Redirect(w, r, dest+"?error=target+lookup+failed", http.StatusFound)
+		http.Redirect(w, r, flashTenantTargets.on(dest), http.StatusFound)
 		return
 	}
 
@@ -316,17 +316,11 @@ func (s *Server) handleAdminTenantSecretsProvision(w http.ResponseWriter, r *htt
 		},
 	})
 
-	msg := "pushed+" + itoa(out.Pushed) + "+of+" + itoa(len(targets))
-	if out.Unreachable > 0 {
-		msg += "+(" + itoa(out.Unreachable) + "+unreachable)"
+	done := flashTenantPushed
+	if out.Unreachable > 0 || out.Rejected > 0 || out.Skipped > 0 {
+		done = flashTenantPushedMix
 	}
-	if out.Rejected > 0 {
-		msg += "+(" + itoa(out.Rejected) + "+rejected)"
-	}
-	if out.Skipped > 0 {
-		msg += "+(" + itoa(out.Skipped) + "+skipped)"
-	}
-	http.Redirect(w, r, dest+"?ok="+msg, http.StatusFound)
+	http.Redirect(w, r, done.on(dest), http.StatusFound)
 }
 
 // fanOutPerDeviceBudget bounds the whole sweep at this much per target, on top

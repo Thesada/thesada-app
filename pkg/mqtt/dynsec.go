@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 const (
@@ -183,6 +184,47 @@ func (c *Client) CreateDynsecClient(ctx context.Context, username, password stri
 		Password: password,
 		Roles:    rs,
 	})
+	return err
+}
+
+// IsDynsecNotFound reports whether err means the client or role is already
+// gone. A second delete of a removed client is success, not a live ACL.
+// in: err. out: true when the broker says it is not found.
+func IsDynsecNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "not found")
+}
+
+// dynsecTeardownAttempts is how many times a delete is tried before the
+// caller treats the ACL as still live. The gap between tries is short so a
+// blip recovers inside the caller's timeout.
+const dynsecTeardownAttempts = 3
+
+// RetryDynsecDelete runs op until it succeeds, the broker says the object is
+// gone, or the attempts run out. in: ctx, op. out: nil when the object is
+// gone, otherwise the last error.
+func RetryDynsecDelete(ctx context.Context, op func(context.Context) error) error {
+	var err error
+	for attempt := 0; attempt < dynsecTeardownAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err = op(ctx)
+		if err == nil || IsDynsecNotFound(err) {
+			return nil
+		}
+		if attempt+1 == dynsecTeardownAttempts {
+			break
+		}
+		wait := time.Duration(attempt+1) * 200 * time.Millisecond
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
 	return err
 }
 

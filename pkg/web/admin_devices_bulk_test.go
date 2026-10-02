@@ -32,8 +32,8 @@ func TestAdminDevicesBulk_UnknownAction(t *testing.T) {
 		t.Errorf("status = %d, want 302", rec.Code)
 	}
 	loc := rec.Header().Get("Location")
-	if !strings.Contains(loc, "error=unknown") {
-		t.Errorf("Location = %q, want error=unknown+...", loc)
+	if !strings.Contains(loc, "error=unknown_action") {
+		t.Errorf("Location = %q, want error=unknown_action", loc)
 	}
 }
 
@@ -46,8 +46,8 @@ func TestAdminDevicesBulk_OTA_NoSelection(t *testing.T) {
 		t.Errorf("status = %d, want 302", rec.Code)
 	}
 	loc := rec.Header().Get("Location")
-	if !strings.Contains(loc, "error=no+devices+selected") {
-		t.Errorf("Location = %q, want error=no+devices+selected", loc)
+	if !strings.Contains(loc, "error=none_selected") {
+		t.Errorf("Location = %q, want error=none_selected", loc)
 	}
 }
 
@@ -68,8 +68,8 @@ func TestAdminDevicesBulk_Reassign_NoSelection(t *testing.T) {
 		t.Errorf("status = %d, want 302", rec.Code)
 	}
 	loc := rec.Header().Get("Location")
-	if !strings.Contains(loc, "error=no+devices+selected") {
-		t.Errorf("Location = %q, want error=no+devices+selected", loc)
+	if !strings.Contains(loc, "error=none_selected") {
+		t.Errorf("Location = %q, want error=none_selected", loc)
 	}
 }
 
@@ -88,8 +88,8 @@ func TestAdminDevicesBulk_Reassign_EmptyTarget(t *testing.T) {
 		t.Errorf("status = %d, want 302", rec.Code)
 	}
 	loc := rec.Header().Get("Location")
-	if !strings.Contains(loc, "error=unknown+tenant") {
-		t.Errorf("Location = %q, want error=unknown+tenant", loc)
+	if !strings.Contains(loc, "error=unknown_tenant") {
+		t.Errorf("Location = %q, want error=unknown_tenant", loc)
 	}
 }
 
@@ -106,8 +106,8 @@ func TestAdminDevicesBulk_Delete_NoSelection(t *testing.T) {
 		t.Errorf("status = %d, want 302", rec.Code)
 	}
 	loc := rec.Header().Get("Location")
-	if !strings.Contains(loc, "error=no+devices+selected") {
-		t.Errorf("Location = %q, want error=no+devices+selected", loc)
+	if !strings.Contains(loc, "error=none_selected") {
+		t.Errorf("Location = %q, want error=none_selected", loc)
 	}
 }
 
