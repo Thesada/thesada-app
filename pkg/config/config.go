@@ -39,6 +39,15 @@ type Config struct {
 	// app authenticates with a password, devices with mTLS.
 	MQTTDeviceMTLSPort int
 
+	// MQTTDeviceHost is the broker hostname handed to a device at enrollment.
+	// It is not MQTTBrokerURL: that URL is how this process reaches the broker,
+	// which on a compose network is an internal name the device cannot resolve.
+	MQTTDeviceHost string
+
+	// ClaimHashKey keys the HMAC stored for a new enrollment's claim token.
+	// Empty keeps the legacy unsalted SHA-256. Verification accepts either.
+	ClaimHashKey string
+
 	SMTPHost     string
 	SMTPPort     string
 	SMTPUsername string
@@ -118,6 +127,8 @@ func Load() (*Config, error) {
 		MQTTClientID:            envOr("THESADA_MQTT_CLIENT_ID", "thesada-app"),
 		MQTTTopicRoot:           envOr("THESADA_MQTT_TOPIC_ROOT", "thesada"),
 		MQTTDeviceMTLSPort:      envOrInt("THESADA_MQTT_DEVICE_MTLS_PORT", 8884),
+		MQTTDeviceHost:          os.Getenv("THESADA_MQTT_DEVICE_HOST"),
+		ClaimHashKey:            os.Getenv("THESADA_CLAIM_HASH_KEY"),
 		SMTPHost:                os.Getenv("THESADA_SMTP_HOST"),
 		SMTPPort:                envOr("THESADA_SMTP_PORT", "587"),
 		SMTPUsername:            os.Getenv("THESADA_SMTP_USER"),
@@ -278,4 +289,39 @@ func (c *Config) BrokerHost() string {
 		return h
 	}
 	return ""
+}
+
+// deviceHostUsable is the hostname shape a device can store. A single label is
+// allowed: the caller decides whether that name resolves, this only refuses
+// characters that are not a DNS label.
+// in: host. out: true when it can be handed to a device.
+func deviceHostUsable(host string) bool {
+	if host == "" || len(host) >= 96 {
+		return false
+	}
+	if host[0] == '.' || host[0] == '-' {
+		return false
+	}
+	for _, c := range host {
+		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '.' || c == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// DeviceBrokerHost is the hostname a device is told to dial. Empty when unset
+// or not a hostname, and never derived from MQTTBrokerURL.
+// in: receiver. out: hostname, or "".
+func (c *Config) DeviceBrokerHost() string {
+	if c == nil {
+		return ""
+	}
+	h := strings.TrimSpace(c.MQTTDeviceHost)
+	if !deviceHostUsable(h) {
+		return ""
+	}
+	return h
 }

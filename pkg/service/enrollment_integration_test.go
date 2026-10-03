@@ -679,6 +679,81 @@ func TestEnrollmentResetStartsAFreshCycle(t *testing.T) {
 	}
 }
 
+// TestEnrollmentClaimedTenants_ListsOnlyTenantsThatClaimed - the owner-revoke
+// gate reads this to know whether the unit moved to another tenant.
+func TestEnrollmentClaimedTenants_ListsOnlyTenantsThatClaimed(t *testing.T) {
+	env := servicetest.Start(t)
+	enroll := env.Services.Enrollments
+	ctx := context.Background()
+
+	const tenant = "enroll-claimed"
+	env.SeedTenant(t, tenant)
+	owner := seedUser(t, env, tenant, "owner@enroll-claimed.test")
+
+	if got, err := enroll.ClaimedTenants(ctx, enrollDeviceID); err != nil || len(got) != 0 {
+		t.Fatalf("no rows = %v, %v; want empty", got, err)
+	}
+	claimedPub, claimedPriv := newDeviceKey(t)
+	announceAndVerify(t, enroll, enrollDeviceID, claimedPub, claimedPriv, "claimed-code")
+	squatPub, squatPriv := newDeviceKey(t)
+	announceAndVerify(t, enroll, enrollDeviceID, squatPub, squatPriv, "squat-code")
+	if got, _ := enroll.ClaimedTenants(ctx, enrollDeviceID); len(got) != 0 {
+		t.Fatalf("verified but unclaimed rows = %v, want empty", got)
+	}
+	prefix := service.DeviceTopicPrefix("thesada", tenant, enrollDeviceID)
+	if _, err := enroll.ClaimInto(ctx, enrollDeviceID, claimedPub, tenant, owner, prefix); err != nil {
+		t.Fatalf("ClaimInto: %v", err)
+	}
+	got, err := enroll.ClaimedTenants(ctx, enrollDeviceID)
+	if err != nil || len(got) != 1 || got[0] != tenant {
+		t.Fatalf("after claim = %v, %v; want [%s]", got, err, tenant)
+	}
+}
+
+// TestEnrollmentResetForTenant_RefusesAnotherTenantsClaim - owner revoke clears
+// rows from inside one tenant; a claim held by any other tenant must survive.
+func TestEnrollmentResetForTenant_RefusesAnotherTenantsClaim(t *testing.T) {
+	env := servicetest.Start(t)
+	enroll := env.Services.Enrollments
+	ctx := context.Background()
+
+	const holder, stale = "enroll-holder", "enroll-stale"
+	env.SeedTenant(t, holder)
+	env.SeedTenant(t, stale)
+	owner := seedUser(t, env, holder, "owner@enroll-holder.test")
+
+	claimedPub, claimedPriv := newDeviceKey(t)
+	announceAndVerify(t, enroll, enrollDeviceID, claimedPub, claimedPriv, "claimed-code")
+	squatPub, squatPriv := newDeviceKey(t)
+	announceAndVerify(t, enroll, enrollDeviceID, squatPub, squatPriv, "squat-code")
+	prefix := service.DeviceTopicPrefix("thesada", holder, enrollDeviceID)
+	if _, err := enroll.ClaimInto(ctx, enrollDeviceID, claimedPub, holder, owner, prefix); err != nil {
+		t.Fatalf("ClaimInto: %v", err)
+	}
+	rowCount := func() int {
+		var n int
+		if err := env.Super.QueryRow(ctx,
+			`SELECT count(*) FROM device_enrollments WHERE device_id = $1`, enrollDeviceID).Scan(&n); err != nil {
+			t.Fatalf("count rows: %v", err)
+		}
+		return n
+	}
+
+	if _, err := enroll.ResetForTenant(ctx, enrollDeviceID, stale); !errors.Is(err, service.ErrEnrollClaimedElsewhere) {
+		t.Fatalf("reset from the stale tenant = %v, want ErrEnrollClaimedElsewhere", err)
+	}
+	if n := rowCount(); n != 2 {
+		t.Fatalf("%d rows after a refused reset, want 2", n)
+	}
+	removed, err := enroll.ResetForTenant(ctx, enrollDeviceID, holder)
+	if err != nil || removed != 2 {
+		t.Fatalf("reset from the holder = %d, %v; want 2 rows removed", removed, err)
+	}
+	if n := rowCount(); n != 0 {
+		t.Fatalf("%d rows after the holder's reset, want 0", n)
+	}
+}
+
 // TestEnrollmentPrune - announce is unauthenticated, so these rows are the one
 // thing in the schema any caller on the internet can create. They have to age
 // out on their own; a claimed row is the record of a real device and stays.
@@ -740,5 +815,102 @@ func TestEnrollmentPrune(t *testing.T) {
 	}
 	if len(left) != 2 || left[0] != "thesada-111111111111" || left[1] != enrollDeviceID {
 		t.Fatalf("surviving rows = %v, want the claimed one and the fresh one", left)
+	}
+}
+
+// TestEnrollmentClaimLock covers the ten-guess cap, who may clear it, and a verified_at tie.
+func TestEnrollmentClaimLock(t *testing.T) {
+	env := servicetest.Start(t)
+	enroll := env.Services.Enrollments
+	ctx := context.Background()
+	const id = "thesada-10c000000001"
+	const realToken = "11111111"
+	const squatToken = "22222222"
+	const laterToken = "33333333"
+	const wrong = "00000000"
+
+	realPub, realPriv := newDeviceKey(t)
+	squatPub, _ := newDeviceKey(t)
+	laterPub, laterPriv := newDeviceKey(t)
+	announceAndVerify(t, enroll, id, realPub, realPriv, realToken)
+	if _, err := enroll.Announce(ctx, id, squatPub, squatToken); err != nil {
+		t.Fatalf("squatter announce: %v", err)
+	}
+	lockClaim(t, enroll, id, wrong)
+	if _, err := enroll.FindForClaim(ctx, id, realToken); !errors.Is(err, service.ErrEnrollClaimLocked) {
+		t.Fatalf("correct code while locked: %v", err)
+	}
+	if _, err := enroll.Announce(ctx, id, squatPub, squatToken); err != nil {
+		t.Fatalf("squatter re-announce: %v", err)
+	}
+	if _, err := enroll.FindForClaim(ctx, id, realToken); !errors.Is(err, service.ErrEnrollClaimLocked) {
+		t.Fatalf("unverified announce cleared the lock: %v", err)
+	}
+	if _, err := enroll.Announce(ctx, id, realPub, realToken); err != nil {
+		t.Fatalf("real re-announce: %v", err)
+	}
+	got, err := enroll.FindForClaim(ctx, id, realToken)
+	if err != nil || got == nil || got.PubkeyHex != realPub {
+		t.Fatalf("earliest row did not clear: %v", err)
+	}
+
+	announceAndVerify(t, enroll, id, laterPub, laterPriv, laterToken)
+	lockClaim(t, enroll, id, wrong)
+	if _, err := enroll.Announce(ctx, id, laterPub, laterToken); err != nil {
+		t.Fatalf("later announce: %v", err)
+	}
+	if _, err := enroll.FindForClaim(ctx, id, realToken); !errors.Is(err, service.ErrEnrollClaimLocked) {
+		t.Fatalf("later verified key cleared the lock: %v", err)
+	}
+
+	tied := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := env.Super.Exec(ctx,
+		`UPDATE device_enrollments SET verified_at = $2 WHERE device_id = $1 AND verified_at IS NOT NULL`,
+		id, tied); err != nil {
+		t.Fatalf("tie timestamps: %v", err)
+	}
+	tokenFor := map[string]string{realPub: realToken, laterPub: laterToken}
+	larger, smaller := realPub, laterPub
+	if laterPub > realPub {
+		larger, smaller = laterPub, realPub
+	}
+	if _, err := enroll.Announce(ctx, id, larger, tokenFor[larger]); err != nil {
+		t.Fatalf("larger pubkey announce: %v", err)
+	}
+	if _, err := enroll.FindForClaim(ctx, id, realToken); !errors.Is(err, service.ErrEnrollClaimLocked) {
+		t.Fatalf("tied larger pubkey cleared the lock: %v", err)
+	}
+	if _, err := enroll.Announce(ctx, id, smaller, tokenFor[smaller]); err != nil {
+		t.Fatalf("smaller pubkey announce: %v", err)
+	}
+	if _, err := enroll.FindForClaim(ctx, id, tokenFor[smaller]); err != nil {
+		t.Fatalf("tied smaller pubkey did not clear: %v", err)
+	}
+
+	const bare = "thesada-10c000000002"
+	barePub, _ := newDeviceKey(t)
+	if _, err := enroll.Announce(ctx, bare, barePub, "44444444"); err != nil {
+		t.Fatalf("unverified announce: %v", err)
+	}
+	lockClaim(t, enroll, bare, wrong)
+	if _, err := enroll.Announce(ctx, bare, barePub, "44444444"); err != nil {
+		t.Fatalf("unverified re-announce: %v", err)
+	}
+	if _, err := enroll.FindForClaim(ctx, bare, "44444444"); !errors.Is(err, service.ErrEnrollClaimLocked) {
+		t.Fatalf("unverified row cleared its own lock: %v", err)
+	}
+}
+
+// lockClaim spends the cap with wrong codes. in: service, device id, wrong code. out: none.
+func lockClaim(t *testing.T, enroll *service.EnrollmentService, deviceID, wrong string) {
+	t.Helper()
+	ctx := context.Background()
+	for i := 0; i < service.ClaimFailureCap-1; i++ {
+		if _, err := enroll.FindForClaim(ctx, deviceID, wrong); !errors.Is(err, service.ErrEnrollNotFound) {
+			t.Fatalf("guess %d: %v", i, err)
+		}
+	}
+	if _, err := enroll.FindForClaim(ctx, deviceID, wrong); !errors.Is(err, service.ErrEnrollClaimLocked) {
+		t.Fatalf("guess at cap: %v", err)
 	}
 }

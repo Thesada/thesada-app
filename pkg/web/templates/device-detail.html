@@ -6,6 +6,8 @@
 <p class="text-sm text-slate-500 mb-6">
   {{derefOrDash .Device.HardwareType}} - fw {{derefOrDash .Device.FirmwareVersion}} - last seen {{timeOrDash .Device.LastSeenAt}}
 </p>
+{{if .Flash}}<div class="mb-4 rounded-md bg-emerald-50 border border-emerald-200 p-3 text-sm text-emerald-800">{{.Flash}}</div>{{end}}
+{{if .FlashErr}}<div class="mb-4 rounded-md bg-rose-50 border border-rose-200 p-3 text-sm text-rose-800">{{.FlashErr}}</div>{{end}}
 
 <div id="device-live">
 <section class="mb-8" id="chart-card">
@@ -323,4 +325,20 @@
   {{end}}
 </section>
 </div>
+
+{{if .CanRevoke}}
+<section class="mt-8 bg-white border border-rose-200 rounded-xl p-4">
+  <h2 class="text-lg font-semibold mb-1">Revoke this device</h2>
+  <p class="text-sm text-slate-600 mb-3">
+    Confirm to revoke the certificate and publish a request to drop it. The device keeps its WiFi settings. If it receives the request, current firmware reboots within seconds. An older build waits for its next restart. Then it can be claimed again with the code on its sticker.
+  </p>
+  <form method="post" action="/devices/{{.Device.ID}}/revoke" class="flex flex-wrap items-center gap-2">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <label for="confirm_device_id" class="text-sm text-slate-700">Type <span class="font-mono">{{.Device.DeviceID}}</span> to confirm</label>
+    <input id="confirm_device_id" name="confirm_device_id" autocomplete="off" required
+           class="text-sm border border-slate-300 rounded px-2 py-1 font-mono">
+    <button type="submit" class="rounded bg-rose-600 px-3 py-1 text-sm text-white hover:bg-rose-700">Revoke</button>
+  </form>
+</section>
+{{end}}
 {{end}}

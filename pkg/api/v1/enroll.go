@@ -18,7 +18,7 @@ import (
 
 // Device self-enrollment.
 //
-// These four endpoints are the only unauthenticated device-facing surface in
+// These endpoints are the only unauthenticated device-facing surface in
 // the app, and they are reachable from the public internet. Everything here is
 // written on the assumption that the caller is hostile until it proves
 // possession of the device key.
@@ -38,15 +38,26 @@ const (
 	enrollPerPairMax    = 30
 	enrollPerIDWindow   = time.Hour
 	enrollPerIDMax      = 30
+
+	// Status checks are periodic, not a first-boot grind, and they must not
+	// spend the enrollment budgets. 30/hour per device sits above the
+	// firmware's 150 s backoff floor (24/hour). 600/hour per IP covers a
+	// site of devices rebooting together without becoming an open relay.
+	statusPerIPWindow   = time.Hour
+	statusPerIPMax      = 600
+	statusPerPairWindow = time.Hour
+	statusPerPairMax    = 30
 )
 
 // enrollLimiters bundles the three buckets this surface needs, each protecting
 // a different thing: one host, one enrollment, one device_id's share of the
 // table.
 type enrollLimiters struct {
-	byIP   *ratelimit.Limiter
-	byPair *ratelimit.Limiter
-	byID   *ratelimit.Limiter
+	byIP         *ratelimit.Limiter
+	byPair       *ratelimit.Limiter
+	byID         *ratelimit.Limiter
+	statusByIP   *ratelimit.Limiter
+	statusByPair *ratelimit.Limiter
 }
 
 // newEnrollLimiters builds the limiters and starts their sweepers
@@ -56,13 +67,17 @@ type enrollLimiters struct {
 // whoever is talking to the endpoint.
 func newEnrollLimiters() *enrollLimiters {
 	l := &enrollLimiters{
-		byIP:   ratelimit.New(enrollPerIPWindow, enrollPerIPMax),
-		byPair: ratelimit.New(enrollPerPairWindow, enrollPerPairMax),
-		byID:   ratelimit.New(enrollPerIDWindow, enrollPerIDMax),
+		byIP:         ratelimit.New(enrollPerIPWindow, enrollPerIPMax),
+		byPair:       ratelimit.New(enrollPerPairWindow, enrollPerPairMax),
+		byID:         ratelimit.New(enrollPerIDWindow, enrollPerIDMax),
+		statusByIP:   ratelimit.New(statusPerIPWindow, statusPerIPMax),
+		statusByPair: ratelimit.New(statusPerPairWindow, statusPerPairMax),
 	}
 	l.byIP.StartSweeper(context.Background())
 	l.byPair.StartSweeper(context.Background())
 	l.byID.StartSweeper(context.Background())
+	l.statusByIP.StartSweeper(context.Background())
+	l.statusByPair.StartSweeper(context.Background())
 	return l
 }
 
@@ -297,8 +312,8 @@ func (s *Server) handleEnrollCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
-	if err := s.services.Certificates.Issue(r.Context(), tenant, device.ID,
-		serialHex, cn, now, now.Add(deviceCertValidity), certPEM); err != nil {
+	if err := s.services.Certificates.IssueWithIdentity(r.Context(), tenant, device.ID,
+		serialHex, cn, now, now.Add(deviceCertValidity), certPEM, req.Pubkey); err != nil {
 		slog.Error("device.enroll.cert_persist_failed", "device_id", req.DeviceID, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
 		return
@@ -339,6 +354,7 @@ func (s *Server) handleEnrollCert(w http.ResponseWriter, r *http.Request) {
 }
 
 // enrollBrokerEndpoint is the broker host + mTLS port handed to the device.
+// The host is the public device hostname, never the URL this process uses.
 // Nil-guarded like enrollTopicPrefix below: a Server built without cfg must
 // refuse, not panic.
 // in: receiver. out: hostname ("" when unconfigured), mTLS port.
@@ -346,7 +362,7 @@ func (s *Server) enrollBrokerEndpoint() (string, int) {
 	if s.cfg == nil {
 		return "", 0
 	}
-	return s.cfg.BrokerHost(), s.cfg.MQTTDeviceMTLSPort
+	return s.cfg.DeviceBrokerHost(), s.cfg.MQTTDeviceMTLSPort
 }
 
 // enrollTopicPrefix delegates to the shared builder the claim path also uses.
@@ -396,4 +412,86 @@ func (s *Server) handleEnrollAck(w http.ResponseWriter, r *http.Request) {
 		"from", "claimed", "to", "delivered",
 		"device_id", req.DeviceID, "tenant", tenant, "reason", "device_ack")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sealed"})
+}
+
+type enrollStatusReq struct {
+	DeviceID  string `json:"device_id"`
+	Pubkey    string `json:"pubkey"`
+	Serial    string `json:"serial"`
+	Timestamp int64  `json:"ts"`
+	Signature string `json:"signature"`
+}
+
+// enrollStatusGate is the status-check rate limit. It does not touch the
+// enrollment buckets: a fleet asking on its cadence must not starve a
+// first boot. IP is spent before the body fields become map keys.
+// in: writer, request, device id, lowercase-hex pubkey. out: true to proceed.
+func (s *Server) enrollStatusGate(w http.ResponseWriter, r *http.Request, deviceID, pubkeyHex string) bool {
+	if !s.enroll.statusByIP.Allow(s.enrollClientIP(r)) {
+		slog.Info("device.enroll.status_rate_limited", "scope", "ip", "ip", s.enrollClientIP(r))
+		enrollReject(w)
+		return false
+	}
+	if !pki.ValidDeviceID(deviceID) {
+		enrollReject(w)
+		return false
+	}
+	if _, err := pki.ParseDevicePublicKey(pubkeyHex); err != nil {
+		enrollReject(w)
+		return false
+	}
+	if !s.enroll.statusByPair.Allow(enrollPairKey(deviceID, pubkeyHex)) {
+		slog.Info("device.enroll.status_rate_limited", "scope", "enrollment", "device_id", deviceID)
+		enrollReject(w)
+		return false
+	}
+	return true
+}
+
+// handleEnrollStatus tells a device whether the cert it holds is still live.
+// POST /devices/enroll/status, unauthenticated.
+//
+// Wipe happens only on an explicit revoked for the signed serial. A bad
+// signature, a stale timestamp and an unknown serial must not look like a
+// revoke: the first two are the uniform 403, and unknown is a 200 that the
+// firmware treats as "keep the cert". A database error is 500 for the same
+// reason. An outage must never wipe a fleet.
+func (s *Server) handleEnrollStatus(w http.ResponseWriter, r *http.Request) {
+	var req enrollStatusReq
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		enrollReject(w)
+		return
+	}
+	if !s.enrollStatusGate(w, r, req.DeviceID, req.Pubkey) {
+		return
+	}
+	serial, ok := service.CanonicalCertSerial(req.Serial)
+	if !ok || len(req.Signature) != 128 {
+		enrollReject(w)
+		return
+	}
+	sig, err := hex.DecodeString(req.Signature)
+	if err != nil || req.Signature != hex.EncodeToString(sig) {
+		enrollReject(w)
+		return
+	}
+	if !service.EnrollStatusFresh(time.Now(), req.Timestamp) {
+		slog.Info("device.enroll.status_refused", "device_id", req.DeviceID, "reason", "stale")
+		enrollReject(w)
+		return
+	}
+	msg := service.EnrollStatusMessage(req.DeviceID, serial, req.Timestamp)
+	if err := pki.VerifyDeviceProof(req.DeviceID, req.Pubkey, []byte(msg), sig); err != nil {
+		slog.Info("device.enroll.status_refused", "device_id", req.DeviceID, "reason", "bad_proof")
+		enrollReject(w)
+		return
+	}
+	answer, canonical, err := s.services.Certificates.RevocationStatus(r.Context(), req.DeviceID, req.Pubkey, serial)
+	if err != nil {
+		slog.Error("device.enroll.status_failed", "device_id", req.DeviceID, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
+		return
+	}
+	slog.Info("device.enroll.status_answered", "device_id", req.DeviceID, "answer", answer)
+	writeJSON(w, http.StatusOK, map[string]string{"status": answer, "serial": canonical})
 }

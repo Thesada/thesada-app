@@ -49,6 +49,12 @@ var (
 	// ErrEnrollAmbiguous means several rows carry the presented claim token
 	// and nothing on the request says which one the caller meant.
 	ErrEnrollAmbiguous = errors.New("enrollment: more than one row matches that claim token")
+	// ErrEnrollClaimLocked means the claim form has had too many wrong codes
+	// for this device id. The earliest verified row's own announce clears it.
+	ErrEnrollClaimLocked = errors.New("enrollment: claim form locked until the device announces")
+	// ErrEnrollClaimedElsewhere means another tenant has claimed the device id,
+	// so its rows are not the caller's to clear.
+	ErrEnrollClaimedElsewhere = errors.New("enrollment: device id claimed by another tenant")
 )
 
 // Enrollment is one unclaimed-or-claimed device announcement.
@@ -56,6 +62,7 @@ type Enrollment struct {
 	DeviceID           string
 	PubkeyHex          string
 	ClaimTokenHash     string
+	ClaimFailures      int
 	Challenge          *string
 	ChallengeExpiresAt *time.Time
 	VerifiedAt         *time.Time
@@ -66,13 +73,13 @@ type Enrollment struct {
 	LastSeenAt         time.Time
 }
 
-const enrollmentColumns = `device_id, pubkey_hex, claim_token_hash, challenge,
+const enrollmentColumns = `device_id, pubkey_hex, claim_token_hash, claim_failures, challenge,
 	challenge_expires_at, verified_at, claimed_by_tenant, claimed_at,
 	cert_delivered_at, first_seen_at, last_seen_at`
 
 func scanEnrollment(row pgx.Row) (*Enrollment, error) {
 	var e Enrollment
-	err := row.Scan(&e.DeviceID, &e.PubkeyHex, &e.ClaimTokenHash, &e.Challenge,
+	err := row.Scan(&e.DeviceID, &e.PubkeyHex, &e.ClaimTokenHash, &e.ClaimFailures, &e.Challenge,
 		&e.ChallengeExpiresAt, &e.VerifiedAt, &e.ClaimedByTenant, &e.ClaimedAt,
 		&e.CertDeliveredAt, &e.FirstSeenAt, &e.LastSeenAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -110,18 +117,33 @@ func scanEnrollments(rows pgx.Rows) ([]Enrollment, error) {
 	return out, rows.Err()
 }
 
-// claimTokenMatches returns every row whose stored hash matches token - all of
-// them, because claim_token_hash has no unique constraint. Every candidate is
-// compared in constant time, so the walk says nothing about which one matched.
-// in: candidate rows, presented plaintext token. out: matching rows.
-func claimTokenMatches(rows []Enrollment, token string) []*Enrollment {
+// claimKey is the HMAC key for a new claim-token digest. Empty keeps SHA-256.
+// in: none (reads config). out: key, or "".
+func (s *EnrollmentService) claimKey() string {
+	if s == nil || s.cfg == nil {
+		return ""
+	}
+	return s.cfg.ClaimHashKey
+}
+
+// claimTokenMatches returns every row whose stored hash matches token.
+// in: rows, presented plaintext, HMAC key. out: matching rows.
+func claimTokenMatches(rows []Enrollment, token, key string) []*Enrollment {
 	var out []*Enrollment
 	for i := range rows {
-		if ClaimTokenMatches(token, rows[i].ClaimTokenHash) {
+		if ClaimTokenAccepts(key, token, rows[i].ClaimTokenHash) {
 			out = append(out, &rows[i])
 		}
 	}
 	return out
+}
+
+// higherCount keeps the larger failure count. in: current, next. out: the max.
+func higherCount(current, next int) int {
+	if next > current {
+		return next
+	}
+	return current
 }
 
 // Announce records an announcement for (device_id, pubkey) and issues a fresh
@@ -141,7 +163,7 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 		return "", err
 	}
 	expires := time.Now().Add(ChallengeTTL)
-	tokenHash := HashClaimToken(claimToken)
+	tokenHash := ClaimTokenDigest(s.claimKey(), claimToken)
 
 	err = db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment announce", func(tx pgx.Tx) error {
 		existing, err := scanEnrollment(tx.QueryRow(ctx,
@@ -158,7 +180,10 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 				   (device_id, pubkey_hex, claim_token_hash, challenge, challenge_expires_at)
 				 VALUES ($1, $2, $3, $4, $5)
 				 ON CONFLICT (device_id, pubkey_hex) DO UPDATE
-				   SET challenge            = EXCLUDED.challenge,
+				   SET claim_token_hash = CASE
+				         WHEN device_enrollments.verified_at IS NULL THEN EXCLUDED.claim_token_hash
+				         ELSE device_enrollments.claim_token_hash END,
+				       challenge            = EXCLUDED.challenge,
 				       challenge_expires_at = EXCLUDED.challenge_expires_at,
 				       last_seen_at         = now()`,
 				deviceID, pubkeyHex, tokenHash, challenge, expires)
@@ -175,6 +200,7 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 		// portal session. After proof the stored hash stands, and the refusal
 		// is silent: answering differently would tell an unauthenticated
 		// caller that this device_id is real and already verified.
+		ownsCode := ClaimTokenAccepts(s.claimKey(), claimToken, existing.ClaimTokenHash)
 		storedToken := existing.ClaimTokenHash
 		if !ClaimTokenFrozen(existing.VerifiedAt) {
 			storedToken = tokenHash
@@ -185,6 +211,31 @@ func (s *EnrollmentService) Announce(ctx context.Context, deviceID, pubkeyHex, c
 			        challenge_expires_at = $5, last_seen_at = now()
 			  WHERE device_id = $1 AND pubkey_hex = $2`,
 			deviceID, pubkeyHex, storedToken, challenge, expires)
+		if err != nil {
+			return err
+		}
+		older := false
+		if ownsCode && existing.VerifiedAt != nil {
+			err = tx.QueryRow(ctx,
+				`SELECT EXISTS (
+				    SELECT 1 FROM device_enrollments
+				     WHERE device_id = $1 AND pubkey_hex <> $2
+				       AND verified_at IS NOT NULL
+				       AND (verified_at < $3
+				            OR (verified_at = $3 AND pubkey_hex < $2)))`,
+				deviceID, pubkeyHex, *existing.VerifiedAt).Scan(&older)
+			if err != nil {
+				return err
+			}
+		}
+		// Same order as ClaimLockOlder: earlier verified_at, then smaller pubkey.
+		if !ClaimLockClears(ownsCode, existing.VerifiedAt, older) {
+			return nil
+		}
+		_, err = tx.Exec(ctx,
+			`UPDATE device_enrollments
+			    SET claim_failures = 0
+			  WHERE device_id = $1`, deviceID)
 		return err
 	})
 	if err != nil {
@@ -296,7 +347,7 @@ func (s *EnrollmentService) FindByDeviceKey(ctx context.Context, deviceID, pubke
 		if err != nil {
 			return err
 		}
-		if !ClaimTokenMatches(claimToken, e.ClaimTokenHash) {
+		if !ClaimTokenAccepts(s.claimKey(), claimToken, e.ClaimTokenHash) {
 			return ErrEnrollNotFound
 		}
 		out = e
@@ -320,10 +371,11 @@ func (s *EnrollmentService) FindForClaim(ctx context.Context, deviceID, claimTok
 	// pubkey to offer. Resolving it by ordering handed a user somebody else's
 	// row under a success page.
 	var out *Enrollment
+	var refused error
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment claim lookup", func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT `+enrollmentColumns+` FROM device_enrollments
-			  WHERE device_id = $1 ORDER BY pubkey_hex`, deviceID)
+			  WHERE device_id = $1 ORDER BY pubkey_hex FOR UPDATE`, deviceID)
 		if err != nil {
 			return err
 		}
@@ -331,10 +383,48 @@ func (s *EnrollmentService) FindForClaim(ctx context.Context, deviceID, claimTok
 		if err != nil {
 			return err
 		}
-		matches := claimTokenMatches(candidates, claimToken)
+		if len(candidates) == 0 {
+			refused = ErrEnrollNotFound
+			return nil
+		}
+		worst := 0
+		for i := range candidates {
+			worst = higherCount(worst, candidates[i].ClaimFailures)
+		}
+		if ClaimFailuresExhausted(worst) {
+			refused = ErrEnrollClaimLocked
+			return nil
+		}
+		matches := claimTokenMatches(candidates, claimToken, s.claimKey())
+		if len(matches) == 0 {
+			bumped, err := tx.Query(ctx,
+				`UPDATE device_enrollments
+				    SET claim_failures = claim_failures + 1
+				  WHERE device_id = $1
+				  RETURNING claim_failures`, deviceID)
+			if err != nil {
+				return err
+			}
+			defer bumped.Close()
+			next := 0
+			for bumped.Next() {
+				var n int
+				if err := bumped.Scan(&n); err != nil {
+					return err
+				}
+				next = higherCount(next, n)
+			}
+			if err := bumped.Err(); err != nil {
+				return err
+			}
+			if ClaimFailuresExhausted(next) {
+				refused = ErrEnrollClaimLocked
+			} else {
+				refused = ErrEnrollNotFound
+			}
+			return nil
+		}
 		switch len(matches) {
-		case 0:
-			return ErrEnrollNotFound
 		case 1:
 			out = matches[0]
 			return nil
@@ -358,6 +448,9 @@ func (s *EnrollmentService) FindForClaim(ctx context.Context, deviceID, claimTok
 	if err != nil {
 		return nil, err
 	}
+	if refused != nil {
+		return nil, refused
+	}
 	return out, nil
 }
 
@@ -378,7 +471,7 @@ func (s *EnrollmentService) MarkDelivered(ctx context.Context, deviceID, pubkeyH
 		// The pubkey is public - it is on the QR and on chip.info - so sealing
 		// needs the token as well. Otherwise anyone who has read a key can
 		// seal the row before the device collects its certificate.
-		if !ClaimTokenMatches(claimToken, e.ClaimTokenHash) {
+		if !ClaimTokenAccepts(s.claimKey(), claimToken, e.ClaimTokenHash) {
 			return ErrEnrollNotFound
 		}
 		if !DeliverAllowed(e.VerifiedAt, e.ClaimedAt, e.CertDeliveredAt) {
@@ -458,18 +551,74 @@ func (s *EnrollmentService) ClaimInto(ctx context.Context, deviceID, pubkeyHex, 
 	return devicePk, err
 }
 
+// ClaimedTenants lists the distinct tenants holding a claimed enrollment row
+// for a device_id; cross-tenant by design, the answer is the tenant.
+// in: ctx, device id. out: tenant ids, error.
+func (s *EnrollmentService) ClaimedTenants(ctx context.Context, deviceID string) ([]string, error) {
+	var out []string
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment claimed tenants", func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT DISTINCT claimed_by_tenant FROM device_enrollments
+			  WHERE device_id = $1 AND claimed_by_tenant IS NOT NULL
+			  ORDER BY claimed_by_tenant`, deviceID)
+		if err != nil {
+			return err
+		}
+		out, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("enrollment: claimed tenants for %s: %w", deviceID, err)
+	}
+	return out, nil
+}
+
 // Reset deletes every enrollment row for a device_id so it can start over.
 //
-// Wired into all three revoke paths. Without it a revoked device is bricked:
-// cert_delivered_at stays set, so the row stays sealed and the device can
-// never prove itself again. The spec requires the opposite - "next POST starts a
-// fresh cycle". It also clears any squatter rows that accumulated under the
-// same id.
+// Without it a revoked device is bricked: cert_delivered_at stays set, so the
+// row stays sealed and the device can never prove itself again. The spec
+// requires the opposite - "next POST starts a fresh cycle". It also clears any
+// squatter rows that accumulated under the same id.
 // in: ctx, device id. out: rows removed, error.
 func (s *EnrollmentService) Reset(ctx context.Context, deviceID string) (int64, error) {
 	var removed int64
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment reset", func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `DELETE FROM device_enrollments WHERE device_id = $1`, deviceID)
+		if err != nil {
+			return err
+		}
+		removed = tag.RowsAffected()
+		return nil
+	})
+	return removed, err
+}
+
+// ResetForTenant is Reset under a row lock that refuses another tenant's claim.
+// in: ctx, device id, acting tenant. out: rows removed, error
+// (ErrEnrollClaimedElsewhere when another tenant holds a claim).
+func (s *EnrollmentService) ResetForTenant(ctx context.Context, deviceID, tenantID string) (int64, error) {
+	var removed int64
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment reset for tenant", func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT claimed_by_tenant FROM device_enrollments
+			  WHERE device_id = $1 FOR UPDATE`, deviceID)
+		if err != nil {
+			return err
+		}
+		claimedBy, err := pgx.CollectRows(rows, pgx.RowTo[*string])
+		if err != nil {
+			return err
+		}
+		for _, t := range claimedBy {
+			if t != nil && *t != tenantID {
+				return ErrEnrollClaimedElsewhere
+			}
+		}
+		// A row inserted after the lock escapes the check; the filter keeps its claim.
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM device_enrollments
+			  WHERE device_id = $1
+			    AND (claimed_by_tenant IS NULL OR claimed_by_tenant = $2)`, deviceID, tenantID)
 		if err != nil {
 			return err
 		}

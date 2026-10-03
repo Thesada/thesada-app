@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"sort"
 	"time"
 
@@ -122,6 +121,56 @@ func (s *Server) provisionDeviceDynsec(ctx context.Context, tenantID, deviceID, 
 	return "", nil
 }
 
+// teardownDeviceDynsec removes the device's broker client and role, the
+// inverse of provisionDeviceDynsec. The revoke is already committed, so a
+// failed delete is retried and then raised as an alert: a revoked cert whose
+// client row survives keeps its ACL.
+// in: ctx, device, calling path (for slog). out: none.
+func (s *Server) teardownDeviceDynsec(ctx context.Context, device *service.Device, op string) {
+	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
+	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	clientErr := mqtt.RetryDynsecDelete(ctx, func(ctx context.Context) error {
+		return s.mqtt.DeleteDynsecClient(ctx, cn)
+	})
+	if clientErr != nil {
+		slog.Error("mqtt.dynsec.teardown_failed", "op", op, "step", "delete_client",
+			"device", device.ID, "cn", cn, "err", clientErr)
+		s.alertDynsecTeardown(ctx, device, op)
+	}
+	// The client attempts can burn the whole deadline. The role delete still
+	// has to run, so it gets its own window.
+	roleCtx, roleCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer roleCancel()
+	roleErr := mqtt.RetryDynsecDelete(roleCtx, func(ctx context.Context) error {
+		return s.mqtt.DeleteDynsecRole(ctx, roleName)
+	})
+	if roleErr != nil {
+		slog.Error("mqtt.dynsec.teardown_failed", "op", op, "step", "delete_role",
+			"device", device.ID, "role", roleName, "err", roleErr)
+	}
+}
+
+// alertDynsecTeardown records that the broker client may still be present.
+// The message is fixed. The broker's own error stays in the log.
+// in: ctx, device, calling path. out: none.
+func (s *Server) alertDynsecTeardown(ctx context.Context, device *service.Device, op string) {
+	if s.services == nil || s.services.Alerts == nil {
+		return
+	}
+	// The teardown deadline may already be spent. The alert still has to land.
+	alertCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	_, err := s.services.Alerts.InsertAlert(alertCtx, device.TenantID, device.ID, "crit",
+		"dynsec_teardown_failed",
+		"The certificate was revoked, but the broker may still accept it.",
+		[]byte(`{"step":"delete_client"}`))
+	if err != nil && !errors.Is(err, service.ErrDuplicateAlert) {
+		slog.Error("mqtt.dynsec.teardown_alert_failed", "op", op, "device", device.ID, "err", err)
+	}
+}
+
 // resetDeviceEnrollment clears every device_enrollments row for a device_id.
 //
 // Revoking tears down the certificate and the broker client but leaves the
@@ -205,10 +254,11 @@ func (s *Server) handleAdminDevicePairIndex(w http.ResponseWriter, r *http.Reque
 	sort.SliceStable(rows, func(i, j int) bool {
 		return rows[i].Status == "unpaired" && rows[j].Status != "unpaired"
 	})
+	ok, bad := adminFlash(r.URL.Query())
 	s.render(w, r, "admin-devices-pair.html", map[string]interface{}{
 		"Rows":     rows,
-		"Flash":    r.URL.Query().Get("ok"),
-		"FlashErr": r.URL.Query().Get("error"),
+		"Flash":    ok,
+		"FlashErr": bad,
 		"CAReady":  s.ca != nil,
 	})
 }
@@ -239,7 +289,7 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if s.ca == nil {
-		http.Redirect(w, r, "/admin/devices/pair?error=CA+not+initialized", http.StatusFound)
+		http.Redirect(w, r, flashPairCA.on("/admin/devices/pair"), http.StatusFound)
 		return
 	}
 
@@ -247,7 +297,7 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 	certPEM, keyPEM, serialHex, err := s.ca.SignDeviceCert(cn, deviceCertValidity)
 	if err != nil {
 		slog.Error("sign device cert failed", "device", device.ID, "cn", cn, "err", err)
-		http.Redirect(w, r, "/admin/devices/pair?error=sign+failed", http.StatusFound)
+		http.Redirect(w, r, flashPairSign.on("/admin/devices/pair"), http.StatusFound)
 		return
 	}
 
@@ -273,24 +323,24 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 		serialHex, cn, now, now.Add(deviceCertValidity), certPEM)
 	if err != nil {
 		slog.Error("persist pending device cert failed", "device", device.ID, "err", err)
-		http.Redirect(w, r, "/admin/devices/pair?error=persist+failed", http.StatusFound)
+		http.Redirect(w, r, flashPairPersist.on("/admin/devices/pair"), http.StatusFound)
 		return
 	}
 
 	if msg, ok := s.pushCertPart(r.Context(), topicPrefix, "client_cert", certPEM); !ok {
 		slog.Error("push client_cert failed", "device", device.ID, "err", msg)
-		s.failPairIssue(w, r, device, certID, cn, serialHex, "push_client_cert", msg)
+		s.failPairIssue(w, r, device, certID, cn, serialHex, "push_client_cert", flashPairPushCert)
 		return
 	}
 	if msg, ok := s.pushCertPart(r.Context(), topicPrefix, "client_key", keyPEM); !ok {
 		slog.Error("push client_key failed", "device", device.ID, "err", msg)
-		s.failPairIssue(w, r, device, certID, cn, serialHex, "push_client_key", msg)
+		s.failPairIssue(w, r, device, certID, cn, serialHex, "push_client_key", flashPairPushKey)
 		return
 	}
 	if msg, ok := s.runCLI(r.Context(), topicPrefix, "config.set",
 		fmt.Sprintf("mqtt.port %d", s.cfg.MQTTDeviceMTLSPort)); !ok {
 		slog.Error("config.set mqtt.port failed", "device", device.ID, "err", msg)
-		s.failPairIssue(w, r, device, certID, cn, serialHex, "config_set_port", msg)
+		s.failPairIssue(w, r, device, certID, cn, serialHex, "config_set_port", flashPairPort)
 		return
 	}
 
@@ -327,7 +377,7 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 		}
 		if outcome.AbortMsg != "" {
 			slog.Error("secret provisioning aborted pair", "device", device.ID, "err", outcome.AbortMsg)
-			s.failPairIssue(w, r, device, certID, cn, serialHex, "secret_provision", outcome.AbortMsg)
+			s.failPairIssue(w, r, device, certID, cn, serialHex, "secret_provision", secretAbortFlash(outcome.AbortMsg))
 			return
 		}
 	}
@@ -337,7 +387,7 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 	defer dynsecCancel()
 	if step, err := s.provisionDeviceDynsec(dynsecCtx, device.TenantID, device.DeviceID, topicPrefix, cn); err != nil {
 		slog.Error("dynsec provisioning failed", "device", device.ID, "step", step, "err", err)
-		s.failPairIssue(w, r, device, certID, cn, serialHex, step, "dynsec+"+step+"+failed")
+		s.failPairIssue(w, r, device, certID, cn, serialHex, step, flashPairDynsec)
 		return
 	}
 
@@ -347,7 +397,7 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 	finalizeCtx := context.WithoutCancel(r.Context())
 	if err := s.services.Certificates.Activate(finalizeCtx, device.TenantID, certID, device.ID); err != nil {
 		slog.Error("activate device cert failed", "device", device.ID, "cert", certID, "err", err)
-		s.failPairIssue(w, r, device, certID, cn, serialHex, "activate", "activate+failed")
+		s.failPairIssue(w, r, device, certID, cn, serialHex, "activate", flashPairActivate)
 		return
 	}
 
@@ -374,7 +424,7 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 		Detail: pairIssueDetail(device.DeviceID, cn, serialHex, service.CertStatusActive, ""),
 	})
 
-	http.Redirect(w, r, "/admin/devices/pair?ok=paired+"+device.DeviceID, http.StatusFound)
+	http.Redirect(w, r, flashPairPaired.on("/admin/devices/pair"), http.StatusFound)
 }
 
 // failPairIssue finalizes an aborted issue attempt: flips the pending cert
@@ -383,8 +433,8 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 // trail, and surfaces the error to the operator via the pair-page flash.
 // The specific failure was already slog'd at the call site.
 // in: writer, request, device, pending cert row id, CN, serial, stage
-// slug (which push step died), user-facing query-encoded message. out: 302.
-func (s *Server) failPairIssue(w http.ResponseWriter, r *http.Request, device *service.Device, certID int64, cn, serialHex, stage, msg string) {
+// slug (which push step died), registered flash code. out: 302.
+func (s *Server) failPairIssue(w http.ResponseWriter, r *http.Request, device *service.Device, certID int64, cn, serialHex, stage string, flash adminFlashCode) {
 	ctx := context.WithoutCancel(r.Context())
 	// If the row was already finalized/superseded, the audit row must not
 	// claim we flipped it to failed - record what actually happened.
@@ -401,7 +451,7 @@ func (s *Server) failPairIssue(w http.ResponseWriter, r *http.Request, device *s
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
 		Detail: pairIssueDetail(device.DeviceID, cn, serialHex, auditStatus, stage),
 	})
-	http.Redirect(w, r, "/admin/devices/pair?error="+msg, http.StatusFound)
+	http.Redirect(w, r, flash.on("/admin/devices/pair"), http.StatusFound)
 }
 
 // pairIssueDetail builds the cert.issue audit detail payload in one shape
@@ -485,7 +535,7 @@ func secretProvisionFields(ssids []string) ([]string, string) {
 
 // provisionOutcome is the result of the pure provisioning loop: which
 // firmware fields were pushed, which were skipped and why, and a non-empty
-// AbortMsg when the pair must be aborted (redirect error=AbortMsg).
+// AbortMsg when the pair must be aborted. The redirect uses a registered code.
 type provisionOutcome struct {
 	Pushed        []string
 	SkippedUnset  []string
@@ -613,7 +663,7 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 	}
 	if err := s.services.Certificates.Revoke(r.Context(), device.TenantID, device.ID); err != nil {
 		slog.Error("revoke device cert failed", "device", device.ID, "err", err)
-		http.Redirect(w, r, "/admin/devices/pair?error=revoke+failed", http.StatusFound)
+		http.Redirect(w, r, flashPairRevokeFailed.on("/admin/devices/pair"), http.StatusFound)
 		return
 	}
 	// Committed. The rest must survive a disconnecting browser.
@@ -636,20 +686,7 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 	// no ordering race, recovery in ~10s.
 	preemptiveCertClear(ctx, s, device, "revoke", v.usable)
 
-	// Tear down dynsec client + role so the broker refuses the old CN even
-	// if the cert somehow re-appears in NVS. Role delete is best-effort -
-	// a failure here is logged but does not block the revoke since the
-	// cert revocation in the db is already done.
-	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
-	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
-	dynsecCtx, dynsecCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer dynsecCancel()
-	if derr := s.mqtt.DeleteDynsecClient(dynsecCtx, cn); derr != nil {
-		slog.Warn("dynsec deleteClient failed", "device", device.ID, "cn", cn, "err", derr)
-	}
-	if derr := s.mqtt.DeleteDynsecRole(dynsecCtx, roleName); derr != nil {
-		slog.Warn("dynsec deleteRole failed", "device", device.ID, "role", roleName, "err", derr)
-	}
+	s.teardownDeviceDynsec(ctx, device, "admin_revoke")
 
 	user := authmw.CurrentUser(r)
 	if device.PairedAt != nil {
@@ -658,12 +695,10 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 	// Re-enrollment gate. Without this the device is revoked AND sealed, and
 	// a success message would be a lie.
 	if err := s.resetDeviceEnrollment(ctx, device.DeviceID, "revoke"); err != nil {
-		http.Redirect(w, r, "/admin/devices/pair?error="+url.QueryEscape(
-			"revoked "+device.DeviceID+" but enrollment reset failed, re-enrollment stays blocked"),
-			http.StatusFound)
+		http.Redirect(w, r, flashPairEnrollReset.on("/admin/devices/pair"), http.StatusFound)
 		return
 	}
-	http.Redirect(w, r, "/admin/devices/pair?ok=revoked+"+device.DeviceID, http.StatusFound)
+	http.Redirect(w, r, flashPairRevoked.on("/admin/devices/pair"), http.StatusFound)
 }
 
 // logPairStateChange emits the device pairing audit edge

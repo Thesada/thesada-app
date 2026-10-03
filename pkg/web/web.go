@@ -142,6 +142,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /devices/{id}", authmw.RequireAuth(s.handleDeviceDetail))
 	s.mux.HandleFunc("GET /devices/{id}/chart.json", authmw.RequireAuth(s.handleDeviceChartJSON))
 	s.mux.HandleFunc("POST /devices/{id}/sensors/delete", authmw.RequireAuth(s.handleDeviceSensorDelete))
+	s.mux.HandleFunc("POST /devices/{id}/revoke", authmw.RequireAuth(s.handleDeviceRevoke))
 	s.mux.HandleFunc("GET /alerts", authmw.RequireAuth(s.handleAlertList))
 	s.mux.HandleFunc("GET /settings", authmw.RequireAuth(s.handleSettingsForm))
 	s.mux.HandleFunc("POST /settings/profile", authmw.RequireAuth(s.handleSettingsProfile))

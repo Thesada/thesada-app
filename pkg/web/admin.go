@@ -517,11 +517,12 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tenant list failed", http.StatusInternalServerError)
 		return
 	}
+	ok, bad := adminFlash(r.URL.Query())
 	s.render(w, r, "admin-devices.html", map[string]interface{}{
 		"Devices":  devices,
 		"Tenants":  tenants,
-		"Flash":    r.URL.Query().Get("ok"),
-		"FlashErr": r.URL.Query().Get("error"),
+		"Flash":    ok,
+		"FlashErr": bad,
 	})
 }
 
@@ -541,17 +542,17 @@ func (s *Server) handleAdminDeviceReassign(w http.ResponseWriter, r *http.Reques
 	}
 	target := r.PostFormValue("target_tenant")
 	if !s.services.Tenants.ExistsBySlug(target) {
-		http.Redirect(w, r, "/admin/devices?error=unknown+tenant", http.StatusFound)
+		http.Redirect(w, r, flashAdminUnknownTenant.on("/admin/devices"), http.StatusFound)
 		return
 	}
 	if err := s.services.Devices.Reassign(r.Context(), id, target); err != nil {
 		slog.Error("admin device reassign failed", "device", id, "target", target, "err", err)
-		http.Redirect(w, r, "/admin/devices?error=reassign+failed+(duplicate+device_id+in+target?)", http.StatusFound)
+		http.Redirect(w, r, flashAdminReassignFailed.on("/admin/devices"), http.StatusFound)
 		return
 	}
 	s.audit(r.Context(), authmw.CurrentUser(r), authz.DeviceReassign, service.AuditEntry{
 		TargetType: "device", TargetID: id.String(), TenantID: target,
 		Detail: map[string]any{"target_tenant": target},
 	})
-	http.Redirect(w, r, "/admin/devices?ok=reassigned", http.StatusFound)
+	http.Redirect(w, r, flashAdminReassigned.on("/admin/devices"), http.StatusFound)
 }

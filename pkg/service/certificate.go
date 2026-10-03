@@ -55,9 +55,11 @@ var ErrCertNotPending = errors.New("certificate: no pending row to flip")
 // guard is what keeps "one live cert per device" an invariant instead of a
 // convention: without it every Issue click accumulates another
 // revoked = false row and GetActive just picks the newest.
-// in: ctx, tx, device pk, serial hex, CN, validity window, cert PEM, status.
+// pubkeyHex is the device identity key, or "" when this cert was not issued
+// through enrollment. Empty is stored as NULL and never matches a status check.
+// in: ctx, tx, device pk, serial hex, CN, validity window, cert PEM, status, pubkey hex.
 // out: new cert row id, error.
-func issueTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, serialHex, cn string, notBefore, notAfter time.Time, certPEM, status string) (int64, error) {
+func issueTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, serialHex, cn string, notBefore, notAfter time.Time, certPEM, status, pubkeyHex string) (int64, error) {
 	// Serialize concurrent Issues for the same device on its devices row -
 	// without the lock two racing calls can both pass the supersede UPDATE
 	// and leave two unrevoked rows.
@@ -71,12 +73,16 @@ func issueTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, serialHex, cn s
 		 WHERE device_pk = $1 AND revoked = false`, devicePk); err != nil {
 		return 0, err
 	}
+	var pubkey *string
+	if pubkeyHex != "" {
+		pubkey = &pubkeyHex
+	}
 	var id int64
 	err := tx.QueryRow(ctx,
-		`INSERT INTO device_certificates (device_pk, serial_hex, cn, not_before, not_after, cert_pem, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`INSERT INTO device_certificates (device_pk, serial_hex, cn, not_before, not_after, cert_pem, status, pubkey_hex)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 RETURNING id`,
-		devicePk, serialHex, cn, notBefore, notAfter, certPEM, status).Scan(&id)
+		devicePk, serialHex, cn, notBefore, notAfter, certPEM, status, pubkey).Scan(&id)
 	return id, err
 }
 
@@ -97,10 +103,29 @@ func issueTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, serialHex, cn s
 // out: error.
 func (s *CertificateService) Issue(ctx context.Context, tenantID string, devicePk uuid.UUID, serialHex, cn string, notBefore, notAfter time.Time, certPEM string) error {
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
-		if _, err := issueTx(ctx, tx, devicePk, serialHex, cn, notBefore, notAfter, certPEM, CertStatusActive); err != nil {
+		if _, err := issueTx(ctx, tx, devicePk, serialHex, cn, notBefore, notAfter, certPEM, CertStatusActive, ""); err != nil {
 			return err
 		}
 		// Mark device as paired
+		_, err := tx.Exec(ctx,
+			`UPDATE devices SET paired_at = NOW() WHERE id = $1`, devicePk)
+		return err
+	})
+}
+
+// IssueWithIdentity is Issue plus the device identity pubkey, stored so a
+// later status check can require the signature key after enrollment rows
+// are gone. Admin pairing does not have that key and keeps using Issue.
+// in: ctx, tenant_id, device pk, serial hex, CN, not_before, not_after, cert PEM, lowercase-hex pubkey.
+// out: error.
+func (s *CertificateService) IssueWithIdentity(ctx context.Context, tenantID string, devicePk uuid.UUID, serialHex, cn string, notBefore, notAfter time.Time, certPEM, pubkeyHex string) error {
+	if pubkeyHex == "" {
+		return fmt.Errorf("cert issue: identity pubkey required")
+	}
+	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		if _, err := issueTx(ctx, tx, devicePk, serialHex, cn, notBefore, notAfter, certPEM, CertStatusActive, pubkeyHex); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx,
 			`UPDATE devices SET paired_at = NOW() WHERE id = $1`, devicePk)
 		return err
@@ -120,7 +145,7 @@ func (s *CertificateService) IssuePending(ctx context.Context, tenantID string, 
 	var id int64
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		var err error
-		if id, err = issueTx(ctx, tx, devicePk, serialHex, cn, notBefore, notAfter, certPEM, CertStatusPending); err != nil {
+		if id, err = issueTx(ctx, tx, devicePk, serialHex, cn, notBefore, notAfter, certPEM, CertStatusPending, ""); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx,
