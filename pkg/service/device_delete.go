@@ -19,7 +19,10 @@ import (
 //   - device_telemetry (TimescaleDB hypertable; per-row delete across chunks)
 //   - device_alerts
 //   - subscriptions (alert subscriptions; nullable FK preserves wildcards)
-//   - device_certificates (the row stays referenced by audit logs only)
+//   - device_certificates (the row stays referenced by audit logs only).
+//     Serials that carry an identity pubkey are copied into
+//     device_cert_serial_tombstones first, in this same transaction, so a
+//     deleted device still answers revoked. See tombstoneCertSerials.
 //   - device_files / device_file_history / device_file_observations
 //   - device_rule_workspaces / device_rule_workspace_history
 //
@@ -36,7 +39,26 @@ import (
 // in: ctx, tenant_id, device pk. out: error from pgx.
 func (s *DeviceService) DeleteByID(ctx context.Context, tenantID string, id uuid.UUID) error {
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		if err := tombstoneCertSerials(ctx, tx, id); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx, `DELETE FROM devices WHERE id = $1`, id)
 		return err
 	})
+}
+
+// tombstoneCertSerials copies identity-bound cert serials before the
+// device row and its certificates cascade away. A null pubkey is skipped:
+// nothing can prove a later status request holds that device's key.
+// in: ctx, tx, device pk. out: error.
+func tombstoneCertSerials(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO device_cert_serial_tombstones (serial_hex, device_id, pubkey_hex)
+		SELECT c.serial_hex, d.device_id, c.pubkey_hex
+		  FROM device_certificates c
+		  JOIN devices d ON d.id = c.device_pk
+		 WHERE c.device_pk = $1
+		   AND c.pubkey_hex IS NOT NULL
+		ON CONFLICT (serial_hex) DO NOTHING`, devicePk)
+	return err
 }

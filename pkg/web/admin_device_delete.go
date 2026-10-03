@@ -8,7 +8,6 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,7 +28,8 @@ import (
 //     Failures logged but do not block the delete since the cert is already
 //     revoked; the broker rejects the device on next auth check regardless.
 //  4. DELETE FROM devices (load-bearing) - the FK CASCADE handles every
-//     dependent table.
+//     dependent table. Identity-bound cert serials are copied to
+//     device_cert_serial_tombstones in that same transaction first.
 //  5. Enrollment reset - device_enrollments has no FK to devices, so the
 //     cascade misses it and a sealed row would refuse re-enrollment forever.
 //
@@ -65,7 +65,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	}
 	if r.PostFormValue("confirm_device_id") != device.DeviceID {
 		http.Redirect(w, r,
-			"/admin/devices?error=confirm+device_id+did+not+match",
+			flashAdminConfirmDevice.on("/admin/devices"),
 			http.StatusFound)
 		return
 	}
@@ -94,7 +94,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	if err := s.services.Certificates.Revoke(r.Context(), device.TenantID, device.ID); err != nil {
 		slog.Error("device delete: revoke cert failed",
 			"user", user.Email, "device", device.ID, "err", err)
-		http.Redirect(w, r, "/admin/devices?error=revoke+failed", http.StatusFound)
+		http.Redirect(w, r, flashAdminRevokeFailed.on("/admin/devices"), http.StatusFound)
 		return
 	}
 	if device.PairedAt != nil {
@@ -135,13 +135,14 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 			"device", device.ID, "device_id", device.DeviceID)
 	}
 
-	// Step 4: DELETE FROM devices. FK CASCADE handles dependents.
+	// Step 4: DELETE FROM devices. FK CASCADE handles dependents. Cert serials
+	// that carry an identity pubkey are tombstoned inside DeleteByID first.
 	dbCtx, dbCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer dbCancel()
 	if err := s.services.Devices.DeleteByID(dbCtx, device.TenantID, device.ID); err != nil {
 		slog.Error("device delete: DB delete failed",
 			"user", user.Email, "device", device.ID, "err", err)
-		http.Redirect(w, r, "/admin/devices?error=db+delete+failed", http.StatusFound)
+		http.Redirect(w, r, flashAdminDeleteFailed.on("/admin/devices"), http.StatusFound)
 		return
 	}
 
@@ -177,12 +178,10 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 		// Deleted, but the enrollment rows may still be sealed: the hardware
 		// cannot re-enroll under this id until they are cleared. Say so
 		// instead of reporting a clean success.
-		http.Redirect(w, r, "/admin/devices?ok=deleted+"+url.QueryEscape(device.DeviceID)+
-			"&error="+url.QueryEscape("enrollment reset failed for "+device.DeviceID+", re-enrollment stays blocked"),
-			http.StatusFound)
+		http.Redirect(w, r, flashAdminDeleted.on("/admin/devices")+"&"+flashAdminEnrollReset.query(), http.StatusFound)
 		return
 	}
 	http.Redirect(w, r,
-		"/admin/devices?ok=deleted+"+url.QueryEscape(device.DeviceID),
+		flashAdminDeleted.on("/admin/devices"),
 		http.StatusFound)
 }

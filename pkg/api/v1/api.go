@@ -87,6 +87,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /devices/enroll/verify", s.handleEnrollVerify)
 	s.mux.HandleFunc("POST /devices/enroll/cert", s.handleEnrollCert)
 	s.mux.HandleFunc("POST /devices/enroll/ack", s.handleEnrollAck)
+	s.mux.HandleFunc("POST /devices/enroll/status", s.handleEnrollStatus)
 }
 
 // SetHealthProbes wires the dependency checks the health endpoints report.

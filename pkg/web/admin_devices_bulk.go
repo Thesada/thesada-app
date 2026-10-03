@@ -11,9 +11,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,7 +39,7 @@ func (s *Server) handleAdminDevicesBulk(w http.ResponseWriter, r *http.Request) 
 	case "delete":
 		s.bulkDeleteDevices(w, r)
 	default:
-		http.Redirect(w, r, "/admin/devices?error=unknown+bulk+action", http.StatusFound)
+		http.Redirect(w, r, flashAdminUnknownAction.on("/admin/devices"), http.StatusFound)
 	}
 }
 
@@ -60,12 +57,12 @@ func (s *Server) handleAdminDevicesBulk(w http.ResponseWriter, r *http.Request) 
 func (s *Server) bulkReassign(w http.ResponseWriter, r *http.Request) {
 	ids := r.PostForm["device_ids"]
 	if len(ids) == 0 {
-		http.Redirect(w, r, "/admin/devices?error=no+devices+selected", http.StatusFound)
+		http.Redirect(w, r, flashAdminNoneSelected.on("/admin/devices"), http.StatusFound)
 		return
 	}
 	target := r.PostFormValue("target_tenant")
 	if target == "" || !s.services.Tenants.ExistsBySlug(target) {
-		http.Redirect(w, r, "/admin/devices?error=unknown+tenant", http.StatusFound)
+		http.Redirect(w, r, flashAdminUnknownTenant.on("/admin/devices"), http.StatusFound)
 		return
 	}
 	user := authmw.CurrentUser(r)
@@ -91,23 +88,24 @@ func (s *Server) bulkReassign(w http.ResponseWriter, r *http.Request) {
 	slog.Info("admin bulk reassign dispatched",
 		"user", user.Email, "target", target, "ok", ok, "failed", failed, "total", len(ids))
 
-	http.Redirect(w, r,
-		"/admin/devices?ok=reassigned+"+strconv.Itoa(ok)+
-			"&failed="+strconv.Itoa(failed),
-		http.StatusFound)
+	done := flashAdminBulkReassigned
+	if failed > 0 {
+		done = flashAdminBulkReassignMix
+	}
+	http.Redirect(w, r, done.on("/admin/devices"), http.StatusFound)
 }
 
 // bulkOTACheck publishes `cli/ota.check` with `--force` payload to every
 // device whose primary key was checked in the form. Fire-and-forget; we
 // do not wait for the device's CLI response because a fleet-wide bulk
 // would otherwise block the request indefinitely on offline devices.
-// Successes + failures are counted and surfaced via the redirect query
-// string.
+// Successes and failures are counted in the log. The redirect carries a
+// registered code, not the counts.
 // in: writer, request (device_ids[] in form). out: 302 to /admin/devices.
 func (s *Server) bulkOTACheck(w http.ResponseWriter, r *http.Request) {
 	ids := r.PostForm["device_ids"]
 	if len(ids) == 0 {
-		http.Redirect(w, r, "/admin/devices?error=no+devices+selected", http.StatusFound)
+		http.Redirect(w, r, flashAdminNoneSelected.on("/admin/devices"), http.StatusFound)
 		return
 	}
 	user := authmw.CurrentUser(r)
@@ -150,10 +148,11 @@ func (s *Server) bulkOTACheck(w http.ResponseWriter, r *http.Request) {
 			"ok_ids": okIDs, "failed_ids": failedIDs},
 	})
 
-	http.Redirect(w, r,
-		"/admin/devices?ok=ota+dispatched+"+strconv.Itoa(ok)+
-			"&failed="+strconv.Itoa(failed),
-		http.StatusFound)
+	done := flashAdminOTA
+	if failed > 0 {
+		done = flashAdminOTAMix
+	}
+	http.Redirect(w, r, done.on("/admin/devices"), http.StatusFound)
 }
 
 // bulkDeleteDevices loops the single-device delete pipeline (cert revoke
@@ -173,7 +172,7 @@ func (s *Server) bulkOTACheck(w http.ResponseWriter, r *http.Request) {
 func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 	ids := r.PostForm["device_ids"]
 	if len(ids) == 0 {
-		http.Redirect(w, r, "/admin/devices?error=no+devices+selected", http.StatusFound)
+		http.Redirect(w, r, flashAdminNoneSelected.on("/admin/devices"), http.StatusFound)
 		return
 	}
 	confirmCrossTenant := r.PostFormValue("confirm_cross_tenant") == "true"
@@ -210,13 +209,13 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(resolved) == 0 {
 		http.Redirect(w, r,
-			"/admin/devices?error=no+resolvable+devices&failed="+strconv.Itoa(lookupFailed),
+			flashAdminNoneResolvable.on("/admin/devices"),
 			http.StatusFound)
 		return
 	}
 	if len(tenants) > 1 && !confirmCrossTenant {
 		http.Redirect(w, r,
-			"/admin/devices?error=cross+tenant+selection+blocked+(set+confirm_cross_tenant)",
+			flashAdminCrossTenant.on("/admin/devices"),
 			http.StatusFound)
 		return
 	}
@@ -258,17 +257,18 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 		"cross_tenant", len(tenants) > 1,
 		"ok", ok, "failed", failed, "refused", refused, "sealed", sealed, "total", len(ids))
 
-	target := "/admin/devices?ok=deleted+" + strconv.Itoa(ok) + "&failed=" + strconv.Itoa(failed)
-	var problems []string
-	if refused > 0 {
-		problems = append(problems, strconv.Itoa(refused)+" paired device(s) refused: "+v.reason+
-			". Tick accept serial recovery to delete anyway")
+	done := flashAdminBulkDeleted
+	if failed > 0 {
+		done = flashAdminBulkDeletedMix
 	}
-	if sealed > 0 {
-		problems = append(problems, strconv.Itoa(sealed)+" deleted but enrollment reset failed, re-enrollment stays blocked")
-	}
-	if len(problems) > 0 {
-		target += "&error=" + url.QueryEscape(strings.Join(problems, "; "))
+	target := done.on("/admin/devices")
+	switch {
+	case refused > 0 && sealed > 0:
+		target += "&" + flashAdminBulkBoth.query()
+	case refused > 0:
+		target += "&" + flashAdminBulkRefused.query()
+	case sealed > 0:
+		target += "&" + flashAdminBulkSealed.query()
 	}
 	http.Redirect(w, r, target, http.StatusFound)
 }
@@ -328,9 +328,7 @@ func (s *Server) recoveryGate(w http.ResponseWriter, r *http.Request, device *se
 	if !destructiveAllowed(paired, v.usable, override) {
 		slog.Warn("device."+op+".refused", "reason", "recovery_path_unusable",
 			"user", user.Email, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason)
-		http.Redirect(w, r, dest+"?error="+url.QueryEscape(
-			op+" refused: "+v.reason+". Tick accept serial recovery to "+op+" anyway"),
-			http.StatusFound)
+		http.Redirect(w, r, flashAdminRecoveryRefused.on(dest), http.StatusFound)
 		return v, false, false
 	}
 	accepted := serialRecoveryAccepted(paired, v, override)
