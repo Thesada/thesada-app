@@ -330,7 +330,7 @@
 <section class="mt-8 bg-white border border-rose-200 rounded-xl p-4">
   <h2 class="text-lg font-semibold mb-1">Revoke this device</h2>
   <p class="text-sm text-slate-600 mb-3">
-    The certificate is revoked and the device is told to drop it, which takes it off the broker. It keeps its WiFi settings. Current firmware reboots within seconds. An older build waits for its next restart. Then it can be claimed again with the code on its sticker.
+    The certificate is revoked and a request to drop it was published. It keeps its WiFi settings. If the device receives the request, current firmware reboots within seconds. An older build waits for its next restart. Then it can be claimed again with the code on its sticker.
   </p>
   <form method="post" action="/devices/{{.Device.ID}}/revoke" class="flex flex-wrap items-center gap-2">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">

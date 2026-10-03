@@ -19,7 +19,7 @@ var deviceFlashText = map[string]map[string]string{"ok": {}, "error": {}}
 var (
 	flashSensorCleared = deviceFlashOK("sensor_cleared", "Sensor telemetry cleared.")
 	flashRevoked       = deviceFlashOK("revoked",
-		"Revoked. The device was told to drop its certificate. Current firmware reboots within seconds. An older build waits for its next restart. Then it can be claimed again with the code on its sticker.")
+		"Revoked. A request to drop the certificate was published. If the device receives it, current firmware reboots within seconds. An older build waits for its next restart. Then it can be claimed again with the code on its sticker.")
 
 	flashMetricRequired     = deviceFlashErr("metric_required", "Pick a metric to delete.")
 	flashConfirmMetric      = deviceFlashErr("confirm_metric", "The confirmation did not match the metric.")
