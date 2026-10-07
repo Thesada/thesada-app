@@ -258,6 +258,8 @@ func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub
 	root.Handle("/ws", wsChain)
 
 	web := web.New(cfg, services, mail, mqttClient, ca, notes)
+	api.UseClaimLimiter(web.ClaimLimiter())
+	api.SetClaimProvisioner(web.ProvisionClaimDynsec)
 	root.Handle("/", web)
 
 	return &http.Server{

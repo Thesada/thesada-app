@@ -4,7 +4,7 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-09-29 (admin list, pair, and secret pages render flash from a registered code, so a crafted query cannot put words on the page). Previously 2026-09-29 (a device asks POST /devices/enroll/status with a signed serial and is told active, revoked, or unknown; only revoked for that serial wipes the cert, and a deleted device's serial is kept so the answer survives the row). Previously 2026-09-28 (the owner of a claimed device can revoke it; that path clears enrollment under a row lock that refuses another tenant's claim, before the cert revoke and cert.clear, and never hands the device to the fallback credential). Previously 2026-09-26 (ten wrong claim-form codes lock that device id until the earliest verified row announces the token already stored for it; an unverified or later key does not clear the lock). Previously 2026-09-25 (a device is told THESADA_MQTT_DEVICE_HOST, never the app's broker URL; a new claim token is stored as an HMAC when THESADA_CLAIM_HASH_KEY is set and a legacy SHA-256 still matches). Previously 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, an address rejection does not spend the client's cap, and the two caps are reserved together). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
+Dated 2026-10-06 (a tenant at its abuse cap cannot add a user, a new device, or another alert that day; updating a device that already exists still lands, and zero turns that one cap off). Previously 2026-09-29 (admin list, pair, and secret pages render flash from a registered code, so a crafted query cannot put words on the page). Previously 2026-09-29 (a device asks POST /devices/enroll/status with a signed serial and is told active, revoked, or unknown; only revoked for that serial wipes the cert, and a deleted device's serial is kept so the answer survives the row). Previously 2026-09-28 (the owner of a claimed device can revoke it; that path clears enrollment under a row lock that refuses another tenant's claim, before the cert revoke and cert.clear, and never hands the device to the fallback credential). Previously 2026-09-26 (ten wrong claim-form codes lock that device id until the earliest verified row announces the token already stored for it; an unverified or later key does not clear the lock). Previously 2026-09-25 (a device is told THESADA_MQTT_DEVICE_HOST, never the app's broker URL; a new claim token is stored as an HMAC when THESADA_CLAIM_HASH_KEY is set and a legacy SHA-256 still matches). Previously 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, an address rejection does not spend the client's cap, and the two caps are reserved together). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
 recovery refuses to run when the shared fallback credential is not
 connectable; unauthenticated device enrollment surface; device-facing
 enrollment endpoints address the row by its primary key and the claim
@@ -120,12 +120,13 @@ resolves as soon as only one row can still be claimed, and the operator remedy
 is the same revoke, after which the device mints a fresh token on its next
 portal session and the photographed one is worthless.
 
-Claiming is a web-stack route (`authmw.RequireAuth` + `csrf.Middleware`),
-capped at `THESADA_DEVICE_CLAIM_MAX_PER_HOUR` claims per user (default 5, the
-figure the spec names), and writes `owner_user_id` and `mqtt_topic_prefix` in the
-same transaction as the enrollment flip.
+Claiming is a web form (`authmw.RequireAuth` + `csrf.Middleware`) and
+`POST /api/v1/devices/claim` (`RequireAuthJSON`; a cookie caller still passes
+`APICSRFGuard`). Both share `THESADA_DEVICE_CLAIM_MAX_PER_HOUR` (default 5)
+and write `owner_user_id` and `mqtt_topic_prefix` in the same transaction as
+the enrollment flip.
 
-Source: `pkg/api/v1/enroll.go`, `pkg/service/enrollment.go`,
+Source: `pkg/api/v1/enroll.go`, `pkg/api/v1/claim.go`, `pkg/service/enrollment.go`,
 `pkg/service/enrollment_policy.go`, `pkg/web/device_claim.go`,
 `migrations/0028_device_enrollments.sql`.
 
@@ -218,6 +219,18 @@ Fallback username is `THESADA_MQTT_DEVICE_FALLBACK_USER` (default
 Source: `pkg/mqtt/dynsec.go`, `pkg/web/admin_devices_bulk.go`.
 
 ## Tenant isolation
+
+### A tenant cannot grow past its abuse cap
+
+Defaults are 25 users, 50 devices, and 10000 alerts per day
+(`THESADA_QUOTA_USERS`, `THESADA_QUOTA_DEVICES`, `THESADA_QUOTA_EVENTS_PER_DAY`).
+A new user (including a waitlist conversion), a device id the tenant does
+not already have (including a reassign into that tenant), and a new alert
+are refused at the cap. An update of an existing device still lands, and a
+duplicate alert still dedups. Zero turns that one cap off. The admin tenant
+list shows count against cap before the refusal.
+
+Source: `pkg/service/quota.go`, `pkg/web/templates/admin-tenants.html`.
 
 ### Every read against `pools.App` is tenant-scoped through `db.WithTenant` or explicitly bypassed through `db.WithAdminAudit` **(enforced)**
 

@@ -84,6 +84,18 @@ func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mq
 	return s
 }
 
+// ClaimLimiter returns the per-user claim cap shared with the JSON endpoint.
+// in: none. out: limiter.
+func (s *Server) ClaimLimiter() *ratelimit.Limiter {
+	return s.claimLimits
+}
+
+// ProvisionClaimDynsec creates the broker role and client for a claimed device.
+// in: ctx, tenant, device, topic prefix, cert CN. out: failing step, error.
+func (s *Server) ProvisionClaimDynsec(ctx context.Context, tenantID, deviceID, topicPrefix, cn string) (string, error) {
+	return s.provisionDeviceDynsec(ctx, tenantID, deviceID, topicPrefix, cn)
+}
+
 // ServeHTTP dispatches to the auth-wrapped internal mux.
 // in: writer, request. out: response from matched handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
