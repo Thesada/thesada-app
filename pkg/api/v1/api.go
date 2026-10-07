@@ -78,6 +78,16 @@ func (s *Server) SetClaimProvisioner(p ClaimProvisioner) {
 	s.claimProvision = p
 }
 
+// SetEnrollmentService wires claim lookup. Nil makes claim refuse.
+// in: enrollment service. out: none.
+func (s *Server) SetEnrollmentService(e *service.EnrollmentService) {
+	// A nil bundle would panic on the field write. New always passes one.
+	if s.services == nil {
+		s.services = &service.Services{}
+	}
+	s.services.Enrollments = e
+}
+
 // ServeHTTP dispatches to the internal mux.
 // Routes are registered relative; main.go mounts this under /api/v1/.
 // in: writer, request. out: JSON response from matched handler.

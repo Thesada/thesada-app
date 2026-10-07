@@ -22,7 +22,7 @@ func TestClaimIntoHTTP(t *testing.T) {
 		t.Fatalf("device cap: got %d %q", code, msg)
 	}
 	code, msg = claimIntoHTTP(errors.New("db down"))
-	if code != http.StatusBadRequest || msg != "claim failed" {
+	if code != http.StatusInternalServerError || msg != "claim failed" {
 		t.Fatalf("other: got %d %q", code, msg)
 	}
 }

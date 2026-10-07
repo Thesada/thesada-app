@@ -26,7 +26,11 @@ func newClaimLimiter(cfg *config.Config) *ratelimit.Limiter {
 	if cfg != nil && cfg.DeviceClaimMaxPerHour > 0 {
 		max = cfg.DeviceClaimMaxPerHour
 	}
-	return ratelimit.New(claimRateWindow, max)
+	lim := ratelimit.New(claimRateWindow, max)
+	// Process lifetime. The web limiter replaces this one and sweeps itself.
+	// This sweeper is the fallback New keeps when that share does not happen.
+	lim.StartSweeper(context.Background())
+	return lim
 }
 
 type claimRequest struct {
@@ -56,14 +60,14 @@ func (s *Server) handleDeviceClaim(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if s.claimProvision == nil || s.services == nil || s.services.Enrollments == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "claim is not available"})
+		return
+	}
 	if s.claimLimits == nil || !s.claimLimits.Allow(user.ID.String()) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{
 			"error": "too many claim attempts, try again later",
 		})
-		return
-	}
-	if s.claimProvision == nil || s.services == nil || s.services.Enrollments == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "claim is not available"})
 		return
 	}
 
@@ -88,7 +92,7 @@ func (s *Server) handleDeviceClaim(w http.ResponseWriter, r *http.Request) {
 		r.Context(), deviceID, e.PubkeyHex, tenantID, user.ID, topicPrefix)
 	if err != nil {
 		code, msg := claimIntoHTTP(err)
-		if code == http.StatusBadRequest && msg == "claim failed" {
+		if code == http.StatusInternalServerError {
 			slog.Error("device.enroll.claim_failed", "user", user.ID, "device_id", deviceID, "err", err)
 		}
 		writeJSON(w, code, map[string]string{"error": msg})
@@ -126,7 +130,7 @@ func claimIntoHTTP(err error) (int, string) {
 	if errors.Is(err, service.ErrEnrollNotReady) {
 		return http.StatusConflict, "that device has already been claimed"
 	}
-	return http.StatusBadRequest, "claim failed"
+	return http.StatusInternalServerError, "claim failed"
 }
 
 // claimDynsecHTTP is the retry answer when the row is claimed and the broker is not.

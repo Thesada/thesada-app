@@ -20,11 +20,24 @@ func quotaFull(count, max int) bool {
 	return max > 0 && count >= max
 }
 
+// lockTenantQuota serializes a cap check with the write in the same transaction.
+// in: tx, tenant slug. out: error when the lock cannot be taken.
+func lockTenantQuota(ctx context.Context, tx pgx.Tx, tenant string) error {
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, tenant); err != nil {
+		return fmt.Errorf("quota tenant lock: %w", err)
+	}
+	return nil
+}
+
 // quotaAllowUser refuses a new user once the tenant is at the cap.
 // in: tx, tenant, cap. out: ErrQuotaUsers or a query error.
 func quotaAllowUser(ctx context.Context, tx pgx.Tx, tenant string, max int) error {
 	if max <= 0 {
 		return nil
+	}
+	if err := lockTenantQuota(ctx, tx, tenant); err != nil {
+		return err
 	}
 	var n int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM users WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
@@ -41,6 +54,9 @@ func quotaAllowUser(ctx context.Context, tx pgx.Tx, tenant string, max int) erro
 func quotaAllowDevice(ctx context.Context, tx pgx.Tx, tenant, deviceID string, max int) error {
 	if max <= 0 {
 		return nil
+	}
+	if err := lockTenantQuota(ctx, tx, tenant); err != nil {
+		return err
 	}
 	var exists bool
 	if err := tx.QueryRow(ctx,
@@ -66,6 +82,9 @@ func quotaAllowDevice(ctx context.Context, tx pgx.Tx, tenant, deviceID string, m
 func quotaAllowEvent(ctx context.Context, tx pgx.Tx, tenant string, max int) error {
 	if max <= 0 {
 		return nil
+	}
+	if err := lockTenantQuota(ctx, tx, tenant); err != nil {
+		return err
 	}
 	var n int
 	err := tx.QueryRow(ctx, `

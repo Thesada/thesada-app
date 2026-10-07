@@ -38,7 +38,7 @@
     </thead>
     <tbody class="divide-y divide-slate-100">
       {{range .Devices}}
-      <tr class="hover:bg-slate-50" data-filter="{{.DeviceID}} {{.TenantID}} {{deref .HardwareType}} {{deref .FirmwareVersion}}">
+      <tr class="hover:bg-slate-50" data-filter="{{.DeviceID}} {{deref .DisplayName}} {{.TenantID}} {{deref .HardwareType}} {{deref .FirmwareVersion}}">
         <td class="px-4 py-2" data-col="device" data-sort="{{.DeviceID}}">
           <a href="/devices/{{.ID}}" class="font-medium text-slate-900 hover:underline">{{.DeviceID}}</a>
           {{if .DisplayName}}<div class="text-xs text-slate-500">{{deref .DisplayName}}</div>{{end}}

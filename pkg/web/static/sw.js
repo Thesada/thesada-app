@@ -35,8 +35,15 @@ self.addEventListener("fetch", function (event) {
   var url = new URL(event.request.url);
   if (url.origin !== self.location.origin || event.request.method !== "GET") return;
   if (SHELL.indexOf(url.pathname) !== -1) {
-    event.respondWith(caches.match(event.request).then(function (hit) {
-      return hit || fetch(event.request);
+    event.respondWith(fetch(event.request).then(function (res) {
+      if (res && res.ok) {
+        var copy = res.clone();
+        caches.open(CACHE).then(function (cache) { return cache.put(event.request, copy); });
+      }
+      return res;
+    }).catch(function () {
+      // Offline: the last shell is better than a failed navigation asset.
+      return caches.match(event.request);
     }));
     return;
   }

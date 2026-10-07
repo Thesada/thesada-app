@@ -1,5 +1,7 @@
 (function () {
   var sortState = {};
+  // Hidden columns for this page when localStorage throws.
+  var memoryOff = {};
 
   function tools(name) {
     return document.querySelector('[data-devices-tools="' + name + '"]');
@@ -12,6 +14,7 @@
   }
 
   function storedOff(name) {
+    if (Object.prototype.hasOwnProperty.call(memoryOff, name)) return memoryOff[name];
     try {
       var raw = localStorage.getItem(prefsKey(name));
       if (!raw) return null;
@@ -23,9 +26,12 @@
   }
 
   function saveOff(name, off) {
+    memoryOff[name] = off.slice();
     try {
       localStorage.setItem(prefsKey(name), JSON.stringify({ off: off }));
-    } catch (e) {}
+    } catch (e) {
+      // Storage can be disabled or full. memoryOff still holds the choice.
+    }
   }
 
   function tableOf(name) {
@@ -133,9 +139,22 @@
     });
   }
 
+  function ensureSortButtons(table) {
+    table.querySelectorAll("th[data-col]").forEach(function (th) {
+      if (th.hasAttribute("data-nosort") || th.querySelector("button")) return;
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "bg-transparent p-0 m-0 uppercase cursor-pointer text-inherit font-inherit";
+      btn.textContent = (th.textContent || "").trim();
+      th.textContent = "";
+      th.appendChild(btn);
+    });
+  }
+
   function apply(name) {
     var table = tableOf(name);
     if (!table) return;
+    ensureSortButtons(table);
     applyColumns(name, table);
     syncMenu(name, table);
     applyFilter(name, table);

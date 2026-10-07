@@ -80,7 +80,7 @@
     </thead>
     <tbody class="divide-y divide-slate-100">
       {{range .Devices}}
-      <tr data-filter="{{.DeviceID}} {{.TenantID}} {{deref .HardwareType}} {{deref .FirmwareVersion}}">
+      <tr data-filter="{{.DeviceID}} {{deref .DisplayName}} {{.TenantID}} {{deref .HardwareType}} {{deref .FirmwareVersion}}">
         <td class="px-4 py-2">
           <input type="checkbox" form="bulk-form" name="device_ids" value="{{.ID}}"
                  class="bulk-row" data-tenant="{{.TenantID}}" data-device-id="{{.DeviceID}}"

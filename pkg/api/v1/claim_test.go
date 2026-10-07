@@ -1,6 +1,7 @@
 package v1_test
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -83,7 +84,14 @@ func TestDeviceClaimRequiresTenant(t *testing.T) {
 
 func TestDeviceClaimRateLimit(t *testing.T) {
 	user := &service.User{ID: uuid.New(), TenantID: "acme"}
-	rec := postClaim(claimSrv(t, user, 0), `{"device_id":"d","claim_token":"secret-token"}`, "ok")
+	api := apiv1.New(&config.Config{}, &service.Services{}, nil, nil)
+	api.UseClaimLimiter(ratelimit.New(time.Hour, 0))
+	api.SetClaimProvisioner(func(context.Context, string, string, string, string) (string, error) {
+		return "", nil
+	})
+	api.SetEnrollmentService(&service.EnrollmentService{})
+	srv := authmw.APIMiddleware(rejectSessions{}, bearerUsers{user: user}, authmw.APICSRFGuard{}, nil)(api)
+	rec := postClaim(srv, `{"device_id":"d","claim_token":"secret-token"}`, "ok")
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("rate limit: got %d (%s), want 429", rec.Code, rec.Body.String())
 	}
