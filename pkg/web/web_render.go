@@ -29,6 +29,10 @@ var funcMap = template.FuncMap{
 	"timeOrDash":       timeOrDash,
 	"fmtTime":          fmtTime,
 	"uptimeLive":       uptimeLive,
+	"sortUnix":         sortUnix,
+	"sortUnixTime":     sortUnixTime,
+	"sortInt64":        sortInt64,
+	"sortUptime":       sortUptime,
 	"telemetryValue":   telemetryValueText,
 	"metricLeaf":       metricLeaf,
 	"groupLatest":      groupLatestByPrefix,
@@ -226,4 +230,41 @@ func uptimeLive(secs *int64, at *time.Time) string {
 		s += " (stale)"
 	}
 	return s
+}
+
+// sortUnix is the numeric sort key for a nullable timestamp.
+// in: *time.Time. out: unix seconds, or empty when unset.
+func sortUnix(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return ""
+	}
+	return strconv.FormatInt(t.Unix(), 10)
+}
+
+// sortUnixTime is sortUnix for a value timestamp.
+// in: time.Time. out: unix seconds, or empty when zero.
+func sortUnixTime(t time.Time) string {
+	return sortUnix(&t)
+}
+
+// sortInt64 is the numeric sort key for a nullable sample.
+// in: *int64. out: decimal text, or empty when unset.
+func sortInt64(v *int64) string {
+	if v == nil {
+		return ""
+	}
+	return strconv.FormatInt(*v, 10)
+}
+
+// sortUptime matches the live uptime total so the column sorts as it reads.
+// in: last uptime seconds, time that sample was received. out: decimal seconds.
+func sortUptime(secs *int64, at *time.Time) string {
+	if secs == nil || at == nil {
+		return ""
+	}
+	total := *secs + int64(time.Since(*at).Seconds())
+	if total < 0 {
+		total = 0
+	}
+	return strconv.FormatInt(total, 10)
 }

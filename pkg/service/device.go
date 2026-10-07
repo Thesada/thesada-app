@@ -105,6 +105,13 @@ func (s *DeviceService) upsertCore(tenantID, deviceID, displayName, firmwareVers
 
 	var id uuid.UUID
 	err := db.WithTenant(context.Background(), s.pools.App, tenantID, func(tx pgx.Tx) error {
+		max := 0
+		if s.cfg != nil {
+			max = s.cfg.QuotaDevices
+		}
+		if err := quotaAllowDevice(context.Background(), tx, tenantID, deviceID, max); err != nil {
+			return err
+		}
 		return tx.QueryRow(context.Background(), query, tenantID, deviceID, displayName, firmwareVersion, hardwareType, mqttTopicPrefix).Scan(&id)
 	})
 	return id, err
@@ -200,13 +207,23 @@ func (s *DeviceService) ListAllForAdmin(ctx context.Context) ([]Device, error) {
 	const query = `
 		SELECT d.id, d.tenant_id, d.owner_user_id, d.device_id, d.pairing_key, d.paired_at, d.display_name,
 		       d.hardware_type, d.firmware_version, d.last_seen_at, d.mqtt_topic_prefix, d.created_at,
-		       up.value_num::bigint, up.received_at
+		       up.value_num::bigint, up.received_at, heap.n, rssi.n
 		FROM devices d
 		LEFT JOIN LATERAL (
 			SELECT value_num, received_at FROM device_telemetry
 			WHERE device_pk = d.id AND metric = 'uptime'
 			ORDER BY received_at DESC LIMIT 1
 		) up ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT value_num::bigint AS n FROM device_telemetry
+			WHERE device_pk = d.id AND metric = 'heap/free'
+			ORDER BY received_at DESC LIMIT 1
+		) heap ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT value_num::bigint AS n FROM device_telemetry
+			WHERE device_pk = d.id AND metric = 'wifi/rssi'
+			ORDER BY received_at DESC LIMIT 1
+		) rssi ON TRUE
 		ORDER BY d.tenant_id, d.last_seen_at DESC NULLS LAST`
 	var out []Device
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "device.list_all_for_admin", func(tx pgx.Tx) error {
@@ -219,7 +236,8 @@ func (s *DeviceService) ListAllForAdmin(ctx context.Context) ([]Device, error) {
 			var d Device
 			if err := rows.Scan(&d.ID, &d.TenantID, &d.OwnerUserID, &d.DeviceID, &d.PairingKey, &d.PairedAt,
 				&d.DisplayName, &d.HardwareType, &d.FirmwareVersion, &d.LastSeenAt,
-				&d.MQTTTopicPrefix, &d.CreatedAt, &d.LastUptimeSeconds, &d.LastUptimeAt); err != nil {
+				&d.MQTTTopicPrefix, &d.CreatedAt, &d.LastUptimeSeconds, &d.LastUptimeAt,
+				&d.LastHeapFree, &d.LastRSSI); err != nil {
 				return err
 			}
 			out = append(out, d)
@@ -245,6 +263,17 @@ func (s *DeviceService) ListAllForAdmin(ctx context.Context) ([]Device, error) {
 // in: ctx, device pk, target tenant slug. out: error.
 func (s *DeviceService) Reassign(ctx context.Context, id uuid.UUID, targetTenant string) error {
 	return db.WithAdminAudit(ctx, s.pools.Admin, "device.reassign", func(tx pgx.Tx) error {
+		var deviceID string
+		if err := tx.QueryRow(ctx, `SELECT device_id FROM devices WHERE id = $1`, id).Scan(&deviceID); err != nil {
+			return err
+		}
+		max := 0
+		if s.cfg != nil {
+			max = s.cfg.QuotaDevices
+		}
+		if err := quotaAllowDevice(ctx, tx, targetTenant, deviceID, max); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx,
 			`UPDATE devices SET tenant_id = $1 WHERE id = $2`, targetTenant, id)
 		return err
@@ -257,13 +286,23 @@ func (s *DeviceService) ListByTenant(tenantID string) ([]Device, error) {
 	const query = `
 		SELECT d.id, d.tenant_id, d.owner_user_id, d.device_id, d.pairing_key, d.paired_at, d.display_name,
 		       d.hardware_type, d.firmware_version, d.last_seen_at, d.mqtt_topic_prefix, d.created_at,
-		       up.value_num::bigint, up.received_at
+		       up.value_num::bigint, up.received_at, heap.n, rssi.n
 		FROM devices d
 		LEFT JOIN LATERAL (
 			SELECT value_num, received_at FROM device_telemetry
 			WHERE device_pk = d.id AND metric = 'uptime'
 			ORDER BY received_at DESC LIMIT 1
 		) up ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT value_num::bigint AS n FROM device_telemetry
+			WHERE device_pk = d.id AND metric = 'heap/free'
+			ORDER BY received_at DESC LIMIT 1
+		) heap ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT value_num::bigint AS n FROM device_telemetry
+			WHERE device_pk = d.id AND metric = 'wifi/rssi'
+			ORDER BY received_at DESC LIMIT 1
+		) rssi ON TRUE
 		WHERE d.tenant_id = $1 ORDER BY d.last_seen_at DESC`
 
 	var result []Device
@@ -277,7 +316,8 @@ func (s *DeviceService) ListByTenant(tenantID string) ([]Device, error) {
 			var d Device
 			if err := rows.Scan(&d.ID, &d.TenantID, &d.OwnerUserID, &d.DeviceID, &d.PairingKey, &d.PairedAt,
 				&d.DisplayName, &d.HardwareType, &d.FirmwareVersion, &d.LastSeenAt,
-				&d.MQTTTopicPrefix, &d.CreatedAt, &d.LastUptimeSeconds, &d.LastUptimeAt); err != nil {
+				&d.MQTTTopicPrefix, &d.CreatedAt, &d.LastUptimeSeconds, &d.LastUptimeAt,
+				&d.LastHeapFree, &d.LastRSSI); err != nil {
 				return err
 			}
 			result = append(result, d)

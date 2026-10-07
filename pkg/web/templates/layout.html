@@ -4,8 +4,15 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="thesada">
   <meta name="htmx-config" content='{"inlineStyleNonce":"{{.CSPNonce}}"}'>
   <title>{{block "title" .}}thesada{{end}}</title>
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="icon" href="/static/icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="stylesheet" href="/static/css/app.css">
   <!-- vendored JS - check quarterly, see  -->
   <!-- htmx 2.0.9 - https://htmx.org/docs/#installing -->
@@ -78,6 +85,9 @@
       var fn = window[name];
       if (typeof fn === 'function' && fn(form) === false) ev.preventDefault();
     }, true);
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js");
+    }
     document.querySelectorAll('time[datetime]').forEach(function (el) {
       var d = new Date(el.getAttribute('datetime'));
       if (!isNaN(d)) el.textContent = d.toLocaleString();

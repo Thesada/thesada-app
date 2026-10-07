@@ -84,6 +84,18 @@ func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mq
 	return s
 }
 
+// ClaimLimiter returns the per-user claim cap shared with the JSON endpoint.
+// in: none. out: limiter.
+func (s *Server) ClaimLimiter() *ratelimit.Limiter {
+	return s.claimLimits
+}
+
+// ProvisionClaimDynsec creates the broker role and client for a claimed device.
+// in: ctx, tenant, device, topic prefix, cert CN. out: failing step, error.
+func (s *Server) ProvisionClaimDynsec(ctx context.Context, tenantID, deviceID, topicPrefix, cn string) (string, error) {
+	return s.provisionDeviceDynsec(ctx, tenantID, deviceID, topicPrefix, cn)
+}
+
 // ServeHTTP dispatches to the auth-wrapped internal mux.
 // in: writer, request. out: response from matched handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +135,7 @@ func (s *Server) parseTemplates() {
 // in: receiver. out: none (mutates s.mux).
 func (s *Server) routes() {
 	s.mux.Handle("GET /static/", http.FileServer(http.FS(staticFS)))
+	s.mux.HandleFunc("GET /sw.js", s.handleServiceWorker)
 	s.mux.HandleFunc("GET /", s.handleIndex)
 	s.mux.HandleFunc("GET /login", s.handleLoginForm)
 	s.mux.HandleFunc("POST /login", s.handleLoginSubmit)

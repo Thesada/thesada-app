@@ -34,7 +34,10 @@ ARG BUILD_TIME=
 # CGO_ENABLED=0 keeps the binary static for distroless on either arch.
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+ARG BUILDPLATFORM
+# Tailwind CLI is the builder arch, so the cache id follows BUILDPLATFORM.
+RUN --mount=type=cache,id=thesada-tailwind-${BUILDPLATFORM},target=/src/tools \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     make build VERSION="${VERSION}" COMMIT="${COMMIT}" BUILD_TIME="${BUILD_TIME}"
 
 # Pre-made CA dir for the runtime stage: distroless has no shell, so the

@@ -249,6 +249,13 @@ func (s *AuthService) CreateUser(tenantID, email, displayName string, isAdmin bo
 	ctx := context.Background()
 	var u User
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		max := 0
+		if s.cfg != nil {
+			max = s.cfg.QuotaUsers
+		}
+		if err := quotaAllowUser(ctx, tx, tenantID, max); err != nil {
+			return err
+		}
 		return tx.QueryRow(ctx, query, tenantID, email, dn, isAdmin).Scan(
 			&u.ID, &u.TenantID, &u.Email, &u.DisplayName, &u.TelegramChatID, &u.IsAdmin, &u.IsSuperAdmin, &u.CreatedAt, &u.LastLoginAt)
 	})

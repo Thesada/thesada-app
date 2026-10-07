@@ -8,6 +8,9 @@
   </div>
 </div>
 
+{{if .Flash}}<div class="mb-4 rounded-md bg-emerald-50 border border-emerald-200 p-3 text-sm text-emerald-800">{{.Flash}}</div>{{end}}
+{{if .FlashErr}}<div class="mb-4 rounded-md bg-rose-50 border border-rose-200 p-3 text-sm text-rose-800">{{.FlashErr}}</div>{{end}}
+
 {{if .CrossTenantRead}}
 <div class="bg-amber-50 border border-amber-300 text-amber-900 rounded-xl p-3 mb-4 text-sm">
   <strong>Cross-tenant MQTT read enabled.</strong>

@@ -241,6 +241,21 @@ func (s *TenantService) CountMembers(slug string) (int, int, error) {
 	return users, devices, nil
 }
 
+// CountRecentAlertsAny is how many alerts this tenant stored in the last day.
+// Cross-tenant BY DESIGN. Callers must be behind RequireSuperAdmin.
+// in: slug. out: count, error.
+func (s *TenantService) CountRecentAlertsAny(slug string) (int, error) {
+	ctx := context.Background()
+	var n int
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "tenant.count_recent_alerts", func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT count(*) FROM device_alerts a
+			JOIN devices d ON d.id = a.device_pk
+			WHERE d.tenant_id = $1 AND a.received_at > now() - interval '24 hours'`, slug).Scan(&n)
+	})
+	return n, err
+}
+
 // Delete removes a tenant by slug. Protected slugs: the 'default' bootstrap
 // tenant and whatever tenant the caller is currently operating as (prevents
 // a super-admin from deleting the seat they are sitting on).

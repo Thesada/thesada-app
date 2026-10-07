@@ -526,6 +526,13 @@ func (s *EnrollmentService) ClaimInto(ctx context.Context, deviceID, pubkeyHex, 
 		if !ClaimAllowed(e.VerifiedAt, e.ClaimedAt) {
 			return ErrEnrollNotReady
 		}
+		max := 0
+		if s.cfg != nil {
+			max = s.cfg.QuotaDevices
+		}
+		if err := quotaAllowDevice(ctx, tx, tenantID, deviceID, max); err != nil {
+			return err
+		}
 		// owner_user_id is written here and nowhere else on this path: the spec
 		// makes the claiming user the owner, and no later step revisits it.
 		// The prefix must be written now too. It is otherwise only ever set

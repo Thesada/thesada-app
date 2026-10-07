@@ -7,6 +7,22 @@ import (
 	"thesada.app/app/pkg/config"
 )
 
+// The devices page is the only place a signed-in user looks. The claim form
+// stays unreachable if this link disappears.
+func TestDevicesPageLinksToClaim(t *testing.T) {
+	raw, err := templatesFS.ReadFile("templates/devices.html")
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	body := string(raw)
+	if !strings.Contains(body, `href="/devices/claim"`) {
+		t.Fatal("devices page must link to the claim form")
+	}
+	if !strings.Contains(body, "Claim a device") {
+		t.Fatal("devices page must name the claim link")
+	}
+}
+
 // The claim page must never render a browsable list of unclaimed devices.
 // Enrollments carry no tenant, so any such list is cross-tenant by
 // construction, and device ids come from sequentially-assigned MACs - one unit

@@ -108,6 +108,13 @@ func (s *AuthService) ConvertWaitlistEntry(waitlistID uuid.UUID, targetTenant st
 		if targetTenant == "" {
 			targetTenant = srcTenant
 		}
+		max := 0
+		if s.cfg != nil {
+			max = s.cfg.QuotaUsers
+		}
+		if err := quotaAllowUser(ctx, tx, targetTenant, max); err != nil {
+			return err
+		}
 		displayName := ""
 		if note != nil {
 			displayName = *note
