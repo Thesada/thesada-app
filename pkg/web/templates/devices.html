@@ -3,36 +3,56 @@
 <div class="flex items-center justify-between mb-4"
      hx-get="/devices" hx-trigger="thesada:event from:body throttle:2s" hx-select="#devices-live" hx-target="#devices-live" hx-swap="outerHTML">
   <h1 class="text-2xl font-semibold">Devices</h1>
-  <span class="text-sm text-slate-500">{{len .Devices}} total</span>
+  <div class="flex items-center gap-3">
+    <a href="/devices/claim" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Claim a device</a>
+    <span class="text-sm text-slate-500">{{len .Devices}} total</span>
+  </div>
+</div>
+<div class="mb-3 flex flex-wrap gap-2 items-center" data-devices-tools="devices" data-user="{{with .User}}{{.ID}}{{end}}">
+  <input type="search" data-devices-filter="devices" placeholder="Filter devices"
+         class="text-sm border border-slate-300 rounded px-2 py-1" aria-label="Filter devices">
+  <details class="text-sm relative">
+    <summary class="cursor-pointer px-2 py-1 rounded border border-slate-300 bg-white">Columns</summary>
+    <div class="absolute z-10 mt-1 bg-white border border-slate-200 rounded-lg shadow p-3 grid gap-1" data-col-menu="devices"></div>
+  </details>
+  <span class="text-xs text-slate-500" data-filter-count="devices"></span>
 </div>
 <div id="devices-live">
-
 {{if .Devices}}
 <div class="bg-white border border-slate-200 rounded-xl overflow-x-auto">
-  <table class="min-w-full text-sm">
+  <table class="min-w-full text-sm" data-devices-table="devices">
     <thead class="bg-slate-100 text-slate-600 text-xs uppercase">
       <tr>
-        <th class="text-left px-4 py-2">Device</th>
-        <th class="text-left px-4 py-2 hidden md:table-cell">Hardware</th>
-        <th class="text-left px-4 py-2 hidden md:table-cell">Firmware</th>
-        <th class="text-left px-4 py-2 hidden sm:table-cell">Uptime</th>
-        <th class="text-left px-4 py-2">Last seen</th>
+        <th class="text-left px-4 py-2 cursor-pointer" data-col="device" data-label="Device">Device</th>
+        <th class="text-left px-4 py-2 cursor-pointer" data-col="hardware" data-label="Hardware">Hardware</th>
+        <th class="text-left px-4 py-2 cursor-pointer" data-col="firmware" data-label="Firmware">Firmware</th>
+        <th class="text-left px-4 py-2 cursor-pointer" data-col="uptime" data-label="Uptime">Uptime</th>
+        <th class="text-left px-4 py-2 cursor-pointer" data-col="seen" data-label="Last seen">Last seen</th>
+        <th class="text-left px-4 py-2 cursor-pointer hidden" data-col="owner" data-label="Owner" data-default="off">Owner</th>
+        <th class="text-left px-4 py-2 cursor-pointer hidden" data-col="paired" data-label="Paired" data-default="off">Paired</th>
+        <th class="text-left px-4 py-2 cursor-pointer hidden" data-col="created" data-label="Created" data-default="off">Created</th>
+        <th class="text-left px-4 py-2 cursor-pointer hidden" data-col="topic" data-label="Topic prefix" data-default="off">Topic prefix</th>
+        <th class="text-left px-4 py-2 cursor-pointer hidden" data-col="heap" data-label="Free heap" data-default="off">Free heap</th>
+        <th class="text-left px-4 py-2 cursor-pointer hidden" data-col="rssi" data-label="RSSI" data-default="off">RSSI</th>
       </tr>
     </thead>
     <tbody class="divide-y divide-slate-100">
       {{range .Devices}}
-      <tr class="hover:bg-slate-50">
-        <td class="px-4 py-2">
+      <tr class="hover:bg-slate-50" data-filter="{{.DeviceID}} {{.TenantID}} {{deref .HardwareType}} {{deref .FirmwareVersion}}">
+        <td class="px-4 py-2" data-col="device" data-sort="{{.DeviceID}}">
           <a href="/devices/{{.ID}}" class="font-medium text-slate-900 hover:underline">{{.DeviceID}}</a>
           {{if .DisplayName}}<div class="text-xs text-slate-500">{{deref .DisplayName}}</div>{{end}}
-          <div class="text-xs text-slate-500 md:hidden">
-            {{derefOrDash .HardwareType}} - fw {{derefOrDash .FirmwareVersion}}
-          </div>
         </td>
-        <td class="px-4 py-2 text-slate-600 hidden md:table-cell">{{derefOrDash .HardwareType}}</td>
-        <td class="px-4 py-2 text-slate-600 hidden md:table-cell">{{derefOrDash .FirmwareVersion}}</td>
-        <td class="px-4 py-2 text-slate-600 text-xs hidden sm:table-cell">{{uptimeLive .LastUptimeSeconds .LastUptimeAt}}</td>
-        <td class="px-4 py-2 text-slate-600 whitespace-nowrap">{{timeOrDash .LastSeenAt}}</td>
+        <td class="px-4 py-2 text-slate-600" data-col="hardware">{{derefOrDash .HardwareType}}</td>
+        <td class="px-4 py-2 text-slate-600" data-col="firmware">{{derefOrDash .FirmwareVersion}}</td>
+        <td class="px-4 py-2 text-slate-600 text-xs" data-col="uptime" data-sort="{{sortUptime .LastUptimeSeconds .LastUptimeAt}}">{{uptimeLive .LastUptimeSeconds .LastUptimeAt}}</td>
+        <td class="px-4 py-2 text-slate-600 whitespace-nowrap" data-col="seen" data-sort="{{sortUnix .LastSeenAt}}">{{timeOrDash .LastSeenAt}}</td>
+        <td class="px-4 py-2 text-slate-600 text-xs hidden" data-col="owner">{{if .OwnerUserID}}{{.OwnerUserID}}{{else}}-{{end}}</td>
+        <td class="px-4 py-2 text-slate-600 whitespace-nowrap hidden" data-col="paired" data-sort="{{sortUnix .PairedAt}}">{{timeOrDash .PairedAt}}</td>
+        <td class="px-4 py-2 text-slate-600 whitespace-nowrap hidden" data-col="created" data-sort="{{sortUnixTime .CreatedAt}}">{{fmtTime .CreatedAt}}</td>
+        <td class="px-4 py-2 text-slate-600 text-xs hidden" data-col="topic">{{derefOrDash .MQTTTopicPrefix}}</td>
+        <td class="px-4 py-2 text-slate-600 hidden" data-col="heap" data-sort="{{sortInt64 .LastHeapFree}}">{{derefInt64OrDash .LastHeapFree}}</td>
+        <td class="px-4 py-2 text-slate-600 hidden" data-col="rssi" data-sort="{{sortInt64 .LastRSSI}}">{{derefInt64OrDash .LastRSSI}}</td>
       </tr>
       {{end}}
     </tbody>
@@ -40,8 +60,9 @@
 </div>
 {{else}}
 <div class="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500">
-  No devices yet. Pair a device to see it here.
+  No devices yet. <a href="/devices/claim" class="text-sky-700 hover:underline">Claim a device</a> to see it here.
 </div>
 {{end}}
 </div>
+<script src="/static/js/devices-table.js"></script>
 {{end}}

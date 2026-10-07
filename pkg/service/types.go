@@ -30,6 +30,9 @@ type Device struct {
 	// LastUptimeSeconds + (now - LastUptimeAt).
 	LastUptimeSeconds *int64     `json:"last_uptime_seconds,omitempty"`
 	LastUptimeAt      *time.Time `json:"last_uptime_at,omitempty"`
+	// Latest heap/free and wifi/rssi samples. List queries only, same as uptime.
+	LastHeapFree *int64 `json:"last_heap_free,omitempty"`
+	LastRSSI     *int64 `json:"last_rssi,omitempty"`
 }
 
 // TenantAlertRow is a denormalized alert joined with the device_id label,
