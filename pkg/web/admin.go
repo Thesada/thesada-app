@@ -20,6 +20,7 @@ type adminTenantRow struct {
 	Tenant          service.Tenant
 	UserCount       int
 	DeviceCount     int
+	EventCount      int
 	IsDefault       bool
 	IsCurrent       bool // caller's effective tenant
 	CrossTenantRead bool // mqtt_cross_tenant_read on this tenant - paired devices subscribe across all tenants
@@ -66,11 +67,12 @@ func (s *Server) handleAdminTenants(w http.ResponseWriter, r *http.Request) {
 	effective := authmw.EffectiveTenantID(r)
 	rows := make([]adminTenantRow, 0, len(tenants))
 	for _, t := range tenants {
-		uc, dc := s.countTenantUsersDevices(t.ID)
+		uc, dc, ec := s.countTenantUsage(t.ID)
 		rows = append(rows, adminTenantRow{
 			Tenant:          t,
 			UserCount:       uc,
 			DeviceCount:     dc,
+			EventCount:      ec,
 			IsDefault:       t.ID == "default",
 			IsCurrent:       t.ID == effective,
 			CrossTenantRead: s.services.Settings.GetBool(t.ID, "mqtt_cross_tenant_read", t.ID == "default"),
@@ -78,6 +80,9 @@ func (s *Server) handleAdminTenants(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, r, "admin-tenants.html", map[string]interface{}{
 		"Rows":            rows,
+		"QuotaUsers":      s.quotaUsers(),
+		"QuotaDevices":    s.quotaDevices(),
+		"QuotaEvents":     s.quotaEvents(),
 		"MultiTenantMode": s.services.Settings.GetBool("default", "multi_tenant_mode", false),
 	})
 }
@@ -185,11 +190,12 @@ func (s *Server) renderAdminTenantsWithError(w http.ResponseWriter, r *http.Requ
 	effective := authmw.EffectiveTenantID(r)
 	rows := make([]adminTenantRow, 0, len(tenants))
 	for _, t := range tenants {
-		uc, dc := s.countTenantUsersDevices(t.ID)
+		uc, dc, ec := s.countTenantUsage(t.ID)
 		rows = append(rows, adminTenantRow{
 			Tenant:          t,
 			UserCount:       uc,
 			DeviceCount:     dc,
+			EventCount:      ec,
 			IsDefault:       t.ID == "default",
 			IsCurrent:       t.ID == effective,
 			CrossTenantRead: s.services.Settings.GetBool(t.ID, "mqtt_cross_tenant_read", t.ID == "default"),
@@ -198,6 +204,9 @@ func (s *Server) renderAdminTenantsWithError(w http.ResponseWriter, r *http.Requ
 	s.render(w, r, "admin-tenants.html", map[string]interface{}{
 		"Rows":            rows,
 		"Error":           msg,
+		"QuotaUsers":      s.quotaUsers(),
+		"QuotaDevices":    s.quotaDevices(),
+		"QuotaEvents":     s.quotaEvents(),
 		"MultiTenantMode": s.services.Settings.GetBool("default", "multi_tenant_mode", false),
 	})
 }
@@ -233,9 +242,12 @@ func (s *Server) handleAdminWaitlist(w http.ResponseWriter, r *http.Request) {
 	for _, e := range pending {
 		rows = append(rows, adminWaitlistRow{Entry: e, Tenants: tenants})
 	}
+	ok, bad := adminFlash(r.URL.Query())
 	s.render(w, r, "admin-waitlist.html", map[string]interface{}{
-		"Rows":    rows,
-		"Pending": len(pending),
+		"Rows":     rows,
+		"Pending":  len(pending),
+		"Flash":    ok,
+		"FlashErr": bad,
 	})
 }
 
@@ -259,6 +271,10 @@ func (s *Server) handleAdminWaitlistConvert(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			http.NotFound(w, r)
+			return
+		}
+		if errors.Is(err, service.ErrQuotaUsers) {
+			http.Redirect(w, r, flashAdminUserCap.on("/admin/waitlist"), http.StatusFound)
 			return
 		}
 		slog.Error("admin waitlist convert failed", "waitlist_id", id, "err", err)
@@ -310,12 +326,45 @@ func (s *Server) handleAdminWaitlistDelete(w http.ResponseWriter, r *http.Reques
 // countTenantUsersDevices returns user/device counts for a tenant; best-effort, errors logged as zero so the dashboard still renders.
 // in: tenant slug. out: user_count, device_count.
 func (s *Server) countTenantUsersDevices(tenantID string) (int, int) {
+	users, devices, _ := s.countTenantUsage(tenantID)
+	return users, devices
+}
+
+// countTenantUsage returns users, devices, and alerts in the last day.
+// in: tenant slug. out: three counts. A failed count is zero so the page still renders.
+func (s *Server) countTenantUsage(tenantID string) (int, int, int) {
 	users, devices, err := s.services.Tenants.CountMembers(tenantID)
 	if err != nil {
 		slog.Warn("tenant count failed", "tenant", tenantID, "err", err)
-		return 0, 0
+		return 0, 0, 0
 	}
-	return users, devices
+	events, err := s.services.Tenants.CountRecentAlertsAny(tenantID)
+	if err != nil {
+		slog.Warn("tenant alert count failed", "tenant", tenantID, "err", err)
+		return users, devices, 0
+	}
+	return users, devices, events
+}
+
+func (s *Server) quotaUsers() int {
+	if s.cfg == nil {
+		return 0
+	}
+	return s.cfg.QuotaUsers
+}
+
+func (s *Server) quotaDevices() int {
+	if s.cfg == nil {
+		return 0
+	}
+	return s.cfg.QuotaDevices
+}
+
+func (s *Server) quotaEvents() int {
+	if s.cfg == nil {
+		return 0
+	}
+	return s.cfg.QuotaEventsPerDay
 }
 
 // ---------------------------------------------------------------------------
@@ -342,10 +391,13 @@ func (s *Server) handleAdminTenantUsers(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "users list failed", http.StatusInternalServerError)
 		return
 	}
+	ok, bad := adminFlash(r.URL.Query())
 	s.render(w, r, "admin-tenant-users.html", map[string]interface{}{
 		"Tenant":          tenant,
 		"Users":           users,
 		"Me":              authmw.CurrentUser(r),
+		"Flash":           ok,
+		"FlashErr":        bad,
 		"CrossTenantRead": s.services.Settings.GetBool(slug, "mqtt_cross_tenant_read", slug == "default"),
 	})
 }
@@ -366,6 +418,10 @@ func (s *Server) handleAdminTenantUserCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if _, err := s.services.Auth.CreateUser(slug, email, displayName, isAdmin); err != nil {
+		if errors.Is(err, service.ErrQuotaUsers) {
+			http.Redirect(w, r, flashAdminUserCap.on("/admin/tenants/"+slug+"/users"), http.StatusFound)
+			return
+		}
 		slog.Error("admin user create failed", "slug", slug, "email", email, "err", err)
 		http.Redirect(w, r, "/admin/tenants/"+slug+"/users?error=create+failed", http.StatusFound)
 		return
@@ -546,6 +602,10 @@ func (s *Server) handleAdminDeviceReassign(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := s.services.Devices.Reassign(r.Context(), id, target); err != nil {
+		if errors.Is(err, service.ErrQuotaDevices) {
+			http.Redirect(w, r, flashAdminDeviceCap.on("/admin/devices"), http.StatusFound)
+			return
+		}
 		slog.Error("admin device reassign failed", "device", id, "target", target, "err", err)
 		http.Redirect(w, r, flashAdminReassignFailed.on("/admin/devices"), http.StatusFound)
 		return

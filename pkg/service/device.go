@@ -105,6 +105,13 @@ func (s *DeviceService) upsertCore(tenantID, deviceID, displayName, firmwareVers
 
 	var id uuid.UUID
 	err := db.WithTenant(context.Background(), s.pools.App, tenantID, func(tx pgx.Tx) error {
+		max := 0
+		if s.cfg != nil {
+			max = s.cfg.QuotaDevices
+		}
+		if err := quotaAllowDevice(context.Background(), tx, tenantID, deviceID, max); err != nil {
+			return err
+		}
 		return tx.QueryRow(context.Background(), query, tenantID, deviceID, displayName, firmwareVersion, hardwareType, mqttTopicPrefix).Scan(&id)
 	})
 	return id, err
@@ -256,6 +263,17 @@ func (s *DeviceService) ListAllForAdmin(ctx context.Context) ([]Device, error) {
 // in: ctx, device pk, target tenant slug. out: error.
 func (s *DeviceService) Reassign(ctx context.Context, id uuid.UUID, targetTenant string) error {
 	return db.WithAdminAudit(ctx, s.pools.Admin, "device.reassign", func(tx pgx.Tx) error {
+		var deviceID string
+		if err := tx.QueryRow(ctx, `SELECT device_id FROM devices WHERE id = $1`, id).Scan(&deviceID); err != nil {
+			return err
+		}
+		max := 0
+		if s.cfg != nil {
+			max = s.cfg.QuotaDevices
+		}
+		if err := quotaAllowDevice(ctx, tx, targetTenant, deviceID, max); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx,
 			`UPDATE devices SET tenant_id = $1 WHERE id = $2`, targetTenant, id)
 		return err

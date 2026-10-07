@@ -66,6 +66,13 @@ func (s *AlertService) InsertAlert(ctx context.Context, tenantID string, deviceP
 		case !errors.Is(err, pgx.ErrNoRows):
 			return err
 		}
+		max := 0
+		if s.cfg != nil {
+			max = s.cfg.QuotaEventsPerDay
+		}
+		if err := quotaAllowEvent(ctx, tx, tenantID, max); err != nil {
+			return err
+		}
 		return tx.QueryRow(ctx, query, devicePk, severity, code, message, rawJSON).Scan(&id)
 	})
 	return id, err
