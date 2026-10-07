@@ -123,6 +123,7 @@ func (s *Server) parseTemplates() {
 // in: receiver. out: none (mutates s.mux).
 func (s *Server) routes() {
 	s.mux.Handle("GET /static/", http.FileServer(http.FS(staticFS)))
+	s.mux.HandleFunc("GET /sw.js", s.handleServiceWorker)
 	s.mux.HandleFunc("GET /", s.handleIndex)
 	s.mux.HandleFunc("GET /login", s.handleLoginForm)
 	s.mux.HandleFunc("POST /login", s.handleLoginSubmit)
