@@ -39,6 +39,17 @@ func main() {
 	rootCtx, cancel := newSignalContext()
 	defer cancel()
 
+	// ca-encrypt rewrites the CA key and never opens the database.
+	// A down database must not block that rewrite.
+	if len(os.Args) > 1 && os.Args[1] == "ca-encrypt" {
+		if err := pki.EncryptKeyOnDisk(cfg.CADir, cfg.CAKeyPassphrase); err != nil {
+			slog.Error("ca-encrypt failed", "dir", cfg.CADir, "err", err)
+			os.Exit(1)
+		}
+		slog.Info("ca-encrypt done", "dir", cfg.CADir)
+		return
+	}
+
 	// Two role-scoped pools. App is tenant-scoped, Admin is BYPASSRLS when
 	// a separate URL is configured. The thesada_app_mqtt role exists in the
 	// database and is provisioned, but ingest is not routed through it: it
@@ -62,22 +73,6 @@ func main() {
 			slog.Error("migrate failed", "err", err)
 			os.Exit(1)
 		}
-		return
-	}
-
-	// `ca-encrypt` rewrites the on-disk CA key from plaintext PEM to the
-	// THESADA-CAKEY-V1 encrypted envelope using THESADA_CA_KEY_PASSPHRASE.
-	// A backup of the plaintext form lands at ca.key.plaintext.bak; the
-	// operator deletes it once they have verified the encrypted load
-	// works under the new passphrase. Idempotent: if the on-disk file is
-	// already the encrypted envelope, the subcommand exits 0 with a log
-	// line and no file movement.
-	if len(os.Args) > 1 && os.Args[1] == "ca-encrypt" {
-		if err := pki.EncryptKeyOnDisk(cfg.CADir, cfg.CAKeyPassphrase); err != nil {
-			slog.Error("ca-encrypt failed", "dir", cfg.CADir, "err", err)
-			os.Exit(1)
-		}
-		slog.Info("ca-encrypt done", "dir", cfg.CADir)
 		return
 	}
 
@@ -271,6 +266,9 @@ func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub
 		// web, API, and WS-upgrade response (see pkg/httpsec/headers.go).
 		Handler:           httpsec.SecurityHeaders(root, cfg.TrustedProxies),
 		ReadHeaderTimeout: 10 * time.Second,
+		// WriteTimeout stays unset: a deadline would cut /ws and a long download.
+		ReadTimeout: 60 * time.Second,
+		IdleTimeout: 120 * time.Second,
 	}
 }
 
