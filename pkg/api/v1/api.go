@@ -19,6 +19,7 @@ import (
 	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/notify"
 	"thesada.app/app/pkg/pki"
+	"thesada.app/app/pkg/ratelimit"
 	"thesada.app/app/pkg/service"
 )
 
@@ -41,15 +42,50 @@ type Server struct {
 	// Rate limiters for the unauthenticated device enrollment surface.
 	enroll *enrollLimiters
 	notes  *notify.Mail
+
+	// claimLimits caps self-service claims per user. main shares the web
+	// server's limiter so the form and this endpoint count as one bucket.
+	claimLimits *ratelimit.Limiter
+	// claimProvision creates the broker client after ClaimInto. Nil means
+	// the endpoint refuses before it touches an enrollment.
+	claimProvision ClaimProvisioner
 }
 
 // New constructs the API server with all routes wired up.
 // in: cfg, services bundle, CA for pair endpoint. out: ready *Server.
 func New(cfg *config.Config, services *service.Services, ca *pki.CA, notes *notify.Mail) *Server {
 	s := &Server{cfg: cfg, services: services, ca: ca, notes: notes, mux: http.NewServeMux(),
-		enroll: newEnrollLimiters()}
+		enroll: newEnrollLimiters(), claimLimits: newClaimLimiter(cfg)}
 	s.routes()
 	return s
+}
+
+// ClaimProvisioner creates the dynsec role and client for a claimed device.
+// The step name is the failing call, empty on success.
+type ClaimProvisioner func(ctx context.Context, tenantID, deviceID, topicPrefix, cn string) (string, error)
+
+// UseClaimLimiter shares the HTML form's per-user cap with this endpoint.
+// in: limiter. A nil limiter keeps the one New built. out: none.
+func (s *Server) UseClaimLimiter(l *ratelimit.Limiter) {
+	if l != nil {
+		s.claimLimits = l
+	}
+}
+
+// SetClaimProvisioner wires the broker step. A nil provisioner makes claim refuse.
+// in: provisioner. out: none.
+func (s *Server) SetClaimProvisioner(p ClaimProvisioner) {
+	s.claimProvision = p
+}
+
+// SetEnrollmentService wires claim lookup. Nil makes claim refuse.
+// in: enrollment service. out: none.
+func (s *Server) SetEnrollmentService(e *service.EnrollmentService) {
+	// A nil bundle would panic on the field write. New always passes one.
+	if s.services == nil {
+		s.services = &service.Services{}
+	}
+	s.services.Enrollments = e
 }
 
 // ServeHTTP dispatches to the internal mux.
@@ -73,6 +109,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /devices", authmw.RequireAuthJSON(s.handleDeviceList))
 	s.mux.HandleFunc("GET /devices/{id}", authmw.RequireAuthJSON(s.handleDeviceGet))
 	s.mux.HandleFunc("POST /devices/{id}/pair", authmw.RequireSuperAdminJSON(s.handleDevicePair))
+	s.mux.HandleFunc("POST /devices/claim", authmw.RequireAuthJSON(s.handleDeviceClaim))
 	s.mux.HandleFunc("GET /devices/{id}/telemetry", authmw.RequireAuthJSON(s.handleDeviceTelemetry))
 	s.mux.HandleFunc("GET /devices/{id}/alerts", authmw.RequireAuthJSON(s.handleDeviceAlerts))
 	s.mux.HandleFunc("GET /alerts", authmw.RequireAuthJSON(s.handleAlertList))

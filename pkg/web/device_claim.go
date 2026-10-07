@@ -121,6 +121,10 @@ func (s *Server) handleDeviceClaimSubmit(w http.ResponseWriter, r *http.Request)
 	devicePk, err := s.services.Enrollments.ClaimInto(
 		r.Context(), deviceID, e.PubkeyHex, tenantID, user.ID, topicPrefix)
 	if err != nil {
+		if errors.Is(err, service.ErrQuotaDevices) {
+			s.claimError(w, r, "this tenant is at its device cap")
+			return
+		}
 		if errors.Is(err, service.ErrEnrollNotReady) {
 			s.claimError(w, r, "that device has already been claimed")
 			return

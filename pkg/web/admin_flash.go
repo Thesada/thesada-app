@@ -34,6 +34,8 @@ var (
 	flashTenantPushed         = adminFlashOK("pushed", "Push finished.")
 	flashTenantPushedMix      = adminFlashOK("pushed_partial", "Push finished with devices unreachable, rejected, or skipped. Counts are in the log.")
 
+	flashAdminUserCap         = adminFlashErr("user_cap", "This tenant is at its user cap.")
+	flashAdminDeviceCap       = adminFlashErr("device_cap", "That tenant is at its device cap.")
 	flashAdminUnknownTenant   = adminFlashErr("unknown_tenant", "Unknown tenant.")
 	flashAdminReassignFailed  = adminFlashErr("reassign_failed", "Reassign failed. That device id may already exist in the target tenant.")
 	flashAdminConfirmDevice   = adminFlashErr("confirm_device_id", "Type the device id to confirm.")

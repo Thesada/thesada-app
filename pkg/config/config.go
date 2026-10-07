@@ -108,6 +108,11 @@ type Config struct {
 	// an operator should not need a rebuild to raise it for an afternoon.
 	DeviceClaimMaxPerHour int
 
+	// Abuse caps, not a plan. Zero turns that one cap off.
+	QuotaUsers        int
+	QuotaDevices      int
+	QuotaEventsPerDay int
+
 	// EnrollmentPruneInterval is the sweep cadence for stale unclaimed
 	// enrollment rows (one sweep runs immediately at startup). Default 1h.
 	EnrollmentPruneInterval time.Duration
@@ -148,6 +153,9 @@ func Load() (*Config, error) {
 		AlertRetryBase:          envOrDuration("THESADA_ALERT_RETRY_BASE", time.Minute),
 		AlertRedispatchInterval: envOrDuration("THESADA_ALERT_REDISPATCH_INTERVAL", time.Minute),
 		DeviceClaimMaxPerHour:   envOrInt("THESADA_DEVICE_CLAIM_MAX_PER_HOUR", 5),
+		QuotaUsers:              envOrInt("THESADA_QUOTA_USERS", 25),
+		QuotaDevices:            envOrInt("THESADA_QUOTA_DEVICES", 50),
+		QuotaEventsPerDay:       envOrInt("THESADA_QUOTA_EVENTS_PER_DAY", 10000),
 		EnrollmentPruneInterval: envOrDuration("THESADA_ENROLLMENT_PRUNE_INTERVAL", time.Hour),
 	}
 	tp, err := parseTrustedProxies(os.Getenv("THESADA_TRUSTED_PROXIES"))

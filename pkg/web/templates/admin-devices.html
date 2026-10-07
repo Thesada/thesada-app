@@ -46,43 +46,61 @@
   </label>
 </div>
 
+<div class="mb-3 flex flex-wrap gap-2 items-center" data-devices-tools="admin-devices" data-user="{{with .User}}{{.ID}}{{end}}">
+  <input type="search" data-devices-filter="admin-devices" placeholder="Filter devices"
+         class="text-sm border border-slate-300 rounded px-2 py-1" aria-label="Filter devices">
+  <details class="text-sm relative">
+    <summary class="cursor-pointer px-2 py-1 rounded border border-slate-300 bg-white">Columns</summary>
+    <div class="absolute z-10 mt-1 bg-white border border-slate-200 rounded-lg shadow p-3 grid gap-1" data-col-menu="admin-devices"></div>
+  </details>
+  <span class="text-xs text-slate-500" data-filter-count="admin-devices"></span>
+</div>
+
 <div class="bg-white border border-slate-200 rounded-xl overflow-x-auto">
-  <table class="min-w-full text-sm">
+  <table class="min-w-full text-sm" data-devices-table="admin-devices">
     <thead class="bg-slate-50 text-slate-600 text-xs uppercase tracking-wide">
       <tr>
         <th class="text-left px-4 py-2 w-8">
           <input type="checkbox" id="bulk-all" aria-label="Select all">
         </th>
-        <th class="text-left px-4 py-2 hidden md:table-cell">Tenant</th>
-        <th class="text-left px-4 py-2">Device ID</th>
-        <th class="text-left px-4 py-2 hidden lg:table-cell">Hardware</th>
-        <th class="text-left px-4 py-2 hidden lg:table-cell">Firmware</th>
-        <th class="text-left px-4 py-2 hidden md:table-cell">Uptime</th>
-        <th class="text-left px-4 py-2 hidden sm:table-cell">Last seen</th>
+        <th class="text-left px-4 py-2 cursor-pointer" data-col="tenant" data-label="Tenant">Tenant</th>
+        <th class="text-left px-4 py-2 cursor-pointer" data-col="device" data-label="Device">Device ID</th>
+        <th class="text-left px-4 py-2 cursor-pointer" data-col="hardware" data-label="Hardware">Hardware</th>
+        <th class="text-left px-4 py-2 cursor-pointer" data-col="firmware" data-label="Firmware">Firmware</th>
+        <th class="text-left px-4 py-2 cursor-pointer" data-col="uptime" data-label="Uptime">Uptime</th>
+        <th class="text-left px-4 py-2 cursor-pointer" data-col="seen" data-label="Last seen">Last seen</th>
+        <th class="text-left px-4 py-2 cursor-pointer hidden" data-col="owner" data-label="Owner" data-default="off">Owner</th>
+        <th class="text-left px-4 py-2 cursor-pointer hidden" data-col="paired" data-label="Paired" data-default="off">Paired</th>
+        <th class="text-left px-4 py-2 cursor-pointer hidden" data-col="created" data-label="Created" data-default="off">Created</th>
+        <th class="text-left px-4 py-2 cursor-pointer hidden" data-col="topic" data-label="Topic prefix" data-default="off">Topic prefix</th>
+        <th class="text-left px-4 py-2 cursor-pointer hidden" data-col="heap" data-label="Free heap" data-default="off">Free heap</th>
+        <th class="text-left px-4 py-2 cursor-pointer hidden" data-col="rssi" data-label="RSSI" data-default="off">RSSI</th>
         <th class="text-right px-4 py-2">Reassign</th>
       </tr>
     </thead>
     <tbody class="divide-y divide-slate-100">
       {{range .Devices}}
-      <tr>
+      <tr data-filter="{{.DeviceID}} {{deref .DisplayName}} {{.TenantID}} {{deref .HardwareType}} {{deref .FirmwareVersion}}">
         <td class="px-4 py-2">
           <input type="checkbox" form="bulk-form" name="device_ids" value="{{.ID}}"
                  class="bulk-row" data-tenant="{{.TenantID}}" data-device-id="{{.DeviceID}}"
                  aria-label="Select {{.DeviceID}}">
         </td>
-        <td class="px-4 py-2 font-mono text-xs hidden md:table-cell">{{.TenantID}}</td>
-        <td class="px-4 py-2">
+        <td class="px-4 py-2 font-mono text-xs" data-col="tenant">{{.TenantID}}</td>
+        <td class="px-4 py-2" data-col="device" data-sort="{{.DeviceID}}">
           <a href="/devices/{{.ID}}" class="text-sky-700 hover:underline">{{.DeviceID}}</a>
           <a href="/admin/devices/{{.ID}}/config" class="ml-2 text-xs text-slate-400 hover:text-slate-600" title="Config">config</a>
-          <div class="text-xs text-slate-500 md:hidden">
-            {{.TenantID}}{{with derefOrDash .HardwareType}}{{if ne . "-"}} - {{.}}{{end}}{{end}}{{with derefOrDash .FirmwareVersion}}{{if ne . "-"}} - fw {{.}}{{end}}{{end}}
-          </div>
-          <div class="text-xs text-slate-400 sm:hidden">{{timeOrDash .LastSeenAt}}</div>
         </td>
-        <td class="px-4 py-2 hidden lg:table-cell">{{derefOrDash .HardwareType}}</td>
-        <td class="px-4 py-2 hidden lg:table-cell">{{derefOrDash .FirmwareVersion}}</td>
-        <td class="px-4 py-2 text-slate-500 text-xs hidden md:table-cell">{{uptimeLive .LastUptimeSeconds .LastUptimeAt}}</td>
-        <td class="px-4 py-2 text-slate-500 text-xs whitespace-nowrap hidden sm:table-cell">{{timeOrDash .LastSeenAt}}</td>
+        <td class="px-4 py-2" data-col="hardware">{{derefOrDash .HardwareType}}</td>
+        <td class="px-4 py-2" data-col="firmware">{{derefOrDash .FirmwareVersion}}</td>
+        <td class="px-4 py-2 text-slate-500 text-xs" data-col="uptime" data-sort="{{sortUptime .LastUptimeSeconds .LastUptimeAt}}">{{uptimeLive .LastUptimeSeconds .LastUptimeAt}}</td>
+        <td class="px-4 py-2 text-slate-500 text-xs whitespace-nowrap" data-col="seen" data-sort="{{sortUnix .LastSeenAt}}">{{timeOrDash .LastSeenAt}}</td>
+        <td class="px-4 py-2 text-xs hidden" data-col="owner">{{if .OwnerUserID}}{{.OwnerUserID}}{{else}}-{{end}}</td>
+        <td class="px-4 py-2 text-xs whitespace-nowrap hidden" data-col="paired" data-sort="{{sortUnix .PairedAt}}">{{timeOrDash .PairedAt}}</td>
+        <td class="px-4 py-2 text-xs whitespace-nowrap hidden" data-col="created" data-sort="{{sortUnixTime .CreatedAt}}">{{fmtTime .CreatedAt}}</td>
+        <td class="px-4 py-2 text-xs hidden" data-col="topic">{{derefOrDash .MQTTTopicPrefix}}</td>
+        <td class="px-4 py-2 hidden" data-col="heap" data-sort="{{sortInt64 .LastHeapFree}}">{{derefInt64OrDash .LastHeapFree}}</td>
+        <td class="px-4 py-2 hidden" data-col="rssi" data-sort="{{sortInt64 .LastRSSI}}">{{derefInt64OrDash .LastRSSI}}</td>
         <td class="px-4 py-2 text-right">
           <form method="POST" action="/admin/devices/{{.ID}}/reassign" class="inline-flex flex-wrap gap-1 items-center"
                 data-confirm="Reassign {{.DeviceID}} to the selected tenant? Remember to also update the on-device mqtt.topic_prefix.">
@@ -98,12 +116,13 @@
         </td>
       </tr>
       {{else}}
-      <tr><td colspan="8" class="px-4 py-8 text-center text-slate-500">No devices yet.</td></tr>
+      <tr><td colspan="14" class="px-4 py-8 text-center text-slate-500">No devices yet.</td></tr>
       {{end}}
     </tbody>
   </table>
 </div>
 
+<script src="/static/js/devices-table.js"></script>
 <script nonce="{{.CSPNonce}}">
 (function () {
   var all = document.getElementById('bulk-all');
@@ -116,7 +135,10 @@
   }
   if (all) {
     all.addEventListener('change', function () {
-      rows.forEach(function (cb) { cb.checked = all.checked; });
+      rows.forEach(function (cb) {
+        if (cb.closest('tr').hidden) return;
+        cb.checked = all.checked;
+      });
       recount();
     });
   }

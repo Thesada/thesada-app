@@ -19,6 +19,7 @@
         <th class="text-left px-4 py-2 hidden md:table-cell">Display name</th>
         <th class="text-right px-4 py-2 hidden sm:table-cell">Users</th>
         <th class="text-right px-4 py-2 hidden sm:table-cell">Devices</th>
+        <th class="text-right px-4 py-2 hidden md:table-cell">Alerts / day</th>
         <th class="text-right px-4 py-2">Actions</th>
       </tr>
     </thead>
@@ -31,11 +32,12 @@
           {{if .IsCurrent}}<span class="text-xs text-amber-700">(current)</span>{{end}}
           {{if .CrossTenantRead}}<span class="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300" title="mqtt_cross_tenant_read=true: paired devices in this tenant subscribe across ALL tenants">cross-tenant read</span>{{end}}
           <div class="text-xs text-slate-500 md:hidden">{{.Tenant.DisplayName}}</div>
-          <div class="text-xs text-slate-500 sm:hidden">{{.UserCount}} users / {{.DeviceCount}} devices</div>
+          <div class="text-xs text-slate-500 sm:hidden">{{.UserCount}}/{{$.QuotaUsers}} users / {{.DeviceCount}}/{{$.QuotaDevices}} devices</div>
         </td>
         <td class="px-4 py-2 hidden md:table-cell">{{.Tenant.DisplayName}}</td>
-        <td class="px-4 py-2 text-right hidden sm:table-cell">{{.UserCount}}</td>
-        <td class="px-4 py-2 text-right hidden sm:table-cell">{{.DeviceCount}}</td>
+        <td class="px-4 py-2 text-right hidden sm:table-cell {{if and $.QuotaUsers (ge .UserCount $.QuotaUsers)}}text-rose-700{{end}}">{{.UserCount}} / {{$.QuotaUsers}}</td>
+        <td class="px-4 py-2 text-right hidden sm:table-cell {{if and $.QuotaDevices (ge .DeviceCount $.QuotaDevices)}}text-rose-700{{end}}">{{.DeviceCount}} / {{$.QuotaDevices}}</td>
+        <td class="px-4 py-2 text-right hidden md:table-cell {{if and $.QuotaEvents (ge .EventCount $.QuotaEvents)}}text-rose-700{{end}}">{{.EventCount}} / {{$.QuotaEvents}}</td>
         <td class="px-4 py-2 text-right">
           <div class="flex flex-wrap gap-2 justify-end items-center">
             <a href="/admin/tenants/{{.Tenant.ID}}/users" class="text-xs px-2 py-1 rounded bg-slate-200 hover:bg-slate-300 text-slate-700">users</a>
@@ -62,7 +64,7 @@
       </tr>
       {{else}}
       <tr>
-        <td colspan="5" class="px-4 py-8 text-center text-slate-500">No tenants yet.</td>
+        <td colspan="6" class="px-4 py-8 text-center text-slate-500">No tenants yet.</td>
       </tr>
       {{end}}
     </tbody>
