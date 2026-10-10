@@ -49,7 +49,7 @@ One Go binary. Goroutines for HTTP, MQTT subscriber, background workers. No micr
 
 ## Requirements
 
-- Go 1.25+ (matches the `go 1.25.11` directive in `go.mod`)
+- Go 1.26.9 (the `go` directive in `go.mod`)
 - Postgres 14+
 - The Tailwind v4 standalone binary, downloaded into `tools/tailwindcss`:
 
