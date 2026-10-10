@@ -29,6 +29,7 @@ var funcMap = template.FuncMap{
 	"timeOrDash":       timeOrDash,
 	"fmtTime":          fmtTime,
 	"uptimeLive":       uptimeLive,
+	"freshnessBadge":   freshnessBadge,
 	"sortUnix":         sortUnix,
 	"sortUnixTime":     sortUnixTime,
 	"sortInt64":        sortInt64,
@@ -199,10 +200,55 @@ func intToString(v int64) string {
 	return strconv.FormatInt(v, 10)
 }
 
+// A device is live while MQTT has been seen inside this window. send_interval_s
+// defaults to 0, so a running node is chatty and five quiet minutes is late.
+const freshnessLive = 5 * time.Minute
+
+// After this, last_seen is offline. An uptime sample older than this is
+// marked old. That mark is about the number, not whether the device is offline.
+const freshnessOffline = 15 * time.Minute
+
+// freshnessState classifies last_seen_at. A nil or zero time is unknown.
+// A future timestamp is live. in: last seen, now. out: label, tailwind classes.
+func freshnessState(at *time.Time, now time.Time) (string, string) {
+	if at == nil || at.IsZero() {
+		return "unknown", "bg-slate-100 text-slate-600"
+	}
+	age := now.Sub(*at)
+	if age < 0 {
+		age = 0
+	}
+	switch {
+	case age <= freshnessLive:
+		return "live", "bg-emerald-100 text-emerald-800"
+	case age <= freshnessOffline:
+		return "stale", "bg-amber-100 text-amber-800"
+	default:
+		return "offline", "bg-rose-100 text-rose-800"
+	}
+}
+
+// freshnessBadge renders the state span. data-freshness is the seen instant
+// so an open page can age it: a quiet device emits no MQTT event.
+// in: last seen. out: a span.
+func freshnessBadge(at *time.Time) template.HTML {
+	label, class := freshnessState(at, time.Now())
+	seen := "unknown"
+	if at != nil && !at.IsZero() {
+		seen = at.UTC().Format(time.RFC3339)
+	}
+	live := strconv.FormatInt(freshnessLive.Milliseconds(), 10)
+	off := strconv.FormatInt(freshnessOffline.Milliseconds(), 10)
+	return template.HTML(`<span class="text-xs px-1.5 py-0.5 rounded ` + class +
+		`" data-freshness="` + seen +
+		`" data-live-ms="` + live +
+		`" data-offline-ms="` + off + `">` + label + `</span>`)
+}
+
 // uptimeLive renders a human-readable "live" uptime from the last reported
 // uptime sample plus wall-clock elapsed since the sample arrived. Returns
-// "-" if either input is nil. Appends "(stale)" when the last sample is
-// more than 15 min old so the table flags devices that stopped reporting.
+// "-" if either input is nil. Appends "(old)" when the sample is past
+// freshnessOffline. The number is extrapolated. The device may still be live.
 // in: last uptime seconds from device, time that sample was received.
 // out: "Xd Yh Zm" string.
 func uptimeLive(secs *int64, at *time.Time) string {
@@ -226,8 +272,8 @@ func uptimeLive(secs *int64, at *time.Time) string {
 	default:
 		s = fmt.Sprintf("%dm", m)
 	}
-	if elapsed > 15*60 {
-		s += " (stale)"
+	if time.Duration(elapsed)*time.Second > freshnessOffline {
+		s += " (old)"
 	}
 	return s
 }

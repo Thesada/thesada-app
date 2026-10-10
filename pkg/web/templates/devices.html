@@ -46,7 +46,7 @@
         <td class="px-4 py-2 text-slate-600" data-col="hardware">{{derefOrDash .HardwareType}}</td>
         <td class="px-4 py-2 text-slate-600" data-col="firmware">{{derefOrDash .FirmwareVersion}}</td>
         <td class="px-4 py-2 text-slate-600 text-xs" data-col="uptime" data-sort="{{sortUptime .LastUptimeSeconds .LastUptimeAt}}">{{uptimeLive .LastUptimeSeconds .LastUptimeAt}}</td>
-        <td class="px-4 py-2 text-slate-600 whitespace-nowrap" data-col="seen" data-sort="{{sortUnix .LastSeenAt}}">{{timeOrDash .LastSeenAt}}</td>
+        <td class="px-4 py-2 text-slate-600 whitespace-nowrap" data-col="seen" data-sort="{{sortUnix .LastSeenAt}}">{{freshnessBadge .LastSeenAt}} {{timeOrDash .LastSeenAt}}</td>
         <td class="px-4 py-2 text-slate-600 text-xs hidden" data-col="owner">{{if .OwnerUserID}}{{.OwnerUserID}}{{else}}-{{end}}</td>
         <td class="px-4 py-2 text-slate-600 whitespace-nowrap hidden" data-col="paired" data-sort="{{sortUnix .PairedAt}}">{{timeOrDash .PairedAt}}</td>
         <td class="px-4 py-2 text-slate-600 whitespace-nowrap hidden" data-col="created" data-sort="{{sortUnixTime .CreatedAt}}">{{fmtTime .CreatedAt}}</td>

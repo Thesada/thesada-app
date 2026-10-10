@@ -92,6 +92,35 @@
       var d = new Date(el.getAttribute('datetime'));
       if (!isNaN(d)) el.textContent = d.toLocaleString();
     });
+    function paintFreshness(now) {
+      document.querySelectorAll("[data-freshness]").forEach(function (el) {
+        var raw = el.getAttribute("data-freshness");
+        var liveMs = Number(el.getAttribute("data-live-ms"));
+        var offMs = Number(el.getAttribute("data-offline-ms"));
+        var label = "unknown";
+        var cls = "bg-slate-100 text-slate-600";
+        if (raw && raw !== "unknown") {
+          var seen = new Date(raw);
+          var age = now - seen.getTime();
+          if (isNaN(age) || age < 0) age = 0;
+          if (age <= liveMs) {
+            label = "live";
+            cls = "bg-emerald-100 text-emerald-800";
+          } else if (age <= offMs) {
+            label = "stale";
+            cls = "bg-amber-100 text-amber-800";
+          } else {
+            label = "offline";
+            cls = "bg-rose-100 text-rose-800";
+          }
+        }
+        el.textContent = label;
+        el.className = "text-xs px-1.5 py-0.5 rounded " + cls;
+      });
+    }
+    paintFreshness(Date.now());
+    setInterval(function () { paintFreshness(Date.now()); }, 30000);
+    document.addEventListener("htmx:afterSwap", function () { paintFreshness(Date.now()); });
   </script>
   {{if .User}}
   <script nonce="{{.CSPNonce}}">
