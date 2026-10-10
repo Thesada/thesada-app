@@ -1,10 +1,5 @@
 #!/bin/sh
-# Install thesada-app git hooks into .git/hooks via symlink.
-#
-# Run once after clone. Re-run after pulling new hooks. Symlinks (not
-# copies) so a hook edit lands without reinstalling.
-#
-# Usage:  ./scripts/hooks/install.sh
+# Symlink scripts/hooks/pre-commit and pre-push into .git/hooks.
 
 set -eu
 
@@ -17,7 +12,7 @@ if [ ! -d "$hooks_dst" ]; then
   exit 1
 fi
 
-for hook in pre-commit; do
+for hook in pre-commit pre-push; do
   src="$hooks_src/$hook"
   dst="$hooks_dst/$hook"
   if [ ! -x "$src" ]; then
