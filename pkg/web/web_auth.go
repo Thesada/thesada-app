@@ -56,8 +56,7 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "login failed", http.StatusInternalServerError)
 			return
 		}
-		s.startSession(w, r, u, "password")
-		http.Redirect(w, r, "/devices", http.StatusFound)
+		s.handleLoginSubmitPassword(w, r, u)
 		return
 	}
 

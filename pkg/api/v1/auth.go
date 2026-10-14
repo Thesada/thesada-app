@@ -13,6 +13,7 @@ import (
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/service"
+	"thesada.app/app/pkg/totp"
 )
 
 // apiBootstrapTenantID is the tenant pre-auth flows (signup waitlist) write to.
@@ -23,6 +24,7 @@ const apiBootstrapTenantID = "default"
 type loginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	Code     string `json:"code"`
 }
 
 // userResponse is the redacted user shape returned by the auth endpoints -
@@ -84,6 +86,20 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		slog.Error("api login: verify failed", "email", email, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
 		return
+	}
+
+	secret, totpOn, err := s.services.Auth.TOTPSecret(u.TenantID, u.ID)
+	if err != nil {
+		slog.Error("api login: totp lookup failed", "user_id", u.ID, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
+		return
+	}
+	if totpOn {
+		raw, decErr := totp.DecodeKey(secret)
+		if req.Code == "" || decErr != nil || !totp.Verify(raw, req.Code, time.Now()) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "totp_required"})
+			return
+		}
 	}
 
 	cookieTok, cookieExp, err := s.services.Auth.CreateSession(u.TenantID, u.ID, "password", r.UserAgent(), ip)

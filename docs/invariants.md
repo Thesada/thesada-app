@@ -404,6 +404,19 @@ a wrong password both return 401 (indistinguishable), and signup returns
 
 Source: `pkg/api/v1/auth.go::handleAuthLogin`, `handleAuthSignup`.
 
+### Password login asks for a TOTP code only when that account enrolled one
+
+Magic-link and Kanidm sessions are unchanged. A password match against a
+row with `users.totp_secret` set does not create a session until the
+6-digit code checks. The JSON login returns `totp_required` until `code`
+is present and valid. The web login parks a 5-minute challenge cookie
+and finishes at `POST /login/totp`.
+
+How verified: `pkg/totp/totp_test.go` checks the RFC 6238 SHA-1 vectors.
+
+Source: `pkg/totp/totp.go`, `pkg/service/auth_totp.go`,
+`pkg/web/web_totp.go`, `migrations/0032_user_totp.sql`.
+
 ### Password verification is constant-time across account existence
 
 `VerifyPassword` and `VerifyPasswordAnyTenant` run a bcrypt comparison even

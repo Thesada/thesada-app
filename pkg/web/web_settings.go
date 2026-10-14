@@ -25,6 +25,15 @@ func (s *Server) handleSettingsForm(w http.ResponseWriter, r *http.Request) {
 	savedSection := r.URL.Query().Get("saved")
 	identities, _ := s.services.OAuth.ListIdentitiesForUser(r.Context(), u.TenantID, u.ID)
 	providers, _ := s.services.OAuth.ListEnabledProvidersForTenant(r.Context(), u.TenantID)
+	secret, totpOn, totpErr := s.services.Auth.TOTPSecret(u.TenantID, u.ID)
+	if totpErr != nil {
+		slog.Error("totp lookup failed", "user_id", u.ID, "err", totpErr)
+	}
+	setup, _ := r.Cookie(totpSetupCookie)
+	setupSecret := ""
+	if setup != nil {
+		setupSecret = setup.Value
+	}
 	s.render(w, r, "settings.html", map[string]interface{}{
 		"HasPassword":     has,
 		"Subscriptions":   subs,
@@ -32,6 +41,10 @@ func (s *Server) handleSettingsForm(w http.ResponseWriter, r *http.Request) {
 		"OAuthIdentities": identities,
 		"OAuthProviders":  providers,
 		"OAuthError":      r.URL.Query().Get("err"),
+		"TOTPEnabled":     totpOn && secret != "",
+		"TOTPSetup":       setupSecret,
+		"TOTPURL":         totpAuthURL(u.Email, setupSecret),
+		"TOTPError":       r.URL.Query().Get("err") == "totp",
 	})
 }
 

@@ -77,6 +77,42 @@
     </button>
   </form>
 
+  {{if .HasPassword}}
+  <h2 class="text-lg font-medium mb-2">Authenticator</h2>
+  <p class="text-sm text-slate-500 mb-4">
+    Password sign-in asks for a 6 digit code. Magic links and Kanidm do not.
+  </p>
+  {{if .TOTPError}}
+  <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">That code is not valid.</div>
+  {{end}}
+  {{if eq .SavedSection "totp"}}
+  <div class="mb-4 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">Authenticator updated.</div>
+  {{end}}
+  {{if .TOTPEnabled}}
+  <form method="POST" action="/settings/totp/disable" class="space-y-3 mb-8">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required pattern="[0-9]{6}"
+           class="w-full rounded border border-slate-300 px-3 py-2 text-sm tracking-widest" placeholder="000000">
+    <button type="submit" class="rounded bg-white border border-slate-300 text-sm px-4 py-2">Turn off</button>
+  </form>
+  {{else if .TOTPSetup}}
+  <p class="text-sm mb-2">Add this secret to your authenticator, then enter a code.</p>
+  <p class="font-mono text-sm break-all mb-2">{{.TOTPSetup}}</p>
+  <p class="text-xs text-slate-500 break-all mb-3">{{.TOTPURL}}</p>
+  <form method="POST" action="/settings/totp/confirm" class="space-y-3 mb-8">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required pattern="[0-9]{6}"
+           class="w-full rounded border border-slate-300 px-3 py-2 text-sm tracking-widest" placeholder="000000">
+    <button type="submit" class="rounded bg-slate-900 text-white text-sm px-4 py-2">Confirm</button>
+  </form>
+  {{else}}
+  <form method="POST" action="/settings/totp/begin" class="mb-8">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <button type="submit" class="rounded bg-slate-900 text-white text-sm px-4 py-2">Set up authenticator</button>
+  </form>
+  {{end}}
+  {{end}}
+
   <h2 class="text-lg font-medium mb-2">Alert notifications</h2>
   <p class="text-sm text-slate-500 mb-4">
     Subscribe to receive alerts via email or Telegram. Applies to all devices in your tenant.

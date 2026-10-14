@@ -1,0 +1,22 @@
+-- Password-account TOTP. Null secret means the factor is off.
+-- Challenges are the gap between a good password and a session.
+
+ALTER TABLE users ADD COLUMN totp_secret TEXT;
+
+CREATE TABLE totp_challenges (
+    token_hash BYTEA PRIMARY KEY,
+    user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
+ALTER TABLE totp_challenges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE totp_challenges FORCE ROW LEVEL SECURITY;
+CREATE POLICY p_totp_challenges_tenant ON totp_challenges
+    USING (EXISTS (
+        SELECT 1 FROM users u
+        WHERE u.id = totp_challenges.user_id
+          AND u.tenant_id = app_tenant_id()))
+    WITH CHECK (EXISTS (
+        SELECT 1 FROM users u
+        WHERE u.id = totp_challenges.user_id
+          AND u.tenant_id = app_tenant_id()));
