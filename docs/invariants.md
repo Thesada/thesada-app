@@ -413,7 +413,7 @@ shows the base32 secret as an otpauth link, then stores it after the
 code matches. There is no QR image. Kanidm sign-in does not ask: that
 provider already authenticated the user, and the local factor is only
 for password and magic link.
-A lookup or secret-decode error is a failed login, not "TOTP is off"
+A time before the Unix epoch uses counter zero. A lookup or secret-decode error is a failed login, not "TOTP is off"
 and not "the code was wrong". The JSON login returns `totp_required`
 until `code` is present and valid. Magic-link verify returns the same
 error plus a `challenge` token, finished at `POST /auth/totp`. The web

@@ -42,7 +42,12 @@ func DecodeKey(encoded string) ([]byte, error) {
 // Code is the 6 digit token for key at the given time.
 // in: raw key, time. out: 6-digit code.
 func Code(key []byte, at time.Time) string {
-	counter := uint64(at.Unix()) / uint64(step/time.Second)
+	secs := at.Unix()
+	if secs < 0 {
+		// A time before the Unix epoch is not a TOTP counter.
+		secs = 0
+	}
+	counter := uint64(secs) / uint64(step/time.Second) // #nosec G115 -- secs is clamped at zero
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], counter)
 	mac := hmac.New(sha1.New, key)
