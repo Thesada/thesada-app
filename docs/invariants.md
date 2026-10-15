@@ -1209,7 +1209,9 @@ The offline badge and the absence sweep share a 15 minute window
 window, and only when no absence alert has been recorded since that
 `last_seen_at`. A device that has never reported is not an absence.
 The redispatch sweeper delivers the new row. The open-absence lookup
-index is built concurrently so alert writes are not blocked. A later live sighting sets
+index is built concurrently so alert writes are not blocked. A failed
+build leaves the index invalid, and the next migrate drops it and
+tries again before recording success. A later live sighting sets
 `cleared_at` on that absence row, and the alerts page shows cleared.
 Trend checks stay a pure function: a
 rise needs a per-metric delta, so nothing sweeps them.
