@@ -145,6 +145,7 @@ type alertRow struct {
 
 // recipient is one subscription the alert was matched against.
 type recipient struct {
+	subID          string
 	userID         string
 	channel        string
 	email          string
@@ -168,12 +169,16 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 
 	var row *alertRow
 	var recipients []recipient
+	sentHooks := map[string]struct{}{}
 	err := db.WithTenant(ctx, n.db, tenantID, func(tx pgx.Tx) error {
 		var err error
 		if row, err = n.loadAlert(ctx, tx, alertID); err != nil {
 			return err
 		}
-		recipients, err = n.loadRecipients(ctx, tx, alertID)
+		if recipients, err = n.loadRecipients(ctx, tx, alertID); err != nil {
+			return err
+		}
+		sentHooks, err = n.loadWebhookSent(ctx, tx, alertID)
 		return err
 	})
 	if err != nil {
@@ -200,7 +205,12 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 		case "telegram":
 			needTg = needTg || !row.alreadyTg
 		case "webhook":
-			needHook = needHook || !row.alreadyHook
+			if row.alreadyHook {
+				break
+			}
+			if _, done := sentHooks[r.subID]; !done {
+				needHook = true
+			}
 		}
 	}
 
@@ -214,7 +224,6 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 		}
 	}
 	var emailOK, tgOK, hookOK bool
-	hookFails := 0
 	for _, r := range recipients {
 		switch r.channel {
 		case "email":
@@ -243,19 +252,35 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 			if row.alreadyHook {
 				continue
 			}
+			if _, done := sentHooks[r.subID]; done {
+				continue
+			}
 			dest := ""
 			if r.destination != nil {
 				dest = *r.destination
 			}
 			if err := n.sendWebhook(ctx, dest, hookBody); err != nil {
-				hookFails++
 				slog.Error("alert webhook failed", "alert_id", alertID, "err", err)
 				continue
 			}
+			if err := n.markWebhookSent(ctx, tenantID, alertID, r.subID); err != nil {
+				slog.Error("alert webhook record failed", "alert_id", alertID, "err", err)
+				continue
+			}
+			sentHooks[r.subID] = struct{}{}
 		}
 	}
-	// One failed destination keeps the channel pending so the retry includes it.
-	if needHook && hookFails == 0 {
+	hookTargets, hookDoneN := 0, 0
+	for _, r := range recipients {
+		if r.channel != "webhook" {
+			continue
+		}
+		hookTargets++
+		if _, done := sentHooks[r.subID]; done || row.alreadyHook {
+			hookDoneN++
+		}
+	}
+	if hookTargets > 0 && hookDoneN == hookTargets {
 		hookOK = true
 	}
 
@@ -396,7 +421,7 @@ func (n *Notifier) loadAlert(ctx context.Context, tx pgx.Tx, alertID int64) (*al
 // in: ctx, tenant-scoped tx, alert id. out: [] recipient, error.
 func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64) ([]recipient, error) {
 	const query = `
-		SELECT s.user_id::text, s.channel, u.email::text, u.telegram_chat_id, s.destination
+		SELECT s.id::text, s.user_id::text, s.channel, u.email::text, u.telegram_chat_id, s.destination
 		FROM device_alerts a
 		JOIN alert_subscriptions s
 		  ON (s.device_pk = a.device_pk OR s.device_pk IS NULL)
@@ -413,7 +438,7 @@ func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64)
 	var out []recipient
 	for rows.Next() {
 		var r recipient
-		if err := rows.Scan(&r.userID, &r.channel, &r.email, &r.telegramChatID, &r.destination); err != nil {
+		if err := rows.Scan(&r.subID, &r.userID, &r.channel, &r.email, &r.telegramChatID, &r.destination); err != nil {
 			return nil, fmt.Errorf("recipients scan: %w", err)
 		}
 		out = append(out, r)
@@ -422,6 +447,44 @@ func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64)
 		return nil, fmt.Errorf("recipients rows: %w", err)
 	}
 	return out, nil
+}
+
+// loadWebhookSent returns the subscription ids that already accepted this alert.
+// in: ctx, tenant tx, alert id. out: set of subscription ids, error.
+func (n *Notifier) loadWebhookSent(ctx context.Context, tx pgx.Tx, alertID int64) (map[string]struct{}, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT subscription_id::text FROM alert_webhook_deliveries WHERE alert_id = $1`, alertID)
+	if err != nil {
+		return nil, fmt.Errorf("webhook deliveries: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("webhook deliveries scan: %w", err)
+		}
+		out[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webhook deliveries rows: %w", err)
+	}
+	return out, nil
+}
+
+// markWebhookSent records one subscription so a later attempt does not POST it again.
+// in: ctx, tenant id, alert id, subscription id. out: error.
+func (n *Notifier) markWebhookSent(ctx context.Context, tenantID string, alertID int64, subID string) error {
+	err := db.WithTenant(ctx, n.db, tenantID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO alert_webhook_deliveries (alert_id, subscription_id) VALUES ($1, $2)
+			 ON CONFLICT DO NOTHING`, alertID, subID)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("record webhook delivery: %w", err)
+	}
+	return nil
 }
 
 // renderAlert builds a human-readable subject + plain text body + MIME html

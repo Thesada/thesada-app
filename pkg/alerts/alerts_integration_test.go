@@ -11,6 +11,9 @@ package alerts
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +82,91 @@ func makeDue(t *testing.T, env *servicetest.Env, alertID int64) {
 		alertID); err != nil {
 		t.Fatalf("rewind next_attempt_at: %v", err)
 	}
+}
+
+// TestDispatch_WebhookRetrySkipsTheDestinationThatSucceeded checks a failed
+// subscription is the only one posted on the next attempt.
+// in: t. out: none.
+func TestDispatch_WebhookRetrySkipsTheDestinationThatSucceeded(t *testing.T) {
+	env := servicetest.Start(t)
+	ctx := context.Background()
+	const tenant = "hook-retry"
+	devicePk, alertID := seedAlert(t, env, tenant)
+	seedWebhookSub(t, env, tenant, devicePk, "ok-hook@a.test", "https://ok.example/hook")
+	seedWebhookSub(t, env, tenant, devicePk, "bad-hook@a.test", "https://bad.example/hook")
+
+	badLeft := 1
+	var calls []string
+	env.Cfg.AlertMaxAttempts = 5
+	n := New(env.Cfg, env.Pools, nil)
+	n.webhookHTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls = append(calls, r.URL.Host)
+		code := 204
+		if r.URL.Host == "bad.example" && badLeft > 0 {
+			badLeft--
+			code = 500
+		}
+		return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	})}
+
+	if err := n.Dispatch(ctx, tenant, alertID); err != nil {
+		t.Fatal(err)
+	}
+	status, _, _, _, _ := deliveryRow(t, env, alertID)
+	if status == "delivered" {
+		t.Fatal("one failed webhook marked the alert delivered")
+	}
+	if n := countHost(calls, "ok.example"); n != 1 {
+		t.Fatalf("first pass ok.example calls = %d, want 1", n)
+	}
+
+	calls = nil
+	if err := n.Dispatch(ctx, tenant, alertID); err != nil {
+		t.Fatal(err)
+	}
+	if n := countHost(calls, "ok.example"); n != 0 {
+		t.Fatalf("retry posted the destination that already succeeded (%d)", n)
+	}
+	if n := countHost(calls, "bad.example"); n != 1 {
+		t.Fatalf("retry bad.example calls = %d, want 1", n)
+	}
+	var hook bool
+	if err := env.Super.QueryRow(ctx, `SELECT delivered_webhook FROM device_alerts WHERE id = $1`, alertID).Scan(&hook); err != nil {
+		t.Fatal(err)
+	}
+	if !hook {
+		t.Fatal("both destinations succeeded and the webhook flag stayed false")
+	}
+}
+
+// seedWebhookSub inserts one webhook subscription for the device.
+// in: t, env, tenant, device pk, email, destination. out: none.
+func seedWebhookSub(t *testing.T, env *servicetest.Env, tenant, devicePk, email, dest string) {
+	t.Helper()
+	ctx := context.Background()
+	var userID string
+	if err := env.Super.QueryRow(ctx,
+		`INSERT INTO users (tenant_id, email) VALUES ($1, $2) RETURNING id`,
+		tenant, email).Scan(&userID); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := env.Super.Exec(ctx,
+		`INSERT INTO alert_subscriptions (user_id, device_pk, channel, min_severity, destination)
+		 VALUES ($1, $2, 'webhook', 'warn', $3)`, userID, devicePk, dest); err != nil {
+		t.Fatalf("seed webhook: %v", err)
+	}
+}
+
+// countHost counts request hosts in a dispatch's webhook calls.
+// in: hosts, wanted host. out: count.
+func countHost(hosts []string, want string) int {
+	n := 0
+	for _, h := range hosts {
+		if h == want {
+			n++
+		}
+	}
+	return n
 }
 
 func TestDispatch_TenantScope(t *testing.T) {

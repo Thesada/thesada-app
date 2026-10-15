@@ -1189,9 +1189,9 @@ POSTs a JSON body (`alert_id`, `device_id`, `severity`, `code`, `message`,
 present; an alert with no code sends an empty string. `delivered_webhook`
 is the same retry flag as email and telegram, and the device-alerts JSON
 includes it beside those two flags. A later attempt does not
-post a URL that already returned success. If one of several webhook
-destinations fails, none of them is marked delivered, so the retry
-includes the one that failed. The URL must be http or https
+post a URL that already returned success. If one of several webhook destinations fails, that subscription is
+not recorded. The retry POSTs only the subscriptions that have no
+delivery row. The channel flag is set when every one has succeeded. The URL must be http or https
 with a host. Loopback, link-local, and redirects are refused. Private
 addresses are allowed so a receiver on the home network still works.
 A refused destination is not copied into the error, so a token in the
