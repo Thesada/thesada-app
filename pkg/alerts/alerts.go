@@ -214,6 +214,7 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 		}
 	}
 	var emailOK, tgOK, hookOK bool
+	hookFails := 0
 	for _, r := range recipients {
 		switch r.channel {
 		case "email":
@@ -247,11 +248,15 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 				dest = *r.destination
 			}
 			if err := n.sendWebhook(ctx, dest, hookBody); err != nil {
+				hookFails++
 				slog.Error("alert webhook failed", "alert_id", alertID, "err", err)
 				continue
 			}
-			hookOK = true
 		}
+	}
+	// One failed destination keeps the channel pending so the retry includes it.
+	if needHook && hookFails == 0 {
+		hookOK = true
 	}
 
 	attempts := row.attempts + 1

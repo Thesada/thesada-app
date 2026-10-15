@@ -129,8 +129,8 @@ func Apply(ctx context.Context, pool *pgxpool.Pool) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", name, err)
 		}
-		stripped := stripOuterTx(string(body))
-		if err := runOne(ctx, pool, version, stripped); err != nil {
+		sqlBody := string(body)
+		if err := runOne(ctx, pool, version, sqlBody); err != nil {
 			return fmt.Errorf("apply %s: %w", version, err)
 		}
 		slog.Info("migration applied", "version", version, "duration_ms", time.Since(start).Milliseconds())
@@ -203,14 +203,18 @@ func listMigrationFiles() ([]string, error) {
 	return files, nil
 }
 
-// runOne executes a single migration inside its own pgx transaction and
-// records the version on success. The caller has already stripped any
-// embedded BEGIN/COMMIT from the body so a single tx.Exec runs the whole
-// thing atomically.
-// in: ctx, pool, version tag, stripped sql body. out: error.
+// noTxMarker selects a migration that must not run inside a transaction.
+// CREATE INDEX CONCURRENTLY is the case: Postgres rejects it in a tx.
+const noTxMarker = "-- no-transaction"
+
+// runOne executes one migration and records the version on success.
+// in: ctx, pool, version tag, sql body. out: error. noTxMarker skips the transaction.
 func runOne(ctx context.Context, pool *pgxpool.Pool, version, body string) error {
+	if strings.Contains(body, noTxMarker) {
+		return runOutsideTx(ctx, pool, version, body)
+	}
 	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, body); err != nil {
+		if _, err := tx.Exec(ctx, stripOuterTx(body)); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx,
@@ -218,6 +222,18 @@ func runOne(ctx context.Context, pool *pgxpool.Pool, version, body string) error
 			 ON CONFLICT (version) DO NOTHING`, version)
 		return err
 	})
+}
+
+// runOutsideTx applies a migration that cannot sit in a transaction, then records it.
+// in: ctx, pool, version tag, sql body. out: error.
+func runOutsideTx(ctx context.Context, pool *pgxpool.Pool, version, body string) error {
+	if _, err := pool.Exec(ctx, body); err != nil {
+		return err
+	}
+	_, err := pool.Exec(ctx,
+		`INSERT INTO schema_migrations (version) VALUES ($1)
+		 ON CONFLICT (version) DO NOTHING`, version)
+	return err
 }
 
 // stripOuterTx removes lines that are exactly `BEGIN;` or `COMMIT;` (or their

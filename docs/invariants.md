@@ -1189,7 +1189,9 @@ POSTs a JSON body (`alert_id`, `device_id`, `severity`, `code`, `message`,
 present; an alert with no code sends an empty string. `delivered_webhook`
 is the same retry flag as email and telegram, and the device-alerts JSON
 includes it beside those two flags. A later attempt does not
-post a URL that already returned success. The URL must be http or https
+post a URL that already returned success. If one of several webhook
+destinations fails, none of them is marked delivered, so the retry
+includes the one that failed. The URL must be http or https
 with a host. Loopback, link-local, and redirects are refused. Private
 addresses are allowed so a receiver on the home network still works.
 A refused destination is not copied into the error, so a token in the
@@ -1206,7 +1208,8 @@ The offline badge and the absence sweep share a 15 minute window
 `absence` for a paired device whose `last_seen_at` is older than that
 window, and only when no absence alert has been recorded since that
 `last_seen_at`. A device that has never reported is not an absence.
-The redispatch sweeper delivers the new row. A later live sighting sets
+The redispatch sweeper delivers the new row. The open-absence lookup
+index is built concurrently so alert writes are not blocked. A later live sighting sets
 `cleared_at` on that absence row, and the alerts page shows cleared.
 Trend checks stay a pure function: a
 rise needs a per-metric delta, so nothing sweeps them.
