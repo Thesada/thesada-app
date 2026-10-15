@@ -404,18 +404,37 @@ a wrong password both return 401 (indistinguishable), and signup returns
 
 Source: `pkg/api/v1/auth.go::handleAuthLogin`, `handleAuthSignup`.
 
-### Password login asks for a TOTP code only when that account enrolled one
+### Password and magic-link logins ask for a TOTP code when that account enrolled one
 
-Magic-link and Kanidm sessions are unchanged. A password match against a
-row with `users.totp_secret` set does not create a session until the
-6-digit code checks. The JSON login returns `totp_required` until `code`
-is present and valid. The web login parks a 5-minute challenge cookie
-and finishes at `POST /login/totp`.
+A password match or a consumed magic link against a row with
+`users.totp_secret` set does not create a session until the 6-digit code
+checks. A password account turns that factor on from Settings: the page
+shows the base32 secret as an otpauth link, then stores it after the
+code matches. There is no QR image. Kanidm sign-in does not ask: that
+provider already authenticated the user, and the local factor is only
+for password and magic link.
+A lookup or secret-decode error is a failed login, not "TOTP is off"
+and not "the code was wrong". The JSON login returns `totp_required`
+until `code` is present and valid. Magic-link verify returns the same
+error plus a `challenge` token, finished at `POST /auth/totp`. The web
+login parks a 5-minute challenge cookie and finishes at `POST /login/totp`.
+A web finish that cannot decode the secret returns HTTP 500. An expired
+challenge redirects to `/login`. Password and magic-link API calls log
+`method` to `challenged`, then `challenged` to `passed` when the code
+is in the same request. Finish attempts are capped per IP. An empty IP
+is not one shared bucket.
 
-How verified: `pkg/totp/totp_test.go` checks the RFC 6238 SHA-1 vectors.
+How verified: `pkg/totp/totp_test.go` checks the RFC 6238 SHA-1 vectors
+and that a corrupt secret is an error. `pkg/service/auth_totp_test.go`
+checks that a lookup error is not treated as TOTP off, and that the IP
+cap skips an empty address. `pkg/service/auth_totp_integration_test.go`
+checks the challenge round trip: a wrong code stays `ErrBadCredentials`,
+a good code returns the user and the saved method, and a corrupt secret
+is not a wrong code. `pkg/api/v1/auth_totp_integration_test.go` and
+`pkg/web/web_totp_integration_test.go` check the HTTP contracts.
 
 Source: `pkg/totp/totp.go`, `pkg/service/auth_totp.go`,
-`pkg/web/web_totp.go`, `migrations/0032_user_totp.sql`.
+`pkg/web/web_totp.go`, `pkg/web/web_auth.go`, `migrations/0032_user_totp.sql`.
 
 ### Password verification is constant-time across account existence
 
@@ -1160,6 +1179,39 @@ redispatch, no-double-send on partial channel failure).
 
 Source: `pkg/alerts/alerts.go::Dispatch`, `pkg/alerts/redispatch.go`,
 migration `0025_alert_delivery_retry.sql`.
+
+### A webhook is posted once per alert, and not at a loopback address
+
+A subscription with channel `webhook` is a third delivery channel. Dispatch
+POSTs a JSON body (`alert_id`, `device_id`, `severity`, `code`, `message`,
+`received_at`) to `alert_subscriptions.destination`. `code` is always
+present; an alert with no code sends an empty string. `delivered_webhook`
+is the same retry flag as email and telegram, and the device-alerts JSON
+includes it beside those two flags. A later attempt does not
+post a URL that already returned success. The URL must be http or https
+with a host. Loopback, link-local, and redirects are refused. Private
+addresses are allowed so a receiver on the home network still works.
+
+How verified: `pkg/alerts/webhook_test.go`, `pkg/service/notify_channel_test.go`.
+
+Source: `pkg/alerts/webhook.go`, migration `0035_alert_delivered_webhook.sql`.
+
+### A paired device that goes quiet raises one absence alert per stretch
+
+The offline badge and the absence sweep share a 15 minute window
+(`service.AbsenceWindow`). Each pass inserts one `warn` alert with code
+`absence` for a paired device whose `last_seen_at` is older than that
+window, and only when no absence alert has been recorded since that
+`last_seen_at`. A device that has never reported is not an absence.
+The redispatch sweeper delivers the new row. A later live sighting sets
+`cleared_at` on that absence row, and the alerts page shows cleared.
+Trend checks stay a pure function: a
+rise needs a per-metric delta, so nothing sweeps them.
+
+How verified: `pkg/service/alert_rules_test.go`.
+
+Source: `pkg/service/absence_sweep.go`, `pkg/service/alert_rules.go`,
+`pkg/service/device.go`, migration `0036_absence_cleared.sql`.
 
 ### A failed alert insert retries bounded, then dead-letters to the log
 

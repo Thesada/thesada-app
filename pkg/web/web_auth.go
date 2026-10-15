@@ -22,10 +22,9 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "login.html", data)
 }
 
-// handleLoginSubmit processes login: if a password is provided, verify it and
-// start a session; if the password is empty, issue a magic link and email it.
-// in: writer, POST form (email, password). out: 302 to /devices on success,
-// login.html with error on failure, or login.html with "check your email".
+// handleLoginSubmit processes login: a password is checked, then a session
+// or a TOTP challenge; an empty password emails a magic link.
+// in: writer, POST form (email, password). out: 302 to /devices, /login/totp, or the form.
 func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
@@ -56,7 +55,7 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "login failed", http.StatusInternalServerError)
 			return
 		}
-		s.handleLoginSubmitPassword(w, r, u)
+		s.continueLocalLogin(w, r, u, "password")
 		return
 	}
 
@@ -68,8 +67,8 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "login.html", map[string]interface{}{"Sent": true, "Email": email})
 }
 
-// handleMagicLinkVerify consumes a magic link token from the URL and starts a session.
-// in: writer, request with ?token=. out: 302 to /devices or login.html with error.
+// handleMagicLinkVerify consumes a magic link, then a session or a TOTP challenge.
+// in: writer, request with ?token=. out: 302 to /devices or /login/totp, or the login form.
 func (s *Server) handleMagicLinkVerify(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	if token == "" {
@@ -90,8 +89,8 @@ func (s *Server) handleMagicLinkVerify(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "login failed", http.StatusInternalServerError)
 		return
 	}
-	s.startSession(w, r, u, "magic_link")
-	http.Redirect(w, r, "/devices", http.StatusFound)
+	// Magic link is a local login, so an enrolled TOTP secret still challenges.
+	s.continueLocalLogin(w, r, u, "magic_link")
 }
 
 // handleLogout revokes the current session and clears the cookie.

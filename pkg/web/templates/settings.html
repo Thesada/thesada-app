@@ -80,7 +80,7 @@
   {{if .HasPassword}}
   <h2 class="text-lg font-medium mb-2">Authenticator</h2>
   <p class="text-sm text-slate-500 mb-4">
-    Password sign-in asks for a 6 digit code. Magic links and Kanidm do not.
+    Password sign-in and magic links ask for a 6 digit code. Kanidm does not.
   </p>
   {{if .TOTPError}}
   <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">That code is not valid.</div>
@@ -115,7 +115,7 @@
 
   <h2 class="text-lg font-medium mb-2">Alert notifications</h2>
   <p class="text-sm text-slate-500 mb-4">
-    Subscribe to receive alerts via email or Telegram. Applies to all devices in your tenant.
+    Subscribe to receive alerts by email, Telegram, or an http(s) webhook.
   </p>
 
   {{if eq .SavedSection "notifications"}}
@@ -167,7 +167,13 @@
       <select name="channel" class="text-sm border border-slate-300 rounded px-2 py-1">
         <option value="email">Email</option>
         <option value="telegram">Telegram</option>
+        <option value="webhook">Webhook</option>
       </select>
+    </div>
+    <div>
+      <label class="block text-xs font-medium mb-1">Webhook URL</label>
+      <input type="url" name="destination" placeholder="https://example/hook"
+             class="text-sm border border-slate-300 rounded px-2 py-1">
     </div>
     <div>
       <label class="block text-xs font-medium mb-1">Min severity</label>

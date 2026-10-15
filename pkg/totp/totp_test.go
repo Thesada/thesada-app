@@ -1,6 +1,7 @@
 package totp
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,7 +44,7 @@ func TestVerifyAcceptsOneStepSkew(t *testing.T) {
 	}
 }
 
-func TestNewKeyRoundTrip(t *testing.T) {
+func TestNewKey_DecodesToTheSameKeyAndVerifies(t *testing.T) {
 	raw, encoded, err := NewKey()
 	if err != nil {
 		t.Fatal(err)
@@ -58,5 +59,34 @@ func TestNewKeyRoundTrip(t *testing.T) {
 	at := time.Unix(1_700_000_000, 0)
 	if !Verify(raw, Code(raw, at), at) {
 		t.Fatal("fresh key did not verify")
+	}
+}
+
+func TestCheck_CorruptSecretIsError(t *testing.T) {
+	_, err := Check("!!!", "000000", time.Unix(0, 0))
+	if err == nil {
+		t.Fatal("corrupt secret was treated as a rejected code")
+	}
+	if got := err.Error(); got == "illegal base32 data at input byte 0" || !strings.HasPrefix(got, "totp: decode secret:") {
+		t.Fatalf("decode error = %q, want one totp: prefix", got)
+	}
+}
+
+func TestCheck_WrongCodeIsFalse(t *testing.T) {
+	raw, encoded, err := NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(59, 0)
+	ok, err := Check(encoded, "000000", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if Code(raw, at) != "000000" && ok {
+		t.Fatal("wrong code was accepted")
+	}
+	ok, err = Check(encoded, Code(raw, at), at)
+	if err != nil || !ok {
+		t.Fatalf("good code ok=%v err=%v", ok, err)
 	}
 }

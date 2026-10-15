@@ -161,6 +161,7 @@ func main() {
 	mail := mailer.New(cfg)
 	notifier := alerts.New(cfg, pools, mail)
 	notifier.StartRedispatcher(rootCtx)
+	services.Alerts.StartAbsenceSweep(rootCtx)
 
 	// Unclaimed enrollment rows are the one thing in this schema an
 	// unauthenticated caller can create, so they need a sweep of their own.

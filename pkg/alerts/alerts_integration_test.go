@@ -136,7 +136,7 @@ func TestDispatch_TenantScope(t *testing.T) {
 	}
 
 	// recordOutcome ORs the per-channel flags and stamps the lifecycle.
-	if err := n.recordOutcome(ctx, "acme", alertID, true, false, "delivered", 1, time.Time{}); err != nil {
+	if err := n.recordOutcome(ctx, "acme", alertID, deliveryFlags{email: true}, "delivered", 1, time.Time{}); err != nil {
 		t.Fatalf("recordOutcome: %v", err)
 	}
 	status, attempts, email, tg, _ := deliveryRow(t, env, alertID)

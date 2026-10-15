@@ -64,7 +64,7 @@ func (s *DeviceService) BumpSeenIfExists(tenantID, deviceID string) (uuid.UUID, 
 			return err
 		}
 		found = true
-		return nil
+		return clearOpenAbsence(context.Background(), tx, id)
 	})
 	if werr != nil {
 		return uuid.Nil, false, werr
@@ -112,7 +112,13 @@ func (s *DeviceService) upsertCore(tenantID, deviceID, displayName, firmwareVers
 		if err := quotaAllowDevice(context.Background(), tx, tenantID, deviceID, max); err != nil {
 			return err
 		}
-		return tx.QueryRow(context.Background(), query, tenantID, deviceID, displayName, firmwareVersion, hardwareType, mqttTopicPrefix).Scan(&id)
+		if err := tx.QueryRow(context.Background(), query, tenantID, deviceID, displayName, firmwareVersion, hardwareType, mqttTopicPrefix).Scan(&id); err != nil {
+			return err
+		}
+		if bumpSeen {
+			return clearOpenAbsence(context.Background(), tx, id)
+		}
+		return nil
 	})
 	return id, err
 }

@@ -76,6 +76,10 @@ func TestLayoutInstallTags(t *testing.T) {
 		`name="theme-color"`,
 		`name="viewport"`,
 		`apple-mobile-web-app-capable`,
+		`viewport-fit=cover`,
+		`safe-area-inset-top`,
+		`safe-area-inset-bottom`,
+		`fixed bottom-0`,
 		`serviceWorker.register("/sw.js")`,
 	} {
 		if !strings.Contains(body, need) {

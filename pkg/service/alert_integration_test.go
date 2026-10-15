@@ -119,10 +119,10 @@ func TestAlertService(t *testing.T) {
 		pk := mustUpsert(t, dev, tA, "sub-dev", "", "", "", "")
 
 		// One device-specific + one all-devices (nil device_pk) subscription.
-		if err := al.CreateSubscription(ctx, tA, u.ID, &pk, "email", "warn"); err != nil {
+		if err := al.CreateSubscription(ctx, tA, u.ID, &pk, "email", "warn", ""); err != nil {
 			t.Fatalf("CreateSubscription device: %v", err)
 		}
-		if err := al.CreateSubscription(ctx, tA, u.ID, nil, "telegram", "crit"); err != nil {
+		if err := al.CreateSubscription(ctx, tA, u.ID, nil, "telegram", "crit", ""); err != nil {
 			t.Fatalf("CreateSubscription all: %v", err)
 		}
 		subs, err := al.ListSubscriptions(ctx, tA, u.ID)

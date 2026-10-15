@@ -105,6 +105,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /auth/logout", s.handleAuthLogout)
 	s.mux.HandleFunc("POST /auth/magic-link", s.handleAuthMagicLink)
 	s.mux.HandleFunc("POST /auth/magic-link/verify", s.handleAuthMagicLinkVerify)
+	s.mux.HandleFunc("POST /auth/totp", s.handleAuthTOTP)
 	s.mux.HandleFunc("POST /auth/signup", s.handleAuthSignup)
 	s.mux.HandleFunc("GET /devices", authmw.RequireAuthJSON(s.handleDeviceList))
 	s.mux.HandleFunc("GET /devices/{id}", authmw.RequireAuthJSON(s.handleDeviceGet))

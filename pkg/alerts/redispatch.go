@@ -34,6 +34,7 @@ func (n *Notifier) StartRedispatcher(ctx context.Context) <-chan struct{} {
 		defer close(done)
 		interval := n.cfg.AlertRedispatchInterval
 		if interval <= 0 {
+			// A zero interval would spin the ticker. One minute is the floor.
 			interval = time.Minute
 		}
 		n.Sweep(ctx)

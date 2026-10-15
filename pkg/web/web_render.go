@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"thesada.app/app/pkg/service"
 )
 
 // MetricGroup is a folder in the Latest-sensors table: one metric-prefix
@@ -204,9 +206,8 @@ func intToString(v int64) string {
 // defaults to 0, so a running node is chatty and five quiet minutes is late.
 const freshnessLive = 5 * time.Minute
 
-// After this, last_seen is offline. An uptime sample older than this is
-// marked old. That mark is about the number, not whether the device is offline.
-const freshnessOffline = 15 * time.Minute
+// After this, last_seen is offline. Same bound as service.AbsenceWindow.
+const freshnessOffline = service.AbsenceWindow
 
 // freshnessState classifies last_seen_at. A nil or zero time is unknown.
 // A future timestamp is live. in: last seen, now. out: label, tailwind classes.
