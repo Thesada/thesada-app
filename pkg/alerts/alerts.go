@@ -205,9 +205,13 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 	}
 
 	subject, body, htmlBody := renderAlert(row)
-	hookBody, err := webhookPayload(alertID, row)
-	if err != nil {
-		return fmt.Errorf("webhook payload: %w", err)
+	var hookBody []byte
+	if needHook {
+		var err error
+		hookBody, err = webhookPayload(alertID, row)
+		if err != nil {
+			return fmt.Errorf("webhook payload: %w", err)
+		}
 	}
 	var emailOK, tgOK, hookOK bool
 	for _, r := range recipients {

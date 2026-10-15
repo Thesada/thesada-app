@@ -58,6 +58,39 @@ func TestFinishTOTPLoginAny_AcceptsOneGoodCodeAndReturnsTheMethod(t *testing.T) 
 	}
 }
 
+func TestFinishTOTPLoginAny_FifthWrongCodeDeletesTheChallenge(t *testing.T) {
+	env := servicetest.Start(t)
+	auth := env.Services.Auth
+	const tenant = "totp-cap"
+	env.SeedTenant(t, tenant)
+	u := mustCreateUser(t, auth, tenant, "totp-cap@a.test")
+	raw, encoded, err := totp.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.SetTOTPSecret(tenant, u.ID, encoded); err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := auth.BeginTOTPLogin(tenant, u.ID, "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := "000000"
+	if bad == totp.Code(raw, time.Now()) {
+		bad = "111111"
+	}
+	for i := 0; i < 5; i++ {
+		_, _, err = auth.FinishTOTPLoginAny(token, bad)
+		if !errors.Is(err, service.ErrBadCredentials) {
+			t.Fatalf("wrong code %d = %v, want ErrBadCredentials", i+1, err)
+		}
+	}
+	_, _, err = auth.FinishTOTPLoginAny(token, totp.Code(raw, time.Now()))
+	if !errors.Is(err, service.ErrExpired) {
+		t.Fatalf("after the cap = %v, want ErrExpired", err)
+	}
+}
+
 func TestFinishTOTPLoginAny_CorruptSecretIsNotABadCode(t *testing.T) {
 	env := servicetest.Start(t)
 	auth := env.Services.Auth

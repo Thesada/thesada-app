@@ -16,6 +16,9 @@ import (
 
 const totpChallengeLifetime = 5 * time.Minute
 
+// totpMaxWrongCodes deletes the challenge. A new IP must not reset the count.
+const totpMaxWrongCodes = 5
+
 // TOTPRequired reports whether this lookup must challenge before a session.
 // A lookup error is not "off".
 // in: secret, enrolled flag, lookup error. out: challenge required, error.
@@ -120,6 +123,7 @@ func (s *AuthService) FinishTOTPLoginAny(token, code string) (*User, string, err
 	var u User
 	var secret *string
 	var method string
+	var rejected bool
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "auth.finish_totp_login", func(tx pgx.Tx) error {
 		scanErr := tx.QueryRow(ctx, q, hash[:]).Scan(
 			&u.ID, &u.TenantID, &u.Email, &u.DisplayName, &u.TelegramChatID,
@@ -131,18 +135,24 @@ func (s *AuthService) FinishTOTPLoginAny(token, code string) (*User, string, err
 			return scanErr
 		}
 		if secret == nil || *secret == "" {
-			return ErrBadCredentials
+			rejected = true
+			_, execErr := tx.Exec(ctx, `DELETE FROM totp_challenges WHERE token_hash = $1`, hash[:])
+			return execErr
 		}
 		ok, checkErr := MatchTOTP(*secret, code)
 		if checkErr != nil {
 			return checkErr
 		}
 		if !ok {
-			return ErrBadCredentials
+			rejected = true
+			return noteWrongTOTP(ctx, tx, hash[:])
 		}
 		_, execErr := tx.Exec(ctx, `DELETE FROM totp_challenges WHERE token_hash = $1`, hash[:])
 		return execErr
 	})
+	if rejected && err == nil {
+		return nil, "", ErrBadCredentials
+	}
 	if errors.Is(err, ErrExpired) || errors.Is(err, ErrBadCredentials) {
 		return nil, "", err
 	}
@@ -150,6 +160,25 @@ func (s *AuthService) FinishTOTPLoginAny(token, code string) (*User, string, err
 		return nil, "", fmt.Errorf("auth: finish totp: %w", err)
 	}
 	return &u, method, nil
+}
+
+// noteWrongTOTP counts a rejected code and deletes the challenge at the cap.
+// in: ctx, tx, token hash. out: error. The count must commit, so this returns nil on a wrong code.
+func noteWrongTOTP(ctx context.Context, tx pgx.Tx, hash []byte) error {
+	var n int
+	err := tx.QueryRow(ctx, `
+		UPDATE totp_challenges
+		   SET attempts = attempts + 1
+		 WHERE token_hash = $1
+		RETURNING attempts`, hash).Scan(&n)
+	if err != nil {
+		return err
+	}
+	if n < totpMaxWrongCodes {
+		return nil
+	}
+	_, err = tx.Exec(ctx, `DELETE FROM totp_challenges WHERE token_hash = $1`, hash)
+	return err
 }
 
 // MatchTOTP reports whether code matches an enrolled base32 secret.

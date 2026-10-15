@@ -5,8 +5,10 @@
 ALTER TABLE alert_subscriptions DROP CONSTRAINT alert_subscriptions_channel_check;
 ALTER TABLE alert_subscriptions
     ADD CONSTRAINT alert_subscriptions_channel_check
-    CHECK (channel IN ('email', 'telegram', 'webhook'));
+    CHECK (channel IN ('email', 'telegram', 'webhook')) NOT VALID;
+ALTER TABLE alert_subscriptions VALIDATE CONSTRAINT alert_subscriptions_channel_check;
 ALTER TABLE alert_subscriptions ADD COLUMN destination TEXT;
 ALTER TABLE alert_subscriptions
     ADD CONSTRAINT alert_subscriptions_webhook_dest
-    CHECK (channel <> 'webhook' OR destination IS NOT NULL);
+    CHECK (channel <> 'webhook' OR destination IS NOT NULL) NOT VALID;
+ALTER TABLE alert_subscriptions VALIDATE CONSTRAINT alert_subscriptions_webhook_dest;

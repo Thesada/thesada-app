@@ -9,7 +9,8 @@ CREATE TABLE totp_challenges (
     token_hash BYTEA PRIMARY KEY,
     user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     expires_at TIMESTAMPTZ NOT NULL,
-    method     TEXT NOT NULL
+    method     TEXT NOT NULL,
+    attempts   INT NOT NULL DEFAULT 0
 );
 
 ALTER TABLE totp_challenges ENABLE ROW LEVEL SECURITY;
@@ -26,4 +27,5 @@ CREATE POLICY p_totp_challenges_tenant ON totp_challenges
 
 -- Created after the blanket grant in 0001. The finish path reads this
 -- table as thesada_app_admin. The begin path writes it as thesada_app.
-GRANT SELECT, INSERT, DELETE ON totp_challenges TO thesada_app, thesada_app_admin;
+GRANT SELECT, INSERT, DELETE ON totp_challenges TO thesada_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON totp_challenges TO thesada_app_admin;

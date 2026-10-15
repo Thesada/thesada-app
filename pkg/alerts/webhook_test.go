@@ -2,8 +2,10 @@ package alerts
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +41,14 @@ func TestSendWebhook_BodyCarriesTheAlertFields(t *testing.T) {
 		if !strings.Contains(gotBody, want) {
 			t.Fatalf("body %s missing %s", gotBody, want)
 		}
+	}
+}
+
+func TestWebhookErr_DropsTheDestination(t *testing.T) {
+	inner := errors.New("connection refused")
+	got := webhookErr(&url.Error{Op: "Post", URL: "https://hooks.example/secret-token", Err: inner})
+	if got != inner || strings.Contains(got.Error(), "secret-token") {
+		t.Fatalf("err = %v", got)
 	}
 }
 

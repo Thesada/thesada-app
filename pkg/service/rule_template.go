@@ -44,14 +44,13 @@ var ErrTemplateName = errors.New("invalid template name")
 // ErrTemplateWorkspace means Save was called without workspace JSON.
 var ErrTemplateWorkspace = errors.New("workspace required")
 
-// List returns template names and hashes in name order, capped at 50.
+// List returns template names and hashes in name order.
 // in: ctx, tenant id. out: templates, error.
 func (s *RuleTemplateService) List(ctx context.Context, tenantID string) ([]RuleTemplate, error) {
 	const query = `
 		SELECT name, lua_sha256
 		FROM rule_templates
-		ORDER BY name
-		LIMIT 50`
+		ORDER BY name`
 	var out []RuleTemplate
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, query)

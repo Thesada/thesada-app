@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"thesada.app/app/pkg/service"
@@ -36,11 +37,15 @@ func dialWebhookAddr(ctx context.Context, network, addr string) (net.Conn, error
 		}
 	}
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
-	if err != nil {
-		return nil, fmt.Errorf("webhook dial %s: %w", host, err)
+	var lastErr error
+	for _, ip := range ips {
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
 	}
-	return conn, nil
+	return nil, fmt.Errorf("webhook dial %s: %w", host, lastErr)
 }
 
 // newWebhookClient refuses redirects and link-local or loopback addresses.
@@ -60,20 +65,20 @@ func newWebhookClient() *http.Client {
 // in: ctx, destination URL, JSON body. out: error.
 func (n *Notifier) sendWebhook(ctx context.Context, dest string, payload []byte) error {
 	if !service.ValidWebhookURL(dest) {
-		return fmt.Errorf("webhook url refused: %s", dest)
+		return errors.New("webhook url refused")
 	}
 	if n.webhookHTTP == nil {
 		return fmt.Errorf("webhook client not configured")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, dest, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("webhook request: %w", err)
+		return fmt.Errorf("webhook request: %w", webhookErr(err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "thesada-app")
 	resp, err := n.webhookHTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("webhook post: %w", err)
+		return fmt.Errorf("webhook post: %w", webhookErr(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
@@ -81,6 +86,16 @@ func (n *Notifier) sendWebhook(ctx context.Context, dest string, payload []byte)
 		return fmt.Errorf("webhook status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// webhookErr drops the URL a client error would otherwise carry into the log.
+// in: error from net/http. out: the same failure without the destination.
+func webhookErr(err error) error {
+	var uerr *url.Error
+	if errors.As(err, &uerr) && uerr.Err != nil {
+		return uerr.Err
+	}
+	return err
 }
 
 // webhookPayload is the JSON body posted to a subscription URL.

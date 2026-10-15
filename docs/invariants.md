@@ -421,8 +421,9 @@ login parks a 5-minute challenge cookie and finishes at `POST /login/totp`.
 A web finish that cannot decode the secret returns HTTP 500. An expired
 challenge redirects to `/login`. Password and magic-link API calls log
 `method` to `challenged`, then `challenged` to `passed` when the code
-is in the same request. Finish attempts are capped per IP. An empty IP
-is not one shared bucket.
+is in the same request. Finish attempts are capped per IP, and five wrong codes delete that
+challenge so a new address cannot reset the count. An empty IP
+is not one shared bucket. The challenge and setup cookies set Secure.
 
 How verified: `pkg/totp/totp_test.go` checks the RFC 6238 SHA-1 vectors
 and that a corrupt secret is an error. `pkg/service/auth_totp_test.go`
@@ -1191,6 +1192,8 @@ includes it beside those two flags. A later attempt does not
 post a URL that already returned success. The URL must be http or https
 with a host. Loopback, link-local, and redirects are refused. Private
 addresses are allowed so a receiver on the home network still works.
+A refused destination is not copied into the error, so a token in the
+URL does not land in the log.
 
 How verified: `pkg/alerts/webhook_test.go`, `pkg/service/notify_channel_test.go`.
 

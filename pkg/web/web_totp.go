@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"thesada.app/app/pkg/authmw"
-	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/service"
 	"thesada.app/app/pkg/totp"
 )
@@ -38,10 +37,9 @@ func (s *Server) continueLocalLogin(w http.ResponseWriter, r *http.Request, u *s
 		http.Error(w, "login failed", http.StatusInternalServerError)
 		return
 	}
-	secure := httpsec.RequestIsSecure(r, s.cfg.TrustedProxies)
 	http.SetCookie(w, &http.Cookie{
 		Name: totpPendingCookie, Value: token, Path: "/login",
-		Expires: expires, HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
+		Expires: expires, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
 	})
 	slog.Info("auth.totp.state_change",
 		"from", method, "to", "challenged",
@@ -85,16 +83,16 @@ func (s *Server) handleTOTPSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, service.ErrExpired) {
-			s.clearTOTPCookie(w, r, totpPendingCookie, "/login")
+			s.clearTOTPCookie(w, totpPendingCookie, "/login")
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
 		slog.Error("auth.totp.finish_failed", "err", err)
-		s.clearTOTPCookie(w, r, totpPendingCookie, "/login")
+		s.clearTOTPCookie(w, totpPendingCookie, "/login")
 		http.Error(w, "login failed", http.StatusInternalServerError)
 		return
 	}
-	s.clearTOTPCookie(w, r, totpPendingCookie, "/login")
+	s.clearTOTPCookie(w, totpPendingCookie, "/login")
 	slog.Info("auth.totp.state_change",
 		"from", "challenged", "to", "passed",
 		"user_id", u.ID, "tenant", u.TenantID, "method", method)
@@ -124,11 +122,10 @@ func (s *Server) handleTOTPBegin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not start authenticator setup", http.StatusInternalServerError)
 		return
 	}
-	secure := httpsec.RequestIsSecure(r, s.cfg.TrustedProxies)
 	http.SetCookie(w, &http.Cookie{
 		Name: totpSetupCookie, Value: encoded, Path: "/settings",
 		Expires:  time.Now().Add(10 * time.Minute),
-		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
 	})
 	slog.Info("auth.totp.state_change",
 		"from", "off", "to", "pending",
@@ -167,7 +164,7 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not save authenticator", http.StatusInternalServerError)
 		return
 	}
-	s.clearTOTPCookie(w, r, totpSetupCookie, "/settings")
+	s.clearTOTPCookie(w, totpSetupCookie, "/settings")
 	slog.Info("auth.totp.state_change",
 		"from", "pending", "to", "on",
 		"user_id", u.ID, "tenant", u.TenantID)
@@ -233,12 +230,11 @@ func (s *Server) localAccount(w http.ResponseWriter, u *service.User) bool {
 }
 
 // clearTOTPCookie expires one TOTP cookie on path.
-// in: writer, request, cookie name, path. out: Set-Cookie.
-func (s *Server) clearTOTPCookie(w http.ResponseWriter, r *http.Request, name, path string) {
-	secure := httpsec.RequestIsSecure(r, s.cfg.TrustedProxies)
+// in: writer, cookie name, path. out: Set-Cookie.
+func (s *Server) clearTOTPCookie(w http.ResponseWriter, name, path string) {
 	http.SetCookie(w, &http.Cookie{
 		Name: name, Value: "", Path: path, MaxAge: -1,
-		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
 	})
 }
 
