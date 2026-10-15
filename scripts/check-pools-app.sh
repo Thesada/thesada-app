@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# allow-long-comment
 # check-pools-app.sh - guard against new tenant-unscoped DB callers.
 #
 # Locks in the "every read against pools.App is tenant-scoped through
@@ -30,35 +31,54 @@ fi
 
 pattern='pools\.App\.(Query|QueryRow|Exec|Begin|SendBatch|CopyFrom|BeginTx)'
 
-# Files containing the pattern, excluding *_test.go and vendor/.
-mapfile -t HITS < <(
+# read_lines fills an array from stdin. macOS bash 3.2 has no mapfile.
+# in: array name. out: that array, one element per non-empty line.
+read_lines() {
+  local _out="$1"
+  local line
+  eval "$_out=()"
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    eval "$_out+=(\"\$line\")"
+  done
+}
+
+read_lines HITS < <(
   grep -REln "$pattern" --include='*.go' . \
     | sed 's|^\./||' \
     | grep -Ev '(^|/)vendor/' \
     | grep -Ev '_test\.go$' \
-    | sort -u
+    | sort -u \
+    || true
 )
 
-# Parse allowlist: exact paths or directory prefixes (lines ending in /).
-mapfile -t EXACT < <(grep -Ev '^\s*(#|$)' "$ALLOWLIST" | grep -v '/$' || true)
-mapfile -t PREFIX < <(grep -Ev '^\s*(#|$)' "$ALLOWLIST" | grep '/$' || true)
+read_lines EXACT < <(grep -Ev '^\s*(#|$)' "$ALLOWLIST" | grep -v '/$' || true)
+read_lines PREFIX < <(grep -Ev '^\s*(#|$)' "$ALLOWLIST" | grep '/$' || true)
 
 is_allowed() {
   local f="$1"
   local e p
-  for e in "${EXACT[@]:-}"; do
-    [ "$f" = "$e" ] && return 0
-  done
-  for p in "${PREFIX[@]:-}"; do
-    case "$f" in
-      "$p"*) return 0;;
-    esac
-  done
+  if [ "${#EXACT[@]}" -gt 0 ]; then
+    for e in "${EXACT[@]}"; do
+      [ "$f" = "$e" ] && return 0
+    done
+  fi
+  if [ "${#PREFIX[@]}" -gt 0 ]; then
+    for p in "${PREFIX[@]}"; do
+      case "$f" in
+        "$p"*) return 0;;
+      esac
+    done
+  fi
   return 1
 }
 
 violations=0
-for f in "${HITS[@]:-}"; do
+if [ "${#HITS[@]}" -eq 0 ]; then
+  echo "check-pools-app.sh: ok (0 grandfathered files unchanged)"
+  exit 0
+fi
+for f in "${HITS[@]}"; do
   [ -z "$f" ] && continue
   if ! is_allowed "$f"; then
     if [ "$violations" -eq 0 ]; then
