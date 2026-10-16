@@ -21,6 +21,7 @@ type AlertSubscription struct {
 	UserID      uuid.UUID  `json:"user_id"`
 	DevicePK    *uuid.UUID `json:"device_pk"`
 	Channel     string     `json:"channel"`
+	Destination *string    `json:"destination,omitempty"`
 	MinSeverity string     `json:"min_severity"`
 	CreatedAt   time.Time  `json:"created_at"`
 }
@@ -83,7 +84,7 @@ func (s *AlertService) InsertAlert(ctx context.Context, tenantID string, deviceP
 // in: ctx, tenantID, device_pk, severity (optional), limit. out: []device_alerts rows.
 func (s *AlertService) RecentAlerts(ctx context.Context, tenantID string, devicePk uuid.UUID, severity string, limit int) ([]device_alerts, error) {
 	query := `
-		SELECT id, device_pk, received_at, severity, code, message, raw, delivered_email, delivered_telegram
+		SELECT id, device_pk, received_at, severity, code, message, raw, delivered_email, delivered_telegram, delivered_webhook
 		FROM device_alerts WHERE device_pk = $1`
 	args := []interface{}{devicePk}
 	if severity != "" {
@@ -102,7 +103,7 @@ func (s *AlertService) RecentAlerts(ctx context.Context, tenantID string, device
 		defer rows.Close()
 		for rows.Next() {
 			var a device_alerts
-			if err := rows.Scan(&a.ID, &a.DevicePK, &a.ReceivedAt, &a.Severity, &a.Code, &a.Message, &a.Raw, &a.DeliveredEmail, &a.DeliveredTelegram); err != nil {
+			if err := rows.Scan(&a.ID, &a.DevicePK, &a.ReceivedAt, &a.Severity, &a.Code, &a.Message, &a.Raw, &a.DeliveredEmail, &a.DeliveredTelegram, &a.DeliveredWebhook); err != nil {
 				return err
 			}
 			alerts = append(alerts, a)
@@ -120,7 +121,7 @@ func (s *AlertService) RecentAlerts(ctx context.Context, tenantID string, device
 // in: ctx, tenant_id, limit. out: rows with embedded device_id and device_pk.
 func (s *AlertService) RecentByTenant(ctx context.Context, tenantID string, limit int) ([]TenantAlertRow, error) {
 	const query = `
-		SELECT a.id, a.device_pk, d.device_id, a.received_at, a.severity, a.code, a.message
+		SELECT a.id, a.device_pk, d.device_id, a.received_at, a.severity, a.code, a.message, a.cleared_at
 		FROM device_alerts a
 		JOIN devices d ON d.id = a.device_pk
 		WHERE d.tenant_id = $1
@@ -136,7 +137,7 @@ func (s *AlertService) RecentByTenant(ctx context.Context, tenantID string, limi
 		defer rows.Close()
 		for rows.Next() {
 			var r TenantAlertRow
-			if err := rows.Scan(&r.ID, &r.DevicePK, &r.DeviceID, &r.ReceivedAt, &r.Severity, &r.Code, &r.Message); err != nil {
+			if err := rows.Scan(&r.ID, &r.DevicePK, &r.DeviceID, &r.ReceivedAt, &r.Severity, &r.Code, &r.Message, &r.ClearedAt); err != nil {
 				return err
 			}
 			out = append(out, r)
@@ -155,7 +156,7 @@ func (s *AlertService) RecentByTenant(ctx context.Context, tenantID string, limi
 // in: ctx, tenantID, user_id. out: []AlertSubscription.
 func (s *AlertService) ListSubscriptions(ctx context.Context, tenantID string, userID uuid.UUID) ([]AlertSubscription, error) {
 	const query = `
-		SELECT id, user_id, device_pk, channel, min_severity, created_at
+		SELECT id, user_id, device_pk, channel, destination, min_severity, created_at
 		FROM alert_subscriptions WHERE user_id = $1 ORDER BY created_at`
 	var out []AlertSubscription
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
@@ -167,7 +168,7 @@ func (s *AlertService) ListSubscriptions(ctx context.Context, tenantID string, u
 		for rows.Next() {
 			var sub AlertSubscription
 			if err := rows.Scan(&sub.ID, &sub.UserID, &sub.DevicePK, &sub.Channel,
-				&sub.MinSeverity, &sub.CreatedAt); err != nil {
+				&sub.Destination, &sub.MinSeverity, &sub.CreatedAt); err != nil {
 				return err
 			}
 			out = append(out, sub)
@@ -181,14 +182,25 @@ func (s *AlertService) ListSubscriptions(ctx context.Context, tenantID string, u
 }
 
 // CreateSubscription creates a new alert subscription. Tenant-scoped via WithTenant.
-// in: ctx, tenantID, user_id, device_pk (nil=all devices), channel, min_severity. out: error.
-func (s *AlertService) CreateSubscription(ctx context.Context, tenantID string, userID uuid.UUID, devicePK *uuid.UUID, channel, minSeverity string) error {
-	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+// in: ctx, tenantID, user id, device pk, channel, min severity, destination. out: error.
+func (s *AlertService) CreateSubscription(ctx context.Context, tenantID string, userID uuid.UUID, devicePK *uuid.UUID, channel, minSeverity, destination string) error {
+	if err := WebhookDestinationError(channel, destination); err != nil {
+		return err
+	}
+	var dest any
+	if destination != "" {
+		dest = destination
+	}
+	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO alert_subscriptions (user_id, device_pk, channel, min_severity)
-			 VALUES ($1, $2, $3, $4)`, userID, devicePK, channel, minSeverity)
+			`INSERT INTO alert_subscriptions (user_id, device_pk, channel, min_severity, destination)
+			 VALUES ($1, $2, $3, $4, $5)`, userID, devicePK, channel, minSeverity, dest)
 		return err
 	})
+	if err != nil {
+		return fmt.Errorf("create subscription: %w", err)
+	}
+	return nil
 }
 
 // DeleteSubscription removes an alert subscription owned by a user.

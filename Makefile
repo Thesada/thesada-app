@@ -9,7 +9,8 @@ TAILWIND_VERSION ?= v4.2.2
 BIN := bin/thesada-app
 
 # Detect host OS/arch for the tailwind standalone CLI download URL.
-TAILWIND_OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+# The release asset is named macos, not darwin.
+TAILWIND_OS := $(shell uname -s | tr '[:upper:]' '[:lower:]' | sed 's/^darwin$$/macos/')
 TAILWIND_ARCH_RAW := $(shell uname -m)
 TAILWIND_ARCH := $(if $(filter x86_64,$(TAILWIND_ARCH_RAW)),x64,$(if $(filter aarch64 arm64,$(TAILWIND_ARCH_RAW)),arm64,$(TAILWIND_ARCH_RAW)))
 TAILWIND_URL := https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/tailwindcss-$(TAILWIND_OS)-$(TAILWIND_ARCH)

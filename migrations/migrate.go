@@ -12,9 +12,11 @@ package migrations
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -129,8 +131,8 @@ func Apply(ctx context.Context, pool *pgxpool.Pool) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", name, err)
 		}
-		stripped := stripOuterTx(string(body))
-		if err := runOne(ctx, pool, version, stripped); err != nil {
+		sqlBody := string(body)
+		if err := runOne(ctx, pool, version, sqlBody); err != nil {
 			return fmt.Errorf("apply %s: %w", version, err)
 		}
 		slog.Info("migration applied", "version", version, "duration_ms", time.Since(start).Milliseconds())
@@ -203,14 +205,18 @@ func listMigrationFiles() ([]string, error) {
 	return files, nil
 }
 
-// runOne executes a single migration inside its own pgx transaction and
-// records the version on success. The caller has already stripped any
-// embedded BEGIN/COMMIT from the body so a single tx.Exec runs the whole
-// thing atomically.
-// in: ctx, pool, version tag, stripped sql body. out: error.
+// noTxMarker selects a migration that must not run inside a transaction.
+// CREATE INDEX CONCURRENTLY is the case: Postgres rejects it in a tx.
+const noTxMarker = "-- no-transaction"
+
+// runOne executes one migration and records the version on success.
+// in: ctx, pool, version tag, sql body. out: error. noTxMarker skips the transaction.
 func runOne(ctx context.Context, pool *pgxpool.Pool, version, body string) error {
+	if strings.Contains(body, noTxMarker) {
+		return runOutsideTx(ctx, pool, version, body)
+	}
 	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, body); err != nil {
+		if _, err := tx.Exec(ctx, stripOuterTx(body)); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx,
@@ -218,6 +224,87 @@ func runOne(ctx context.Context, pool *pgxpool.Pool, version, body string) error
 			 ON CONFLICT (version) DO NOTHING`, version)
 		return err
 	})
+}
+
+// concurrentIndexName matches CREATE INDEX CONCURRENTLY [IF NOT EXISTS] name.
+var concurrentIndexName = regexp.MustCompile(`(?i)CREATE\s+INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)`)
+
+// runOutsideTx applies a migration that cannot sit in a transaction, then records it.
+// in: ctx, pool, version tag, sql body. out: error. An invalid concurrent index is dropped first.
+func runOutsideTx(ctx context.Context, pool *pgxpool.Pool, version, body string) error {
+	names := concurrentIndexNames(body)
+	for _, name := range names {
+		if err := dropInvalidIndex(ctx, pool, name); err != nil {
+			return err
+		}
+	}
+	if _, err := pool.Exec(ctx, body); err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := requireValidIndex(ctx, pool, name); err != nil {
+			return err
+		}
+	}
+	_, err := pool.Exec(ctx,
+		`INSERT INTO schema_migrations (version) VALUES ($1)
+		 ON CONFLICT (version) DO NOTHING`, version)
+	return err
+}
+
+// concurrentIndexNames returns the index names a concurrent build creates.
+// in: sql body. out: names.
+func concurrentIndexNames(body string) []string {
+	matches := concurrentIndexName.FindAllStringSubmatch(body, -1)
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// dropInvalidIndex removes a failed CREATE INDEX CONCURRENTLY leftover.
+// in: ctx, pool, index name. out: error.
+func dropInvalidIndex(ctx context.Context, pool *pgxpool.Pool, name string) error {
+	var invalid bool
+	err := pool.QueryRow(ctx, `
+		SELECT NOT i.indisvalid
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		JOIN pg_index i ON i.indexrelid = c.oid
+		WHERE n.nspname = 'public' AND c.relname = $1`, name).Scan(&invalid)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("index %s validity: %w", name, err)
+	}
+	if !invalid {
+		return nil
+	}
+	if _, err := pool.Exec(ctx, "DROP INDEX CONCURRENTLY IF EXISTS "+name); err != nil {
+		return fmt.Errorf("drop invalid index %s: %w", name, err)
+	}
+	return nil
+}
+
+// requireValidIndex refuses to record a migration whose index build did not finish.
+// in: ctx, pool, index name. out: error.
+func requireValidIndex(ctx context.Context, pool *pgxpool.Pool, name string) error {
+	var valid bool
+	err := pool.QueryRow(ctx, `
+		SELECT i.indisvalid
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		JOIN pg_index i ON i.indexrelid = c.oid
+		WHERE n.nspname = 'public' AND c.relname = $1`, name).Scan(&valid)
+	if err != nil {
+		return fmt.Errorf("index %s missing after build: %w", name, err)
+	}
+	if !valid {
+		return fmt.Errorf("index %s is invalid", name)
+	}
+	return nil
 }
 
 // stripOuterTx removes lines that are exactly `BEGIN;` or `COMMIT;` (or their

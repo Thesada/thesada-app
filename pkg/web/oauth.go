@@ -143,6 +143,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	// --- sign-in flow: existing link first ------------------------------
 	if u, err := s.services.OAuth.FindUserByIdentity(ctx, p.Row.ID, claims.Subject); err == nil {
+		// Kanidm already authenticated this user. Local TOTP applies to password and magic link only.
 		s.startSession(w, r, u, "oidc")
 		http.Redirect(w, r, safeReturn(pending.ReturnTo, "/devices"), http.StatusFound)
 		return
@@ -163,6 +164,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 				slog.Info("oauth.identity.state_change",
 					"from", "unlinked", "to", "linked",
 					"user_id", u.ID, "tenant", u.TenantID, "provider", p.Row.Slug, "trigger", "email_match")
+				// Kanidm already authenticated this user. Local TOTP applies to password and magic link only.
 				s.startSession(w, r, u, "oidc")
 				http.Redirect(w, r, safeReturn(pending.ReturnTo, "/devices"), http.StatusFound)
 				return

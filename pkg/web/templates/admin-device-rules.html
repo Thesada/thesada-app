@@ -19,6 +19,17 @@
 
 <div id="status-bar" class="hidden mb-4 px-4 py-2 rounded text-sm"></div>
 
+<div class="mb-4 flex flex-wrap items-center gap-2">
+  <input id="template-name" type="text" maxlength="80" placeholder="Template name" class="text-sm px-2 py-1 rounded border border-slate-300">
+  <button type="button" id="btn-save-template" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Save as template</button>
+  <select id="template-pick" class="text-sm px-2 py-1 rounded border border-slate-300">
+    <option value="">Templates</option>
+  </select>
+  <button type="button" id="btn-load-template" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Load</button>
+  <button type="button" id="btn-delete-template" class="text-sm px-3 py-1 rounded border border-slate-300 text-slate-500 hover:bg-slate-100">Delete</button>
+  <span id="template-drift" class="text-xs text-amber-800"></span>
+</div>
+
 <div class="grid gap-4 lg:grid-cols-2">
   <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
     <div id="blockly-workspace" style="height:640px; width:100%;"></div>
@@ -181,6 +192,43 @@
     });
   }
 
+  var currentSHA = "";
+  var templatesURL = "/admin/devices/" + deviceID + "/rules/templates";
+
+  function refreshTemplateDrift() {
+    var el = document.getElementById("template-drift");
+    var pick = document.getElementById("template-pick");
+    var opt = pick.options[pick.selectedIndex];
+    var sha = opt ? opt.getAttribute("data-sha") : "";
+    if (currentSHA && sha && sha !== currentSHA) {
+      el.textContent = "differs from this device";
+    } else {
+      el.textContent = "";
+    }
+  }
+
+  function loadTemplateList() {
+    return fetch(templatesURL, {headers: {"X-CSRF-Token": csrfToken}})
+      .then(parseJSON)
+      .then(function(list) {
+        var pick = document.getElementById("template-pick");
+        var selected = pick.value;
+        pick.innerHTML = "";
+        var blank = document.createElement("option");
+        blank.value = "";
+        blank.textContent = "Templates";
+        pick.appendChild(blank);
+        (list || []).forEach(function(t) {
+          var opt = document.createElement("option");
+          opt.value = t.name;
+          opt.textContent = t.name;
+          opt.setAttribute("data-sha", t.lua_sha256 || "");
+          pick.appendChild(opt);
+        });
+        pick.value = selected;
+        refreshTemplateDrift();
+      });
+  }
   var workspace = null;
   var writesAllowed = true;
   var writeBusy = false;
@@ -231,6 +279,8 @@
       if (!beginWrite()) return;
       statusPending("saving workspace…");
       saveWorkspace("editor").then(function(res) {
+        if (res.lua_sha256) currentSHA = res.lua_sha256;
+        refreshTemplateDrift();
         status("workspace saved (sha " + (res.lua_sha256 || "").slice(0, 12) + "…)", true);
       }).catch(function(err) {
         status(String(err.message || err), false);
@@ -301,6 +351,64 @@
       status("starter workspace unlocked - Save to keep it", true);
     });
 
+    document.getElementById("template-pick").addEventListener("change", refreshTemplateDrift);
+
+    document.getElementById("btn-save-template").addEventListener("click", function() {
+      var name = document.getElementById("template-name").value.trim();
+      if (!name) { status("template name required", false); return; }
+      if (!beginWrite()) return;
+      statusPending("saving template…");
+      var state = ThesadaRules.serializeWorkspace(workspace);
+      var lua = refreshPreview();
+      fetch(templatesURL, {
+        method: "POST",
+        headers: {"Content-Type": "application/json", "X-CSRF-Token": csrfToken},
+        body: JSON.stringify({name: name, workspace_json: JSON.stringify(state), lua_content: lua || ""})
+      }).then(parseJSON).then(function(res) {
+        if (!res.ok) throw new Error("save failed");
+        return loadTemplateList().then(function() {
+          document.getElementById("template-pick").value = res.name;
+          refreshTemplateDrift();
+          status("template saved", true);
+        });
+      }).catch(function(err) {
+        status(String(err.message || err), false);
+      }).finally(endWrite);
+    });
+
+    document.getElementById("btn-load-template").addEventListener("click", function() {
+      var name = document.getElementById("template-pick").value;
+      if (!name) { status("pick a template", false); return; }
+      statusPending("loading template…");
+      fetch(templatesURL + "?name=" + encodeURIComponent(name), {headers: {"X-CSRF-Token": csrfToken}})
+        .then(parseJSON)
+        .then(function(res) {
+          var state = JSON.parse(res.workspace);
+          ThesadaRules.loadWorkspace(workspace, state);
+          refreshPreview();
+          document.getElementById("template-name").value = res.name;
+          refreshTemplateDrift();
+          status("loaded " + res.name + " - Save workspace to keep it on this device", true);
+        }).catch(function(err) {
+          status(String(err.message || err), false);
+        });
+    });
+
+    document.getElementById("btn-delete-template").addEventListener("click", function() {
+      var name = document.getElementById("template-pick").value;
+      if (!name) { status("pick a template", false); return; }
+      fetch(templatesURL + "?name=" + encodeURIComponent(name), {
+        method: "DELETE",
+        headers: {"X-CSRF-Token": csrfToken}
+      }).then(parseJSON).then(function() {
+        return loadTemplateList();
+      }).then(function() {
+        status("template deleted", true);
+      }).catch(function(err) {
+        status(String(err.message || err), false);
+      });
+    });
+
     var previewTimer = null;
     workspace.addChangeListener(function(e) {
       if (e.isUiEvent) return;
@@ -329,8 +437,12 @@
       try { savedState = JSON.parse(res.workspace_json); }
       catch (e) { throw new Error("corrupt saved workspace JSON"); }
     }
+    if (res.lua_sha256) currentSHA = res.lua_sha256;
     workspace = injectWorkspace({seed: !savedState, savedState: savedState});
     wireWorkspace();
+    loadTemplateList().catch(function(err) {
+      status("templates unavailable: " + (err.message || err), false);
+    });
     if (savedState) {
       status("restored saved workspace", true);
     } else {

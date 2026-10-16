@@ -25,6 +25,17 @@ func (s *Server) handleSettingsForm(w http.ResponseWriter, r *http.Request) {
 	savedSection := r.URL.Query().Get("saved")
 	identities, _ := s.services.OAuth.ListIdentitiesForUser(r.Context(), u.TenantID, u.ID)
 	providers, _ := s.services.OAuth.ListEnabledProvidersForTenant(r.Context(), u.TenantID)
+	secret, totpOn, totpErr := s.services.Auth.TOTPSecret(u.TenantID, u.ID)
+	if totpErr != nil {
+		slog.Error("auth.totp.lookup_failed", "user_id", u.ID, "err", totpErr)
+		http.Error(w, "settings load failed", http.StatusInternalServerError)
+		return
+	}
+	setup, _ := r.Cookie(totpSetupCookie)
+	setupSecret := ""
+	if setup != nil {
+		setupSecret = setup.Value
+	}
 	s.render(w, r, "settings.html", map[string]interface{}{
 		"HasPassword":     has,
 		"Subscriptions":   subs,
@@ -32,6 +43,10 @@ func (s *Server) handleSettingsForm(w http.ResponseWriter, r *http.Request) {
 		"OAuthIdentities": identities,
 		"OAuthProviders":  providers,
 		"OAuthError":      r.URL.Query().Get("err"),
+		"TOTPEnabled":     totpOn && secret != "",
+		"TOTPSetup":       setupSecret,
+		"TOTPURL":         totpAuthURL(u.Email, setupSecret),
+		"TOTPError":       r.URL.Query().Get("err") == "totp",
 	})
 }
 
@@ -55,7 +70,8 @@ func (s *Server) handleSettingsProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSettingsNotificationAdd creates a new alert subscription.
-// in: writer, POST form (channel, min_severity). out: redirect to settings.
+// A bad channel, URL, or severity is HTTP 400. A save failure is HTTP 500.
+// in: writer, POST form (channel, min_severity, destination). out: redirect or error.
 func (s *Server) handleSettingsNotificationAdd(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
@@ -64,15 +80,27 @@ func (s *Server) handleSettingsNotificationAdd(w http.ResponseWriter, r *http.Re
 	u := authmw.CurrentUser(r)
 	channel := r.PostFormValue("channel")
 	severity := r.PostFormValue("min_severity")
-	if channel != "email" && channel != "telegram" {
+	destination := strings.TrimSpace(r.PostFormValue("destination"))
+	if !service.ValidNotifyChannel(channel) {
 		http.Error(w, "invalid channel", http.StatusBadRequest)
 		return
 	}
-	if severity != "info" && severity != "warn" && severity != "crit" {
-		severity = "warn"
+	if err := service.WebhookDestinationError(channel, destination); err != nil {
+		http.Error(w, "webhook needs an http(s) URL", http.StatusBadRequest)
+		return
 	}
-	if err := s.services.Alerts.CreateSubscription(r.Context(), u.TenantID, u.ID, nil, channel, severity); err != nil {
+	if channel != "webhook" {
+		// Email and telegram ignore a pasted URL. Only webhook stores a destination.
+		destination = ""
+	}
+	if severity != "info" && severity != "warn" && severity != "crit" {
+		http.Error(w, "invalid severity", http.StatusBadRequest)
+		return
+	}
+	if err := s.services.Alerts.CreateSubscription(r.Context(), u.TenantID, u.ID, nil, channel, severity, destination); err != nil {
 		slog.Error("create subscription failed", "user_id", u.ID, "err", err)
+		http.Error(w, "could not save notification", http.StatusInternalServerError)
+		return
 	}
 	http.Redirect(w, r, "/settings?saved=notifications", http.StatusSeeOther)
 }

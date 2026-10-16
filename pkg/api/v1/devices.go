@@ -48,6 +48,7 @@ type alertResponse struct {
 	Message           string    `json:"message"`
 	DeliveredEmail    bool      `json:"delivered_email"`
 	DeliveredTelegram bool      `json:"delivered_telegram"`
+	DeliveredWebhook  bool      `json:"delivered_webhook"`
 }
 
 // toDeviceResponse maps a service.Device to its redacted API shape.
@@ -195,6 +196,7 @@ func (s *Server) handleDeviceAlerts(w http.ResponseWriter, r *http.Request) {
 			Message:           rows[i].Message,
 			DeliveredEmail:    rows[i].DeliveredEmail,
 			DeliveredTelegram: rows[i].DeliveredTelegram,
+			DeliveredWebhook:  rows[i].DeliveredWebhook,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

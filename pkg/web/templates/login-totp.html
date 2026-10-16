@@ -1,0 +1,18 @@
+{{define "title"}}Authenticator - thesada{{end}}
+{{define "content"}}
+<div class="max-w-sm mx-auto bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+  <h1 class="text-xl font-semibold mb-1">Authenticator code</h1>
+  <p class="text-sm text-slate-500 mb-4">Enter the 6 digit code from your app.</p>
+  {{if .Error}}
+  <div class="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">{{.Error}}</div>
+  {{end}}
+  <form method="POST" action="/login/totp" class="space-y-3">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required pattern="[0-9]{6}"
+           class="w-full border border-slate-300 rounded px-3 py-2 text-sm tracking-widest">
+    <button type="submit" class="w-full bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium py-2 rounded">
+      Sign in
+    </button>
+  </form>
+</div>
+{{end}}

@@ -52,6 +52,7 @@ func (s *Server) handleSubsList(w http.ResponseWriter, r *http.Request) {
 // (omitted/null = all the user's devices).
 type subCreateRequest struct {
 	Channel     string     `json:"channel"`
+	Destination string     `json:"destination"`
 	MinSeverity string     `json:"min_severity"`
 	DevicePK    *uuid.UUID `json:"device_pk"`
 }
@@ -66,8 +67,12 @@ func (s *Server) handleSubsCreate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.Channel != "email" && req.Channel != "telegram" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "channel must be email or telegram"})
+	if !service.ValidNotifyChannel(req.Channel) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "channel must be email, telegram, or webhook"})
+		return
+	}
+	if err := service.WebhookDestinationError(req.Channel, req.Destination); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "webhook needs an http(s) URL"})
 		return
 	}
 	if req.MinSeverity == "" {
@@ -89,7 +94,7 @@ func (s *Server) handleSubsCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.services.Alerts.CreateSubscription(r.Context(), u.TenantID, u.ID, req.DevicePK, req.Channel, req.MinSeverity); err != nil {
+	if err := s.services.Alerts.CreateSubscription(r.Context(), u.TenantID, u.ID, req.DevicePK, req.Channel, req.MinSeverity, req.Destination); err != nil {
 		slog.Error("api subs create failed", "user_id", u.ID, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "subscription failed"})
 		return

@@ -13,21 +13,22 @@ import (
 // Services bundles every service the HTTP layers need.
 // Construct once in main and pass to both pkg/web and pkg/api/v1.
 type Services struct {
-	Devices             *DeviceService
-	Telemetry           *TelemetryService
-	Alerts              *AlertService
-	Auth                *AuthService
-	Tenants             *TenantService
-	Settings            *SettingsService
-	DeviceFiles         *DeviceFilesService
-	RuleWorkspaces      *DeviceRuleWorkspacesService
-	Certificates        *CertificateService
-	OAuth               *OAuthService
-	ApiTokens           *ApiTokenService
-	Secrets             *SecretService
-	Audit               *AuditService
-	Observability       *ObservabilityService
-	Enrollments         *EnrollmentService
+	Devices        *DeviceService
+	Telemetry      *TelemetryService
+	Alerts         *AlertService
+	Auth           *AuthService
+	Tenants        *TenantService
+	Settings       *SettingsService
+	DeviceFiles    *DeviceFilesService
+	RuleWorkspaces *DeviceRuleWorkspacesService
+	RuleTemplates  *RuleTemplateService
+	Certificates   *CertificateService
+	OAuth          *OAuthService
+	ApiTokens      *ApiTokenService
+	Secrets        *SecretService
+	Audit          *AuditService
+	Observability  *ObservabilityService
+	Enrollments    *EnrollmentService
 }
 
 // New constructs all services on shared cfg + role-scoped pools (App=tenant reads, Admin=BYPASSRLS, MQTT=ingest).
@@ -49,6 +50,7 @@ func New(cfg *config.Config, pools db.Pools) (*Services, error) {
 		Settings:       &SettingsService{cfg: cfg, pools: pools, cache: make(map[string]json.RawMessage)},
 		DeviceFiles:    &DeviceFilesService{cfg: cfg, pools: pools},
 		RuleWorkspaces: &DeviceRuleWorkspacesService{pools: pools},
+		RuleTemplates:  &RuleTemplateService{pools: pools},
 		Certificates:   &CertificateService{cfg: cfg, pools: pools},
 		OAuth:          NewOAuthService(cfg, pools),
 		ApiTokens:      &ApiTokenService{cfg: cfg, pools: pools},

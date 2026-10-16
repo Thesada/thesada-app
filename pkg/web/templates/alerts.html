@@ -21,6 +21,7 @@
         <a href="/devices/{{.DevicePK}}" class="hover:underline font-medium text-slate-700">{{.DeviceID}}</a>
         <span>{{fmtTime .ReceivedAt}}</span>
         {{if .Code}}<span class="font-mono">{{deref .Code}}</span>{{end}}
+        {{if .ClearedAt}}<span>cleared</span>{{end}}
       </div>
       <div class="mt-1">{{.Message}}</div>
     </div>

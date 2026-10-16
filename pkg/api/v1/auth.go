@@ -23,6 +23,7 @@ const apiBootstrapTenantID = "default"
 type loginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	Code     string `json:"code"`
 }
 
 // userResponse is the redacted user shape returned by the auth endpoints -
@@ -56,8 +57,9 @@ func toUserResponse(u *service.User) userResponse {
 	}
 }
 
-// handleAuthLogin verifies email + password, sets a session cookie, and issues a bearer token.
-// in: writer, POST /auth/login {email,password}. out: 200 loginResponse / 400 / 401.
+// handleAuthLogin verifies email + password. An enrolled TOTP secret returns
+// totp_required until code is valid, then sets the cookie and bearer token.
+// in: writer, POST /auth/login {email,password,code}. out: 200 loginResponse / 400 / 401 / 500.
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if !decodeJSON(w, r, &req) {
@@ -86,26 +88,36 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookieTok, cookieExp, err := s.services.Auth.CreateSession(u.TenantID, u.ID, "password", r.UserAgent(), ip)
+	secret, required, err := s.services.Auth.EnrolledTOTP(u.TenantID, u.ID)
 	if err != nil {
-		slog.Error("api login: session create failed", "user_id", u.ID, "err", err)
+		slog.Error("auth.totp.lookup_failed", "user_id", u.ID, "err", err, "surface", "api")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
 		return
 	}
-	authmw.SetSessionCookie(w, cookieTok, cookieExp, httpsec.RequestIsSecure(r, s.cfg.TrustedProxies))
-
-	token, expires, err := s.services.ApiTokens.IssueToken(u.TenantID, u.ID, "api login")
-	if err != nil {
-		slog.Error("api login: token issue failed", "user_id", u.ID, "err", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
-		return
+	if required {
+		slog.Info("auth.totp.state_change",
+			"from", "password", "to", "challenged",
+			"user_id", u.ID, "tenant", u.TenantID, "surface", "api")
+		if req.Code == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "totp_required"})
+			return
+		}
+		ok, checkErr := service.MatchTOTP(secret, req.Code)
+		if checkErr != nil {
+			slog.Error("auth.totp.code_failed", "user_id", u.ID, "err", checkErr, "surface", "api")
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
+			return
+		}
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "totp_required"})
+			return
+		}
+		slog.Info("auth.totp.state_change",
+			"from", "challenged", "to", "passed",
+			"user_id", u.ID, "tenant", u.TenantID, "method", "password", "surface", "api")
 	}
 
-	slog.Info("auth.session.state_change",
-		"from", "anonymous", "to", "authenticated",
-		"user_id", u.ID, "tenant", u.TenantID, "method", "password", "surface", "api")
-
-	writeJSON(w, http.StatusOK, loginResponse{Token: token, ExpiresAt: expires, User: toUserResponse(u)})
+	s.finishAPILogin(w, r, u, "password", ip)
 }
 
 type magicLinkRequest struct {
@@ -139,10 +151,12 @@ func (s *Server) handleAuthMagicLink(w http.ResponseWriter, r *http.Request) {
 
 type magicVerifyRequest struct {
 	Token string `json:"token"`
+	Code  string `json:"code"`
 }
 
-// handleAuthMagicLinkVerify consumes a magic-link token and returns a bearer token.
-// in: writer, POST /auth/magic-link/verify {token}. out: 200 loginResponse / 400 / 401.
+// handleAuthMagicLinkVerify consumes a magic-link token.
+// An enrolled account gets totp_required, or a session when code matches.
+// in: writer, POST /auth/magic-link/verify {token,code}. out: 200 / 401 / 500.
 func (s *Server) handleAuthMagicLinkVerify(w http.ResponseWriter, r *http.Request) {
 	var req magicVerifyRequest
 	if !decodeJSON(w, r, &req) {
@@ -163,24 +177,107 @@ func (s *Server) handleAuthMagicLinkVerify(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
 		return
 	}
-	ip := s.clientIP(r)
-	cookieTok, cookieExp, err := s.services.Auth.CreateSession(u.TenantID, u.ID, "magic_link", r.UserAgent(), ip)
+	_, required, err := s.services.Auth.EnrolledTOTP(u.TenantID, u.ID)
 	if err != nil {
-		slog.Error("api magic link: session create failed", "user_id", u.ID, "err", err)
+		slog.Error("auth.totp.lookup_failed", "user_id", u.ID, "err", err, "surface", "api")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
+		return
+	}
+	if required {
+		s.respondMagicLinkChallenge(w, r, u, req.Code)
+		return
+	}
+	s.finishAPILogin(w, r, u, "magic_link", s.clientIP(r))
+}
+
+// respondMagicLinkChallenge writes totp_required, or a session when code matches.
+// in: writer, request, user, optional code. out: response written.
+func (s *Server) respondMagicLinkChallenge(w http.ResponseWriter, r *http.Request, u *service.User, code string) {
+	challenge, _, err := s.services.Auth.BeginTOTPLogin(u.TenantID, u.ID, "magic_link")
+	if err != nil {
+		slog.Error("auth.totp.challenge_failed", "user_id", u.ID, "err", err, "surface", "api")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
+		return
+	}
+	slog.Info("auth.totp.state_change",
+		"from", "magic_link", "to", "challenged",
+		"user_id", u.ID, "tenant", u.TenantID, "surface", "api")
+	if code == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "totp_required", "challenge": challenge})
+		return
+	}
+	passed, method, err := s.services.Auth.FinishTOTPLoginAny(challenge, code)
+	if errors.Is(err, service.ErrBadCredentials) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "totp_required", "challenge": challenge})
+		return
+	}
+	if err != nil {
+		slog.Error("auth.totp.finish_failed", "user_id", u.ID, "err", err, "surface", "api")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
+		return
+	}
+	slog.Info("auth.totp.state_change",
+		"from", "challenged", "to", "passed",
+		"user_id", passed.ID, "tenant", passed.TenantID, "method", method, "surface", "api")
+	s.finishAPILogin(w, r, passed, method, s.clientIP(r))
+}
+
+type totpFinishRequest struct {
+	Challenge string `json:"challenge"`
+	Code      string `json:"code"`
+}
+
+// handleAuthTOTP finishes a challenge from magic-link verify and issues the session.
+// in: writer, POST /auth/totp {challenge,code}. out: 200 loginResponse / 401 / 500.
+func (s *Server) handleAuthTOTP(w http.ResponseWriter, r *http.Request) {
+	var req totpFinishRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Challenge == "" || req.Code == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "challenge and code are required"})
+		return
+	}
+	if !s.services.Auth.AllowTOTPAttempt(s.clientIP(r)) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many attempts, try again later"})
+		return
+	}
+	u, method, err := s.services.Auth.FinishTOTPLoginAny(req.Challenge, req.Code)
+	if errors.Is(err, service.ErrBadCredentials) || errors.Is(err, service.ErrExpired) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "totp_required"})
+		return
+	}
+	if err != nil {
+		slog.Error("auth.totp.finish_failed", "err", err, "surface", "api")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
+		return
+	}
+	slog.Info("auth.totp.state_change",
+		"from", "challenged", "to", "passed",
+		"user_id", u.ID, "tenant", u.TenantID, "method", method, "surface", "api")
+	s.finishAPILogin(w, r, u, method, s.clientIP(r))
+}
+
+// finishAPILogin stores the session cookie and bearer token.
+// in: writer, request, user, method, client ip. out: 200 loginResponse or 500.
+func (s *Server) finishAPILogin(w http.ResponseWriter, r *http.Request, u *service.User, method, ip string) {
+	cookieTok, cookieExp, err := s.services.Auth.CreateSession(u.TenantID, u.ID, method, r.UserAgent(), ip)
+	if err != nil {
+		slog.Error("auth.session.create_failed", "user_id", u.ID, "err", err, "surface", "api")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
 		return
 	}
 	authmw.SetSessionCookie(w, cookieTok, cookieExp, httpsec.RequestIsSecure(r, s.cfg.TrustedProxies))
-	bearer, expires, err := s.services.ApiTokens.IssueToken(u.TenantID, u.ID, "api magic link")
+	token, expires, err := s.services.ApiTokens.IssueToken(u.TenantID, u.ID, "api "+method)
 	if err != nil {
-		slog.Error("api magic link: token issue failed", "user_id", u.ID, "err", err)
+		slog.Error("auth.token.issue_failed", "user_id", u.ID, "err", err, "surface", "api")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
 		return
 	}
 	slog.Info("auth.session.state_change",
 		"from", "anonymous", "to", "authenticated",
-		"user_id", u.ID, "tenant", u.TenantID, "method", "magic_link", "surface", "api")
-	writeJSON(w, http.StatusOK, loginResponse{Token: bearer, ExpiresAt: expires, User: toUserResponse(u)})
+		"user_id", u.ID, "tenant", u.TenantID, "method", method, "surface", "api")
+	writeJSON(w, http.StatusOK, loginResponse{Token: token, ExpiresAt: expires, User: toUserResponse(u)})
 }
 
 // handleAuthLogout revokes the bearer token and/or session cookie; idempotent, safe unauthenticated.
