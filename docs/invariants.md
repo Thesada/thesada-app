@@ -1191,7 +1191,10 @@ is the same retry flag as email and telegram, and the device-alerts JSON
 includes it beside those two flags. A later attempt does not
 post a URL that already returned success. If one of several webhook destinations fails, that subscription is
 not recorded. The retry POSTs only the subscriptions that have no
-delivery row. The channel flag is set when every one has succeeded. The URL must be http or https
+delivery row. The channel flag is set when every one has succeeded. A
+delivery row is accepted only when that subscription's user is in the
+device's tenant, and the subscription names that device or every device.
+The URL must be http or https
 with a host. Loopback, link-local, and redirects are refused. Private
 addresses are allowed so a receiver on the home network still works.
 A refused destination is not copied into the error, so a token in the
@@ -1199,7 +1202,7 @@ URL does not land in the log.
 
 How verified: `pkg/alerts/webhook_test.go`, `pkg/service/notify_channel_test.go`.
 
-Source: `pkg/alerts/webhook.go`, migration `0035_alert_delivered_webhook.sql`.
+Source: `pkg/alerts/webhook.go`, migration `0035_alert_delivered_webhook.sql`, migration `0038_alert_webhook_deliveries.sql`.
 
 ### A paired device that goes quiet raises one absence alert per stretch
 
