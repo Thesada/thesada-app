@@ -2,8 +2,10 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -116,6 +118,107 @@ func (s *Server) handleAdminDeviceRulesWorkspacePOST(w http.ResponseWriter, r *h
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "slot": req.Slot, "lua_sha256": sha})
+}
+
+type ruleTemplateSaveRequest struct {
+	Name          string `json:"name"`
+	WorkspaceJSON string `json:"workspace_json"`
+	LuaContent    string `json:"lua_content"`
+}
+
+// handleAdminRuleTemplatesGET lists templates, or returns one workspace when name is set.
+// in: writer, GET /admin/devices/{id}/rules/templates. out: JSON.
+func (s *Server) handleAdminRuleTemplatesGET(w http.ResponseWriter, r *http.Request) {
+	device, ok := s.adminDeviceFromPath(w, r)
+	if !ok {
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		list, err := s.services.RuleTemplates.List(r.Context(), device.TenantID)
+		if err != nil {
+			slog.Error("rule.template.list_failed", "device", device.DeviceID, "err", err)
+			http.Error(w, "template list failed", http.StatusInternalServerError)
+			return
+		}
+		out := make([]map[string]string, 0, len(list))
+		for _, t := range list {
+			out = append(out, map[string]string{"name": t.Name, "lua_sha256": t.LuaSHA256})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+		return
+	}
+	t, err := s.services.RuleTemplates.Get(r.Context(), device.TenantID, name)
+	if errors.Is(err, service.ErrTemplateName) {
+		http.Error(w, "invalid template", http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, service.ErrTemplateNotFound) {
+		http.Error(w, "template not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		slog.Error("rule.template.load_failed", "device", device.DeviceID, "err", err)
+		http.Error(w, "template load failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"name": t.Name, "lua_sha256": t.LuaSHA256, "workspace": t.Workspace,
+	})
+}
+
+// handleAdminRuleTemplatesPOST saves the posted workspace under name.
+// in: writer, POST JSON. out: JSON or 400.
+func (s *Server) handleAdminRuleTemplatesPOST(w http.ResponseWriter, r *http.Request) {
+	device, ok := s.adminDeviceFromPath(w, r)
+	if !ok {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxRuleWorkspaceBody)
+	var req ruleTemplateSaveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	sha, err := s.services.RuleTemplates.Save(r.Context(), device.TenantID, req.Name, req.WorkspaceJSON, req.LuaContent)
+	if err != nil {
+		if errors.Is(err, service.ErrTemplateName) || errors.Is(err, service.ErrTemplateWorkspace) {
+			http.Error(w, "invalid template", http.StatusBadRequest)
+			return
+		}
+		slog.Error("rule.template.save_failed", "device", device.DeviceID, "err", err)
+		http.Error(w, "template save failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "name": strings.TrimSpace(req.Name), "lua_sha256": sha})
+}
+
+// handleAdminRuleTemplatesDELETE removes one template by name.
+// in: writer, DELETE ?name=. out: JSON or 404.
+func (s *Server) handleAdminRuleTemplatesDELETE(w http.ResponseWriter, r *http.Request) {
+	device, ok := s.adminDeviceFromPath(w, r)
+	if !ok {
+		return
+	}
+	err := s.services.RuleTemplates.Delete(r.Context(), device.TenantID, r.URL.Query().Get("name"))
+	if errors.Is(err, service.ErrTemplateName) {
+		http.Error(w, "invalid template", http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, service.ErrTemplateNotFound) {
+		http.Error(w, "template not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		slog.Error("rule.template.delete_failed", "device", device.DeviceID, "err", err)
+		http.Error(w, "template delete failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
 // adminDeviceFromPath resolves the {id} path param to a device for

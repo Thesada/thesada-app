@@ -86,6 +86,10 @@ func TestDevicesTableRendersBothViews(t *testing.T) {
 			"data-sort=\"-40\"",
 			"thesada-aabb",
 			"esp32",
+			">live<",
+			`data-freshness="`,
+			`data-live-ms="300000"`,
+			`data-offline-ms="900000"`,
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("%s missing %q", page, want)

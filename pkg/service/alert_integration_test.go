@@ -119,10 +119,10 @@ func TestAlertService(t *testing.T) {
 		pk := mustUpsert(t, dev, tA, "sub-dev", "", "", "", "")
 
 		// One device-specific + one all-devices (nil device_pk) subscription.
-		if err := al.CreateSubscription(ctx, tA, u.ID, &pk, "email", "warn"); err != nil {
+		if err := al.CreateSubscription(ctx, tA, u.ID, &pk, "email", "warn", ""); err != nil {
 			t.Fatalf("CreateSubscription device: %v", err)
 		}
-		if err := al.CreateSubscription(ctx, tA, u.ID, nil, "telegram", "crit"); err != nil {
+		if err := al.CreateSubscription(ctx, tA, u.ID, nil, "telegram", "crit", ""); err != nil {
 			t.Fatalf("CreateSubscription all: %v", err)
 		}
 		subs, err := al.ListSubscriptions(ctx, tA, u.ID)
@@ -144,6 +144,24 @@ func TestAlertService(t *testing.T) {
 		}
 		if subs, _ := al.ListSubscriptions(ctx, tA, u.ID); len(subs) != 1 {
 			t.Errorf("after owner delete = %d subs, want 1", len(subs))
+		}
+	})
+
+	t.Run("webhook_destination_is_stored_and_null_is_rejected", func(t *testing.T) {
+		u := mustCreateUser(t, env.Services.Auth, tA, "hook-sub@a.test")
+		const dest = "https://hooks.example/alert"
+		if err := al.CreateSubscription(ctx, tA, u.ID, nil, "webhook", "warn", dest); err != nil {
+			t.Fatalf("CreateSubscription webhook: %v", err)
+		}
+		subs, err := al.ListSubscriptions(ctx, tA, u.ID)
+		if err != nil || len(subs) != 1 || subs[0].Destination == nil || *subs[0].Destination != dest {
+			t.Fatalf("ListSubscriptions = %+v err=%v", subs, err)
+		}
+		_, err = env.Super.Exec(ctx,
+			`INSERT INTO alert_subscriptions (user_id, channel, min_severity, destination) VALUES ($1, 'webhook', 'warn', NULL)`,
+			u.ID)
+		if err == nil {
+			t.Fatal("webhook with a null destination was stored")
 		}
 	})
 }

@@ -3,16 +3,17 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0f172a">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="thesada">
   <meta name="htmx-config" content='{"inlineStyleNonce":"{{.CSPNonce}}"}'>
   <title>{{block "title" .}}thesada{{end}}</title>
   <link rel="manifest" href="/static/manifest.webmanifest">
-  <link rel="icon" href="/static/icons/icon-192.png" type="image/png">
-  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+  <link rel="icon" href="/static/icons/icon-192.png?v=2" type="image/png">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png?v=2">
   <link rel="stylesheet" href="/static/css/app.css">
   <!-- vendored JS - check quarterly, see  -->
   <!-- htmx 2.0.9 - https://htmx.org/docs/#installing -->
@@ -21,20 +22,17 @@
   <script src="/static/js/chart.umd.min.js" defer></script>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen">
-  <header class="bg-slate-900 text-slate-100">
-    <div class="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-2">
+  <header class="sticky top-0 z-20 bg-slate-900 text-slate-100" style="padding-top: env(safe-area-inset-top)">
+    <div class="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
       <a href="/" class="font-semibold text-lg tracking-tight shrink-0">thesada</a>
-      <nav class="flex flex-wrap gap-x-4 gap-y-1 text-sm items-center justify-end">
-        {{if .User}}
-        <a href="/devices" class="hover:text-white text-slate-300">Devices</a>
-        <a href="/alerts" class="hover:text-white text-slate-300">Alerts</a>
-        <a href="/settings" class="hover:text-white text-slate-300">Settings</a>
-        {{if .User.IsSuperAdmin}}
-        <a href="/admin" class="hover:text-white text-amber-300">Admin</a>
-        {{end}}
+      {{if .User}}
+      <form id="nav-logout" method="POST" action="/logout" class="hidden">
+        <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      </form>
+      <div class="flex items-center gap-2 min-w-0">
         {{if and .User.IsSuperAdmin .EffectiveTenantID}}
           {{if ne .EffectiveTenantID .User.TenantID}}
-          <form method="POST" action="/admin/impersonate" class="inline">
+          <form method="POST" action="/admin/impersonate" class="inline shrink-0">
             <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
             <button type="submit" class="text-xs px-2 py-1 rounded bg-amber-700 hover:bg-amber-600 text-amber-50" title="Viewing as {{.EffectiveTenantID}}">
               viewing: {{.EffectiveTenantID}} &times;
@@ -42,22 +40,25 @@
           </form>
           {{end}}
         {{end}}
-        <span class="text-slate-400 text-xs truncate max-w-[140px] sm:max-w-none">{{.User.Email}}</span>
-        <form method="POST" action="/logout" class="inline">
-          <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-          <button type="submit" class="hover:text-white text-slate-300">Logout</button>
-        </form>
-        {{else}}
-        <a href="/signup" class="hover:text-white text-slate-300">Sign up</a>
-        <a href="/login" class="hover:text-white text-slate-300">Login</a>
-        {{end}}
-      </nav>
+        <span class="text-slate-400 text-xs truncate">{{.User.Email}}</span>
+      </div>
+      {{end}}
     </div>
+    <nav class="hidden md:block bg-white border-b border-slate-200 text-slate-800">
+      <div class="max-w-5xl mx-auto px-2 py-1 flex flex-wrap items-center gap-1">
+        {{template "appnav" .}}
+      </div>
+    </nav>
   </header>
+  <nav class="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white border-t border-slate-200 text-slate-800" style="padding-bottom: env(safe-area-inset-bottom)">
+    <div class="max-w-5xl mx-auto px-1 py-1 flex items-stretch justify-between">
+      {{template "appnav" .}}
+    </div>
+  </nav>
   <main class="max-w-5xl mx-auto px-4 py-8">
     {{block "content" .}}{{end}}
   </main>
-  <footer class="max-w-5xl mx-auto px-4 py-6 text-xs text-slate-500">
+  <footer class="max-w-5xl mx-auto px-4 pt-6 pb-28 text-xs text-slate-500 md:pb-6">
     thesada-app dev build - {{.Now}}
   </footer>
   <script nonce="{{.CSPNonce}}">
@@ -92,6 +93,35 @@
       var d = new Date(el.getAttribute('datetime'));
       if (!isNaN(d)) el.textContent = d.toLocaleString();
     });
+    function paintFreshness(now) {
+      document.querySelectorAll("[data-freshness]").forEach(function (el) {
+        var raw = el.getAttribute("data-freshness");
+        var liveMs = Number(el.getAttribute("data-live-ms"));
+        var offMs = Number(el.getAttribute("data-offline-ms"));
+        var label = "unknown";
+        var cls = "bg-slate-100 text-slate-600";
+        if (raw && raw !== "unknown") {
+          var seen = new Date(raw);
+          var age = now - seen.getTime();
+          if (isNaN(age) || age < 0) age = 0;
+          if (age <= liveMs) {
+            label = "live";
+            cls = "bg-emerald-100 text-emerald-800";
+          } else if (age <= offMs) {
+            label = "stale";
+            cls = "bg-amber-100 text-amber-800";
+          } else {
+            label = "offline";
+            cls = "bg-rose-100 text-rose-800";
+          }
+        }
+        el.textContent = label;
+        el.className = "text-xs px-1.5 py-0.5 rounded " + cls;
+      });
+    }
+    paintFreshness(Date.now());
+    setInterval(function () { paintFreshness(Date.now()); }, 30000);
+    document.addEventListener("htmx:afterSwap", function () { paintFreshness(Date.now()); });
   </script>
   {{if .User}}
   <script nonce="{{.CSPNonce}}">
@@ -120,4 +150,19 @@
   {{end}}
 </body>
 </html>
+{{end}}
+
+{{define "appnav"}}
+{{if .User}}
+<a href="/devices" class="px-1 py-3 text-xs font-medium text-center hover:bg-slate-100 rounded md:px-3 md:text-sm">Devices</a>
+<a href="/alerts" class="px-1 py-3 text-xs font-medium text-center hover:bg-slate-100 rounded md:px-3 md:text-sm">Alerts</a>
+<a href="/settings" class="px-1 py-3 text-xs font-medium text-center hover:bg-slate-100 rounded md:px-3 md:text-sm">Settings</a>
+{{if .User.IsSuperAdmin}}
+<a href="/admin" class="px-1 py-3 text-xs font-medium text-center text-amber-800 hover:bg-amber-50 rounded md:px-3 md:text-sm">Admin</a>
+{{end}}
+<button type="submit" form="nav-logout" class="px-1 py-3 text-xs font-medium whitespace-nowrap text-slate-500 hover:bg-slate-100 rounded md:px-3 md:text-sm">Logout</button>
+{{else}}
+<a href="/signup" class="px-1 py-3 text-xs font-medium hover:bg-slate-100 rounded md:px-3 md:text-sm">Sign up</a>
+<a href="/login" class="px-1 py-3 text-xs font-medium hover:bg-slate-100 rounded md:px-3 md:text-sm">Login</a>
+{{end}}
 {{end}}

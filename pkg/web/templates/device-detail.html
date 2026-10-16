@@ -3,13 +3,14 @@
 <a href="{{.BackHref}}" class="text-xs text-slate-500 hover:underline">&larr; {{.BackLabel}}</a>
 <h1 class="text-2xl font-semibold mt-2 mb-1"
     hx-get="/devices/{{.Device.ID}}" hx-trigger="thesada:event from:body throttle:2s" hx-select="#device-live" hx-target="#device-live" hx-swap="outerHTML">{{.Device.DeviceID}}</h1>
-<p class="text-sm text-slate-500 mb-6">
-  {{derefOrDash .Device.HardwareType}} - fw {{derefOrDash .Device.FirmwareVersion}} - last seen {{timeOrDash .Device.LastSeenAt}}
-</p>
 {{if .Flash}}<div class="mb-4 rounded-md bg-emerald-50 border border-emerald-200 p-3 text-sm text-emerald-800">{{.Flash}}</div>{{end}}
 {{if .FlashErr}}<div class="mb-4 rounded-md bg-rose-50 border border-rose-200 p-3 text-sm text-rose-800">{{.FlashErr}}</div>{{end}}
 
 <div id="device-live">
+<p class="text-sm text-slate-500 mb-6">
+  {{freshnessBadge .Device.LastSeenAt}}
+  {{derefOrDash .Device.HardwareType}} - fw {{derefOrDash .Device.FirmwareVersion}} - last seen {{timeOrDash .Device.LastSeenAt}}
+</p>
 <section class="mb-8" id="chart-card">
   <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
     <h2 class="text-lg font-semibold">History chart</h2>

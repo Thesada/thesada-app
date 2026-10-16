@@ -83,6 +83,37 @@ func TestDerefOrDash(t *testing.T) {
 	}
 }
 
+func TestFreshness_UnseenIsUnknownAndAgeBandsAreLiveThenStaleThenOffline(t *testing.T) {
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	if label, _ := freshnessState(nil, now); label != "unknown" {
+		t.Fatalf("nil = %q", label)
+	}
+	zero := time.Time{}
+	if label, _ := freshnessState(&zero, now); label != "unknown" {
+		t.Fatalf("zero = %q", label)
+	}
+	live := now.Add(-freshnessLive)
+	if label, _ := freshnessState(&live, now); label != "live" {
+		t.Fatalf("5m = %q", label)
+	}
+	stale := now.Add(-freshnessLive - time.Second)
+	if label, _ := freshnessState(&stale, now); label != "stale" {
+		t.Fatalf("5m1s = %q", label)
+	}
+	edge := now.Add(-freshnessOffline)
+	if label, _ := freshnessState(&edge, now); label != "stale" {
+		t.Fatalf("15m = %q", label)
+	}
+	off := now.Add(-freshnessOffline - time.Second)
+	if label, _ := freshnessState(&off, now); label != "offline" {
+		t.Fatalf("15m1s = %q", label)
+	}
+	future := now.Add(time.Minute)
+	if label, _ := freshnessState(&future, now); label != "live" {
+		t.Fatalf("future = %q", label)
+	}
+}
+
 func TestUptimeLive(t *testing.T) {
 	now := time.Now()
 	if got := uptimeLive(nil, nil); got != "-" {
@@ -113,7 +144,7 @@ func TestUptimeLive(t *testing.T) {
 	}
 
 	staleAt := time.Now().Add(-16 * time.Minute)
-	if got := uptimeLive(&fresh, &staleAt); got != "16m (stale)" {
-		t.Errorf("16m sample = %q, want 16m (stale)", got)
+	if got := uptimeLive(&fresh, &staleAt); got != "16m (old)" {
+		t.Errorf("16m sample = %q, want 16m (old)", got)
 	}
 }

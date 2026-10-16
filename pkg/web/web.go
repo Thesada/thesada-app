@@ -106,7 +106,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // in: receiver. out: none (mutates s.templates).
 func (s *Server) parseTemplates() {
 	pages := []string{
-		"login.html", "devices.html", "device-detail.html", "alerts.html",
+		"login.html", "login-totp.html", "devices.html", "device-detail.html", "alerts.html",
 		"device-claim.html",
 		"signup.html", "settings.html", "forgot.html", "reset.html",
 		"admin-index.html", "admin-tenants.html",
@@ -139,6 +139,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /", s.handleIndex)
 	s.mux.HandleFunc("GET /login", s.handleLoginForm)
 	s.mux.HandleFunc("POST /login", s.handleLoginSubmit)
+	s.mux.HandleFunc("GET /login/totp", s.handleTOTPForm)
+	s.mux.HandleFunc("POST /login/totp", s.handleTOTPSubmit)
 	s.mux.HandleFunc("GET /login/verify", s.handleMagicLinkVerify)
 	s.mux.HandleFunc("GET /forgot-password", s.handleForgotForm)
 	s.mux.HandleFunc("POST /forgot-password", s.handleForgotSubmit)
@@ -160,6 +162,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /settings", authmw.RequireAuth(s.handleSettingsForm))
 	s.mux.HandleFunc("POST /settings/profile", authmw.RequireAuth(s.handleSettingsProfile))
 	s.mux.HandleFunc("POST /settings/password", authmw.RequireAuth(s.handleSettingsPassword))
+	s.mux.HandleFunc("POST /settings/totp/begin", authmw.RequireAuth(s.handleTOTPBegin))
+	s.mux.HandleFunc("POST /settings/totp/confirm", authmw.RequireAuth(s.handleTOTPConfirm))
+	s.mux.HandleFunc("POST /settings/totp/disable", authmw.RequireAuth(s.handleTOTPDisable))
 	s.mux.HandleFunc("POST /settings/notifications/add", authmw.RequireAuth(s.handleSettingsNotificationAdd))
 	s.mux.HandleFunc("POST /settings/notifications/delete", authmw.RequireAuth(s.handleSettingsNotificationDelete))
 	s.mux.HandleFunc("GET /auth/oidc/{slug}/start", s.handleOIDCStart)
@@ -201,6 +206,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /admin/devices/{id}/rules", authmw.RequireSuperAdmin(s.handleAdminDeviceRules))
 	s.mux.HandleFunc("GET /admin/devices/{id}/rules/workspace", authmw.RequireSuperAdmin(s.handleAdminDeviceRulesWorkspaceGET))
 	s.mux.HandleFunc("POST /admin/devices/{id}/rules/workspace", authmw.RequireSuperAdmin(s.handleAdminDeviceRulesWorkspacePOST))
+	s.mux.HandleFunc("GET /admin/devices/{id}/rules/templates", authmw.RequireSuperAdmin(s.handleAdminRuleTemplatesGET))
+	s.mux.HandleFunc("POST /admin/devices/{id}/rules/templates", authmw.RequireSuperAdmin(s.handleAdminRuleTemplatesPOST))
+	s.mux.HandleFunc("DELETE /admin/devices/{id}/rules/templates", authmw.RequireSuperAdmin(s.handleAdminRuleTemplatesDELETE))
 	s.mux.HandleFunc("GET /admin/devices/{id}/secrets", authmw.RequireSuperAdmin(s.handleAdminDeviceSecrets))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/set", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsSet))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/clear", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsClear))

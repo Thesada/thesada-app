@@ -38,13 +38,14 @@ type Device struct {
 // TenantAlertRow is a denormalized alert joined with the device_id label,
 // for the tenant-wide alert browse view. Exported so pkg/web can iterate.
 type TenantAlertRow struct {
-	ID         int64     `json:"id"`
-	DevicePK   uuid.UUID `json:"device_pk"`
-	DeviceID   string    `json:"device_id"`
-	ReceivedAt time.Time `json:"received_at"`
-	Severity   string    `json:"severity"`
-	Code       *string   `json:"code"`
-	Message    string    `json:"message"`
+	ID         int64      `json:"id"`
+	DevicePK   uuid.UUID  `json:"device_pk"`
+	DeviceID   string     `json:"device_id"`
+	ReceivedAt time.Time  `json:"received_at"`
+	Severity   string     `json:"severity"`
+	Code       *string    `json:"code"`
+	Message    string     `json:"message"`
+	ClearedAt  *time.Time `json:"cleared_at,omitempty"`
 }
 
 // device_telemetry maps to the device_telemetry table.
@@ -69,6 +70,7 @@ type device_alerts struct {
 	Raw               []byte    `json:"raw"`
 	DeliveredEmail    bool      `json:"delivered_email"`
 	DeliveredTelegram bool      `json:"delivered_telegram"`
+	DeliveredWebhook  bool      `json:"delivered_webhook"`
 }
 
 // DeviceCertificate maps to the device_certificates table. Stores X.509

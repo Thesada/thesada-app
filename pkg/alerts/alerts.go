@@ -1,4 +1,4 @@
-// Package alerts fans device alerts out to email and Telegram subscribers.
+// Package alerts fans device alerts out to email, Telegram, and webhook subscribers.
 // A single Dispatch call resolves the alert row, walks matching subscriptions,
 // and records per-channel delivery state on device_alerts.
 package alerts
@@ -59,11 +59,12 @@ const telegramAPITimeout = 10 * time.Second
 // Notifier owns the channels the platform can send alerts through.
 // It is safe for concurrent use; instantiate once in main and share.
 type Notifier struct {
-	cfg    *config.Config
-	db     *db.Pool // App pool: every tenant-scoped query runs through db.WithTenant on it
-	admin  *db.Pool // Admin pool (BYPASSRLS): redispatch sweep scan only, via db.WithAdminAudit
-	mailer *mailer.Mailer
-	http   *http.Client
+	cfg         *config.Config
+	db          *db.Pool // App pool: every tenant-scoped query runs through db.WithTenant on it
+	admin       *db.Pool // Admin pool (BYPASSRLS): redispatch sweep scan only, via db.WithAdminAudit
+	mailer      *mailer.Mailer
+	http        *http.Client
+	webhookHTTP *http.Client
 
 	// Send seams: tests swap these to drive retry outcomes without a live
 	// SMTP server or api.telegram.org.
@@ -84,12 +85,13 @@ type Notifier struct {
 // in: cfg, db pools, mailer. out: ready *Notifier.
 func New(cfg *config.Config, pools db.Pools, mail *mailer.Mailer) *Notifier {
 	n := &Notifier{
-		cfg:      cfg,
-		db:       pools.App,
-		admin:    pools.Admin,
-		mailer:   mail,
-		http:     &http.Client{Timeout: telegramAPITimeout},
-		inflight: make(map[int64]struct{}),
+		cfg:         cfg,
+		db:          pools.App,
+		admin:       pools.Admin,
+		mailer:      mail,
+		http:        &http.Client{Timeout: telegramAPITimeout},
+		webhookHTTP: newWebhookClient(),
+		inflight:    make(map[int64]struct{}),
 	}
 	n.sendEmail = func(to, subject, text, html string) error {
 		// mailer.SendMIME silently no-ops when SMTP is unconfigured (documented
@@ -136,16 +138,19 @@ type alertRow struct {
 	deviceDisplay *string
 	alreadyEmail  bool
 	alreadyTg     bool
+	alreadyHook   bool
 	status        string
 	attempts      int
 }
 
 // recipient is one subscription the alert was matched against.
 type recipient struct {
+	subID          string
 	userID         string
 	channel        string
 	email          string
 	telegramChatID *string
+	destination    *string
 }
 
 // Dispatch sends one alert through every matching subscription channel and
@@ -164,12 +169,16 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 
 	var row *alertRow
 	var recipients []recipient
+	sentHooks := map[string]struct{}{}
 	err := db.WithTenant(ctx, n.db, tenantID, func(tx pgx.Tx) error {
 		var err error
 		if row, err = n.loadAlert(ctx, tx, alertID); err != nil {
 			return err
 		}
-		recipients, err = n.loadRecipients(ctx, tx, alertID)
+		if recipients, err = n.loadRecipients(ctx, tx, alertID); err != nil {
+			return err
+		}
+		sentHooks, err = n.loadWebhookSent(ctx, tx, alertID)
 		return err
 	})
 	if err != nil {
@@ -183,23 +192,38 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 	}
 	if len(recipients) == 0 {
 		slog.Debug("alert has no subscribers", "alert_id", alertID)
-		return n.recordOutcome(ctx, tenantID, alertID, false, false, "none", row.attempts, time.Time{})
+		return n.recordOutcome(ctx, tenantID, alertID, deliveryFlags{}, "none", row.attempts, time.Time{})
 	}
 
 	// A channel is "needed" when it has at least one matching subscription and
 	// has not already been delivered by an earlier attempt.
-	var needEmail, needTg bool
+	var needEmail, needTg, needHook bool
 	for _, r := range recipients {
 		switch r.channel {
 		case "email":
 			needEmail = needEmail || !row.alreadyEmail
 		case "telegram":
 			needTg = needTg || !row.alreadyTg
+		case "webhook":
+			if row.alreadyHook {
+				break
+			}
+			if _, done := sentHooks[r.subID]; !done {
+				needHook = true
+			}
 		}
 	}
 
 	subject, body, htmlBody := renderAlert(row)
-	var emailOK, tgOK bool
+	var hookBody []byte
+	if needHook {
+		var err error
+		hookBody, err = webhookPayload(alertID, row)
+		if err != nil {
+			return fmt.Errorf("webhook payload: %w", err)
+		}
+	}
+	var emailOK, tgOK, hookOK bool
 	for _, r := range recipients {
 		switch r.channel {
 		case "email":
@@ -224,32 +248,68 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 				continue
 			}
 			tgOK = true
+		case "webhook":
+			if row.alreadyHook {
+				continue
+			}
+			if _, done := sentHooks[r.subID]; done {
+				continue
+			}
+			dest := ""
+			if r.destination != nil {
+				dest = *r.destination
+			}
+			if err := n.sendWebhook(ctx, dest, hookBody); err != nil {
+				slog.Error("alert webhook failed", "alert_id", alertID, "err", err)
+				continue
+			}
+			if err := n.markWebhookSent(ctx, tenantID, alertID, r.subID); err != nil {
+				slog.Error("alert webhook record failed", "alert_id", alertID, "err", err)
+				continue
+			}
+			sentHooks[r.subID] = struct{}{}
 		}
+	}
+	hookTargets, hookDoneN := 0, 0
+	for _, r := range recipients {
+		if r.channel != "webhook" {
+			continue
+		}
+		hookTargets++
+		if _, done := sentHooks[r.subID]; done || row.alreadyHook {
+			hookDoneN++
+		}
+	}
+	if hookTargets > 0 && hookDoneN == hookTargets {
+		hookOK = true
 	}
 
 	attempts := row.attempts + 1
+	sent := deliveryFlags{email: emailOK, telegram: tgOK, webhook: hookOK}
 	emailDone := !needEmail || emailOK
 	tgDone := !needTg || tgOK
+	hookDone := !needHook || hookOK
+	hookSent := hookOK || row.alreadyHook
 	switch {
-	case emailDone && tgDone:
-		if err := n.recordOutcome(ctx, tenantID, alertID, emailOK, tgOK, "delivered", attempts, time.Time{}); err != nil {
+	case emailDone && tgDone && hookDone:
+		if err := n.recordOutcome(ctx, tenantID, alertID, sent, "delivered", attempts, time.Time{}); err != nil {
 			return nil
 		}
 		slog.Info("alert.delivery.state_change",
 			"from", "pending", "to", "delivered",
 			"alert_id", alertID, "email", emailOK || row.alreadyEmail, "telegram", tgOK || row.alreadyTg,
-			"attempts", attempts)
+			"webhook", hookSent, "attempts", attempts)
 	case attempts >= n.maxAttempts():
-		if err := n.recordOutcome(ctx, tenantID, alertID, emailOK, tgOK, "dead", attempts, time.Time{}); err != nil {
+		if err := n.recordOutcome(ctx, tenantID, alertID, sent, "dead", attempts, time.Time{}); err != nil {
 			return nil
 		}
 		slog.Error("alert.delivery.state_change",
 			"from", "pending", "to", "dead",
 			"alert_id", alertID, "email", emailOK || row.alreadyEmail, "telegram", tgOK || row.alreadyTg,
-			"attempts", attempts)
+			"webhook", hookSent, "attempts", attempts)
 	default:
 		next := time.Now().Add(retryBackoff(n.retryBase(), attempts))
-		if err := n.recordOutcome(ctx, tenantID, alertID, emailOK, tgOK, "pending", attempts, next); err != nil {
+		if err := n.recordOutcome(ctx, tenantID, alertID, sent, "pending", attempts, next); err != nil {
 			return nil
 		}
 		slog.Warn("alert.delivery.retry_scheduled",
@@ -292,28 +352,36 @@ func retryBackoff(base time.Duration, attempts int) time.Duration {
 	return base << shift
 }
 
+// deliveryFlags is which channels accepted this attempt.
+type deliveryFlags struct {
+	email    bool
+	telegram bool
+	webhook  bool
+}
+
 // recordOutcome persists one dispatch run: ORs the per-channel delivered
 // flags (re-runs never clear them), sets status + attempts, and schedules the
 // next sweep pick-up (zero time = keep current; terminal states are never swept).
 // On write failure the row stays pending and the sweeper redispatches later -
 // that can double-send a succeeded channel, acceptable over losing the alert.
-// in: ctx, tenant id, alert id, per-channel success, status, attempts, next
+// in: ctx, tenant id, alert id, channel results, status, attempts, next
 // attempt time. out: error from the write (already logged).
-func (n *Notifier) recordOutcome(ctx context.Context, tenantID string, alertID int64, email, tg bool, status string, attempts int, next time.Time) error {
+func (n *Notifier) recordOutcome(ctx context.Context, tenantID string, alertID int64, sent deliveryFlags, status string, attempts int, next time.Time) error {
 	const query = `
 		UPDATE device_alerts
 		SET delivered_email = delivered_email OR $2,
 		    delivered_telegram = delivered_telegram OR $3,
-		    delivery_status = $4,
-		    delivery_attempts = $5,
-		    next_attempt_at = CASE WHEN $6::timestamptz IS NULL THEN next_attempt_at ELSE $6 END
+		    delivered_webhook = delivered_webhook OR $4,
+		    delivery_status = $5,
+		    delivery_attempts = $6,
+		    next_attempt_at = CASE WHEN $7::timestamptz IS NULL THEN next_attempt_at ELSE $7 END
 		WHERE id = $1`
 	var nextArg interface{}
 	if !next.IsZero() {
 		nextArg = next
 	}
 	err := db.WithTenant(ctx, n.db, tenantID, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, query, alertID, email, tg, status, attempts, nextArg); err != nil {
+		if _, err := tx.Exec(ctx, query, alertID, sent.email, sent.telegram, sent.webhook, status, attempts, nextArg); err != nil {
 			return fmt.Errorf("record delivery outcome: %w", err)
 		}
 		return nil
@@ -330,7 +398,7 @@ func (n *Notifier) loadAlert(ctx context.Context, tx pgx.Tx, alertID int64) (*al
 	const query = `
 		SELECT a.severity, a.code, a.message, a.received_at,
 		       d.device_id, d.display_name,
-		       a.delivered_email, a.delivered_telegram,
+		       a.delivered_email, a.delivered_telegram, a.delivered_webhook,
 		       a.delivery_status, a.delivery_attempts
 		FROM device_alerts a
 		JOIN devices d ON d.id = a.device_pk
@@ -339,7 +407,7 @@ func (n *Notifier) loadAlert(ctx context.Context, tx pgx.Tx, alertID int64) (*al
 	err := tx.QueryRow(ctx, query, alertID).Scan(
 		&r.severity, &r.code, &r.message, &r.receivedAt,
 		&r.deviceID, &r.deviceDisplay,
-		&r.alreadyEmail, &r.alreadyTg,
+		&r.alreadyEmail, &r.alreadyTg, &r.alreadyHook,
 		&r.status, &r.attempts)
 	if err != nil {
 		return nil, fmt.Errorf("alert lookup: %w", err)
@@ -353,7 +421,7 @@ func (n *Notifier) loadAlert(ctx context.Context, tx pgx.Tx, alertID int64) (*al
 // in: ctx, tenant-scoped tx, alert id. out: [] recipient, error.
 func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64) ([]recipient, error) {
 	const query = `
-		SELECT s.user_id::text, s.channel, u.email::text, u.telegram_chat_id
+		SELECT s.id::text, s.user_id::text, s.channel, u.email::text, u.telegram_chat_id, s.destination
 		FROM device_alerts a
 		JOIN alert_subscriptions s
 		  ON (s.device_pk = a.device_pk OR s.device_pk IS NULL)
@@ -370,7 +438,7 @@ func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64)
 	var out []recipient
 	for rows.Next() {
 		var r recipient
-		if err := rows.Scan(&r.userID, &r.channel, &r.email, &r.telegramChatID); err != nil {
+		if err := rows.Scan(&r.subID, &r.userID, &r.channel, &r.email, &r.telegramChatID, &r.destination); err != nil {
 			return nil, fmt.Errorf("recipients scan: %w", err)
 		}
 		out = append(out, r)
@@ -379,6 +447,44 @@ func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64)
 		return nil, fmt.Errorf("recipients rows: %w", err)
 	}
 	return out, nil
+}
+
+// loadWebhookSent returns the subscription ids that already accepted this alert.
+// in: ctx, tenant tx, alert id. out: set of subscription ids, error.
+func (n *Notifier) loadWebhookSent(ctx context.Context, tx pgx.Tx, alertID int64) (map[string]struct{}, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT subscription_id::text FROM alert_webhook_deliveries WHERE alert_id = $1`, alertID)
+	if err != nil {
+		return nil, fmt.Errorf("webhook deliveries: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("webhook deliveries scan: %w", err)
+		}
+		out[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webhook deliveries rows: %w", err)
+	}
+	return out, nil
+}
+
+// markWebhookSent records one subscription so a later attempt does not POST it again.
+// in: ctx, tenant id, alert id, subscription id. out: error.
+func (n *Notifier) markWebhookSent(ctx context.Context, tenantID string, alertID int64, subID string) error {
+	err := db.WithTenant(ctx, n.db, tenantID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO alert_webhook_deliveries (alert_id, subscription_id) VALUES ($1, $2)
+			 ON CONFLICT DO NOTHING`, alertID, subID)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("record webhook delivery: %w", err)
+	}
+	return nil
 }
 
 // renderAlert builds a human-readable subject + plain text body + MIME html
