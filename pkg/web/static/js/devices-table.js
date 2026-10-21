@@ -206,8 +206,8 @@
     apply(name);
   });
 
-  document.addEventListener("htmx:afterSwap", function (ev) {
-    var target = ev.detail && ev.detail.target;
+  document.addEventListener("htmx:after:swap", function (ev) {
+    var target = ev.target;
     if (!target || !target.querySelector) return;
     var table = target.matches && target.matches("table[data-devices-table]")
       ? target

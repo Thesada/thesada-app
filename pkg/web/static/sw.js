@@ -1,6 +1,6 @@
 // App shell only. Device pages and the API are never stored: a stale
 // reading shown as current is worse than the offline page.
-const CACHE = "thesada-shell-v1";
+const CACHE = "thesada-shell-v2";
 const SHELL = [
   "/static/css/app.css",
   "/static/js/htmx.min.js",
