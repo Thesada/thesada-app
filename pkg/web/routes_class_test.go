@@ -6,7 +6,7 @@ import (
 	"thesada.app/app/pkg/routetest"
 )
 
-// webRoutes classifies every route routes() registers. A new route fails
+// webRoutes classifies every route the package registers. A new route fails
 // TestWebRoutesAreClassified until it is added here on purpose.
 var webRoutes = map[string]routetest.Class{
 	"GET /static/":                                    routetest.Public,
@@ -109,8 +109,8 @@ var webCrossTenantRoutes = []string{
 	"POST /settings/oauth/{id}/unlink",
 }
 
-// TestWebRoutesAreClassified checks every route web.go registers against
+// TestWebRoutesAreClassified checks every route the package registers against
 // webRoutes and webCrossTenantRoutes (rules in routetest.Check).
 func TestWebRoutesAreClassified(t *testing.T) {
-	routetest.Check(t, routetest.Registered(t, "web.go"), webRoutes, webCrossTenantRoutes)
+	routetest.Check(t, routetest.Registered(t, "."), webRoutes, webCrossTenantRoutes)
 }

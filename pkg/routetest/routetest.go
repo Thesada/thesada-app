@@ -7,6 +7,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,16 +25,36 @@ const (
 
 var wrapper = map[Class]string{Public: "", User: "RequireAuth", Admin: "RequireSuperAdmin"}
 
-// Registered parses one source file and returns pattern -> authmw wrapper
-// name ("" when the handler is not wrapped).
-// in: t, file path. out: map.
-func Registered(t *testing.T, path string) map[string]string {
+// Registered parses every non-test Go file in dir and returns pattern ->
+// authmw wrapper name ("" when the handler is not wrapped). Whole package,
+// so a route registered outside the routes file is still seen.
+// in: t, package dir. out: map.
+func Registered(t *testing.T, dir string) map[string]string {
 	t.Helper()
-	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
+		t.Fatal(err)
 	}
 	out := map[string]string{}
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		collect(t, path, f, out)
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s: no routes found; the parser no longer matches the routes func", dir)
+	}
+	return out
+}
+
+// collect adds the routes one parsed file registers to out.
+// in: t, file path, parsed file, map. out: none.
+func collect(t *testing.T, path string, f *ast.File, out map[string]string) {
 	ast.Inspect(f, func(n ast.Node) bool {
 		c, ok := n.(*ast.CallExpr)
 		if !ok || len(c.Args) != 2 {
@@ -63,10 +84,6 @@ func Registered(t *testing.T, path string) map[string]string {
 		out[pattern] = w
 		return true
 	})
-	if len(out) == 0 {
-		t.Fatalf("%s: no routes found; the parser no longer matches the routes func", path)
-	}
-	return out
 }
 
 // Check compares the registered routes with the class table: no unclassified

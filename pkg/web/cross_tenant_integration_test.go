@@ -11,6 +11,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -174,7 +175,12 @@ func TestCrossTenant_WebRoutes(t *testing.T) {
 			if rec := getAs(f.srv, path, f.out); rec.Code != http.StatusNotFound {
 				t.Fatalf("outsider status = %d, want 404", rec.Code)
 			}
-			wantShown(t, getAs(f.srv, path, f.owner), "42")
+			rec := getAs(f.srv, path, f.owner)
+			var chart struct{ Avg []*float64 }
+			if err := json.Unmarshal(rec.Body.Bytes(), &chart); err != nil || rec.Code != http.StatusOK ||
+				len(chart.Avg) != 1 || chart.Avg[0] == nil || *chart.Avg[0] != 42 {
+				t.Fatalf("owner chart = %d %s; the check cannot fire", rec.Code, rec.Body.String())
+			}
 		},
 		"GET /alerts": func(t *testing.T) {
 			wantHidden(t, getAs(f.srv, "/alerts", f.out), ctAlertText)

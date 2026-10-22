@@ -6,7 +6,7 @@ import (
 	"thesada.app/app/pkg/routetest"
 )
 
-// apiRoutes classifies every route api.go registers. A new route fails
+// apiRoutes classifies every route the package registers. A new route fails
 // TestAPIRoutesAreClassified until it is added here on purpose.
 var apiRoutes = map[string]routetest.Class{
 	"GET /healthz":                     routetest.Public,
@@ -47,8 +47,8 @@ var apiCrossTenantRoutes = []string{
 	"DELETE /alert-subscriptions/{id}",
 }
 
-// TestAPIRoutesAreClassified checks every route api.go registers against
+// TestAPIRoutesAreClassified checks every route the package registers against
 // apiRoutes and apiCrossTenantRoutes (rules in routetest.Check).
 func TestAPIRoutesAreClassified(t *testing.T) {
-	routetest.Check(t, routetest.Registered(t, "api.go"), apiRoutes, apiCrossTenantRoutes)
+	routetest.Check(t, routetest.Registered(t, "."), apiRoutes, apiCrossTenantRoutes)
 }
