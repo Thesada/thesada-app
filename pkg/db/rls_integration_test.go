@@ -4,8 +4,9 @@
 //
 // Proves the RLS policies in 0016_rls_policies.sql actually isolate
 // tenants. This is the first DB-backed test in the repo, so it is fenced
-// behind the `integration` build tag: `make test` / the default CI lane
-// never compile it. Run it explicitly:
+// behind the `integration` build tag. Without THESADA_TEST_DATABASE_URL it
+// starts its own TimescaleDB container (needs Docker); to aim it at an
+// existing cluster instead:
 //
 //	THESADA_TEST_DATABASE_URL='postgres://postgres:pw@127.0.0.1:5432/thesada_app?sslmode=disable' \
 //	    go test -tags integration -run TestRLS ./pkg/db/...
@@ -40,6 +41,7 @@ import (
 
 	"thesada.app/app/migrations"
 	"thesada.app/app/pkg/db"
+	"thesada.app/app/pkg/service/servicetest"
 )
 
 // rolePassword is shared by all three thesada_app* roles for the test run.
@@ -258,9 +260,11 @@ func countInTenant(ctx context.Context, pool *pgxpool.Pool, tenant, table string
 // asserts one isolation property; a failure here means a tenant could read
 // another tenant's rows once the gate is flipped in production.
 func TestRLSTenantIsolation(t *testing.T) {
+	// An explicit cluster wins; otherwise a throwaway container, so CI runs
+	// this instead of skipping it.
 	baseURL := os.Getenv("THESADA_TEST_DATABASE_URL")
 	if baseURL == "" {
-		t.Skip("THESADA_TEST_DATABASE_URL not set; see file header for setup")
+		_, baseURL = servicetest.StartPostgres(t)
 	}
 	ctx := context.Background()
 	p := setupRLSDatabase(t, baseURL)
