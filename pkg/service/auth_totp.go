@@ -139,7 +139,7 @@ func (s *AuthService) FinishTOTPLoginAny(token, code string) (*User, string, err
 			_, execErr := tx.Exec(ctx, `DELETE FROM totp_challenges WHERE token_hash = $1`, hash[:])
 			return execErr
 		}
-		ok, checkErr := MatchTOTP(*secret, code)
+		ok, checkErr := acceptTOTPCode(ctx, tx, u.ID, *secret, code)
 		if checkErr != nil {
 			return checkErr
 		}
@@ -147,8 +147,16 @@ func (s *AuthService) FinishTOTPLoginAny(token, code string) (*User, string, err
 			rejected = true
 			return noteWrongTOTP(ctx, tx, hash[:])
 		}
-		_, execErr := tx.Exec(ctx, `DELETE FROM totp_challenges WHERE token_hash = $1`, hash[:])
-		return execErr
+		// One winner per challenge: a parallel finish that lost the race
+		// deletes nothing and must not open a second session.
+		tag, execErr := tx.Exec(ctx, `DELETE FROM totp_challenges WHERE token_hash = $1`, hash[:])
+		if execErr != nil {
+			return execErr
+		}
+		if tag.RowsAffected() != 1 {
+			return ErrExpired
+		}
+		return nil
 	})
 	if rejected && err == nil {
 		return nil, "", ErrBadCredentials
@@ -179,6 +187,41 @@ func noteWrongTOTP(ctx context.Context, tx pgx.Tx, hash []byte) error {
 	}
 	_, err = tx.Exec(ctx, `DELETE FROM totp_challenges WHERE token_hash = $1`, hash)
 	return err
+}
+
+// acceptTOTPCode checks code against secret and records its time step, so
+// the same code (or an older one) cannot sign in again. The guarded UPDATE
+// is the single-winner gate for parallel logins with one code.
+// in: ctx, tx, user id, base32 secret, code. out: accepted, error.
+func acceptTOTPCode(ctx context.Context, tx pgx.Tx, userID uuid.UUID, secret, code string) (bool, error) {
+	step, ok, err := totp.CheckStep(secret, code, time.Now())
+	if err != nil || !ok {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx,
+		`UPDATE users SET totp_last_step = $2
+		  WHERE id = $1 AND (totp_last_step IS NULL OR totp_last_step < $2)`, userID, step)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// AcceptTOTPLogin is the replay-safe code check for a login that carries the
+// code in the same request (the JSON password login).
+// in: tenant id, user id, base32 secret, code. out: accepted, error.
+func (s *AuthService) AcceptTOTPLogin(tenantID string, userID uuid.UUID, secret, code string) (bool, error) {
+	ctx := context.Background()
+	var ok bool
+	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		var err error
+		ok, err = acceptTOTPCode(ctx, tx, userID, secret, code)
+		return err
+	})
+	if err != nil {
+		return false, fmt.Errorf("auth: accept totp: %w", err)
+	}
+	return ok, nil
 }
 
 // MatchTOTP reports whether code matches an enrolled base32 secret.
