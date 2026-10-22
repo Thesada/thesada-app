@@ -1181,7 +1181,7 @@ redispatch, no-double-send on partial channel failure).
 Source: `pkg/alerts/alerts.go::Dispatch`, `pkg/alerts/redispatch.go`,
 migration `0025_alert_delivery_retry.sql`.
 
-### A webhook is posted once per alert, and not at a loopback address
+### A webhook is posted once per alert, and not into the internal network
 
 A subscription with channel `webhook` is a third delivery channel. Dispatch
 POSTs a JSON body (`alert_id`, `device_id`, `severity`, `code`, `message`,
@@ -1196,7 +1196,13 @@ delivery row is accepted only when that subscription's user is in the
 device's tenant, and the subscription names that device or every device.
 The URL must be http or https
 with a host. Loopback, link-local, and redirects are refused. Private
-addresses are allowed so a receiver on the home network still works.
+(RFC 1918, fc00::/7) and CGNAT (100.64.0.0/10, the NetBird overlay)
+addresses are refused too, because from the server a tenant's webhook would
+otherwise reach the internal network. An operator opens specific ranges with
+`THESADA_WEBHOOK_ALLOW_CIDRS` (comma-separated IPs or CIDRs, e.g. a home
+Home Assistant); loopback and link-local stay refused even when listed. The
+check runs on the stored URL and again on every dial, against the resolved
+address.
 A refused destination is not copied into the error, so a token in the
 URL does not land in the log.
 
