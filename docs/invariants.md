@@ -490,6 +490,17 @@ bad severity return 400, a foreign device_pk 404s, and the create -> list
 
 Source: `pkg/api/v1/alerts.go`.
 
+### Opening a magic link consumes nothing; the POST signs in
+
+`GET /login/verify?token=` renders a page with a sign-in button and does not
+touch the token. Mail scanners open links before the user does, so a GET that
+consumed the token would burn it and hand the scanner a session. The button
+POSTs the token (CSRF-checked) to `POST /login/verify`, which consumes it.
+
+How verified: `pkg/web/magic_link_integration_test.go`.
+
+Source: `pkg/web/web_auth.go::handleMagicLinkForm`, `handleMagicLinkVerify`.
+
 ### Magic-link and password-reset consumption is atomic single-winner
 
 `consumeLinkToken` and `MarkResetConsumed` use `UPDATE ... RETURNING`
