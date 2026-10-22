@@ -76,6 +76,21 @@ jobs:
       - name: Security-package coverage gate (>= 80%)
         run: make coverage
 
+  # Every -tags integration test (coverage only runs the security packages);
+  # without this job the rest rot unnoticed.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Integration tests
+        run: make test-integration
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:

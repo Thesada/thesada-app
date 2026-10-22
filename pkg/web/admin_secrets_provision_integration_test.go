@@ -59,8 +59,9 @@ func TestAdminDeviceSecretsProvision_Integration(t *testing.T) {
 		if rec.Code != http.StatusFound {
 			t.Fatalf("status = %d, want 302", rec.Code)
 		}
-		if loc := rec.Header().Get("Location"); !strings.Contains(loc, "ok=provisioned+2") {
-			t.Errorf("Location = %q, want ok=provisioned+2", loc)
+		// Only two fields are set; the unset ones count as skipped.
+		if loc := rec.Header().Get("Location"); !strings.HasSuffix(loc, "?"+flashSecretProvisionedMix.query()) {
+			t.Errorf("Location = %q, want %s", loc, flashSecretProvisionedMix.query())
 		}
 		if fd.Calls("secret.set") != 2 {
 			t.Errorf("secret.set calls = %d, want 2", fd.Calls("secret.set"))
