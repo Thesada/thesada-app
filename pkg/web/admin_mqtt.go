@@ -63,6 +63,7 @@ func (s *Server) handleAdminMqttShell(w http.ResponseWriter, r *http.Request) {
 	root := s.cfg.MQTTTopicRoot
 	s.render(w, r, "admin-mqtt.html", map[string]interface{}{
 		"DefaultPattern": root + "/" + authmw.EffectiveTenantID(r) + "/#",
+		"TopicRoot":      root,
 	})
 }
 

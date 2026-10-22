@@ -33,7 +33,7 @@ func dynsecDeviceRoleName(tenant, deviceID string) string {
 
 // dynsecSettingCrossTenantRead is the per-tenant settings key that controls
 // whether paired devices get broad subscribe access across the tenant tree.
-// When true: broad subscribe + receive on the ENTIRE thesada/# tree across
+// When true: broad subscribe + receive on the ENTIRE <root>/# tree across
 // every tenant. Default ON for the "default" tenant (homelab, legacy 3-tier
 // layout where CYD reads OWB, OLED reads sht31, Spotify state, etc), OFF
 // for any other tenant - multi-tenant isolation stays tight unless an
@@ -43,22 +43,26 @@ const dynsecSettingCrossTenantRead = "mqtt_cross_tenant_read"
 // dynsecDeviceACLs returns the per-device ACL set for a paired device.
 //
 // Publish scope is always narrow: the device can only send on its own
-// `thesada/<prefix>/#` plus the shared `homeassistant/#` discovery tree.
+// `<prefix>/#` plus the shared `homeassistant/#` discovery tree.
 // Tenant isolation on the write path is enforced here regardless of any
 // subscribe-side policy.
 //
 // Subscribe scope depends on the `mqtt_cross_tenant_read` per-tenant
 // setting:
-//   - broadRead=true  -> read on `thesada/#` so display devices can consume
+//   - broadRead=true  -> read on `<root>/#` so display devices can consume
 //     other devices' sensor topics (CYD dashboard reading OWB/sht31,
 //     Spotify state from HA, etc). Default for the `default` tenant.
-//   - broadRead=false -> tenant-scoped read only (`thesada/<tenant>/#`).
+//   - broadRead=false -> tenant-scoped read only (`<root>/<tenant>/#`).
 //     Default for every non-default tenant.
 //
 // HA discovery topics (`homeassistant/#`) are readable in both modes
 // because HA lives outside the tenant tree and is one-per-deployment.
-// in: tenant id, topic prefix, broad-read flag. out: ACL list.
-func dynsecDeviceACLs(tenantID, topicPrefix string, broadRead bool) []mqtt.DynsecACL {
+// in: topic root (THESADA_MQTT_TOPIC_ROOT), tenant id, topic prefix,
+// broad-read flag. out: ACL list.
+func dynsecDeviceACLs(root, tenantID, topicPrefix string, broadRead bool) []mqtt.DynsecACL {
+	if root == "" {
+		root = "thesada"
+	}
 	ownTopic := topicPrefix + "/#"
 	acls := make([]mqtt.DynsecACL, 0, 6)
 	acls = append(acls,
@@ -72,15 +76,36 @@ func dynsecDeviceACLs(tenantID, topicPrefix string, broadRead bool) []mqtt.Dynse
 	)
 	var subTopic string
 	if broadRead {
-		subTopic = "thesada/#"
+		subTopic = root + "/#"
 	} else {
-		subTopic = "thesada/" + tenantID + "/#"
+		subTopic = root + "/" + tenantID + "/#"
 	}
 	acls = append(acls,
 		mqtt.DynsecACL{ACLType: "subscribePattern", Topic: subTopic, Allow: true},
 		mqtt.DynsecACL{ACLType: "publishClientReceive", Topic: subTopic, Allow: true},
+		// Own prefix always: a stored prefix from before a root change sits
+		// outside subTopic, and the device must still get its CLI requests.
+		mqtt.DynsecACL{ACLType: "subscribePattern", Topic: ownTopic, Allow: true},
+		mqtt.DynsecACL{ACLType: "publishClientReceive", Topic: ownTopic, Allow: true},
 	)
 	return acls
+}
+
+// dynsecRoleWriter is the slice of the broker client ensureDynsecRole needs.
+type dynsecRoleWriter interface {
+	CreateDynsecRole(ctx context.Context, name string, acls []mqtt.DynsecACL) error
+	SetDynsecRoleACLs(ctx context.Context, name string, acls []mqtt.DynsecACL) error
+}
+
+// ensureDynsecRole creates the role, or replaces its ACLs when it already
+// exists, so a re-pair or a changed broad-read setting reaches the broker.
+// in: ctx, broker client, role name, ACLs. out: error.
+func ensureDynsecRole(ctx context.Context, w dynsecRoleWriter, name string, acls []mqtt.DynsecACL) error {
+	err := w.CreateDynsecRole(ctx, name, acls)
+	if mqtt.IsDynsecAlreadyExists(err) {
+		return w.SetDynsecRoleACLs(ctx, name, acls)
+	}
+	return err
 }
 
 // provisionDeviceDynsec creates the broker-side role and client for a device.
@@ -92,9 +117,9 @@ func dynsecDeviceACLs(tenantID, topicPrefix string, broadRead bool) []mqtt.Dynse
 // cryptographically valid, and the failure is silent from the app side - the
 // pairing looks complete and the device simply never appears.
 //
-// Role first so the client create can attach it atomically. "already exists"
-// is tolerated on both, which is what makes the whole step safe to retry after
-// a partial failure.
+// Role first so the client create can attach it atomically. An existing role
+// gets its ACLs replaced and an existing client is tolerated, which is what
+// makes the whole step safe to retry and to re-run on a re-pair.
 //
 // Shared by the operator pair flow and the self-service claim flow. Keeping it
 // in one place is the point: a second copy would drift, and the drift would be
@@ -108,9 +133,8 @@ func (s *Server) provisionDeviceDynsec(ctx context.Context, tenantID, deviceID, 
 	// every other tenant. Operators can flip via SettingsService.
 	broadRead := s.services.Settings.GetBool(tenantID,
 		dynsecSettingCrossTenantRead, tenantID == "default")
-	if err := s.mqtt.CreateDynsecRole(ctx, roleName,
-		dynsecDeviceACLs(tenantID, topicPrefix, broadRead)); err != nil &&
-		!mqtt.IsDynsecAlreadyExists(err) {
+	if err := ensureDynsecRole(ctx, s.mqtt, roleName,
+		dynsecDeviceACLs(s.cfg.MQTTTopicRoot, tenantID, topicPrefix, broadRead)); err != nil {
 		return "dynsec_role_create", err
 	}
 	// Cert-only client: empty password, auth via TLS CN on the mTLS listener.
