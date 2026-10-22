@@ -37,8 +37,8 @@ func TestAdminDeviceSecretsSet_Integration(t *testing.T) {
 		if rec.Code != http.StatusFound {
 			t.Fatalf("status = %d, want 302", rec.Code)
 		}
-		if loc := rec.Header().Get("Location"); !strings.Contains(loc, "ok=set") {
-			t.Errorf("Location = %q, want ok=set", loc)
+		if loc := rec.Header().Get("Location"); !strings.HasSuffix(loc, "?"+flashSecretSet.query()) {
+			t.Errorf("Location = %q, want %s", loc, flashSecretSet.query())
 		}
 		// Persisted and decrypts back to exactly what was submitted.
 		got, found, err := env.Services.Secrets.Reveal(ctx, tenant, pk, "mqtt.password")
