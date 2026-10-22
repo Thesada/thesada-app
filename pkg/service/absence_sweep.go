@@ -120,6 +120,7 @@ func (s *AlertService) StartAbsenceSweep(ctx context.Context) <-chan struct{} {
 			interval = time.Minute
 		}
 		s.RaiseAbsencesAny(ctx)
+		s.RaiseCertExpiriesAny(ctx)
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
@@ -128,6 +129,7 @@ func (s *AlertService) StartAbsenceSweep(ctx context.Context) <-chan struct{} {
 				return
 			case <-t.C:
 				s.RaiseAbsencesAny(ctx)
+				s.RaiseCertExpiriesAny(ctx)
 			}
 		}
 	}()
