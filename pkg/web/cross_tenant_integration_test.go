@@ -4,7 +4,8 @@
 // object (webCrossTenantRoutes). A user in tenant B aims each route at
 // tenant A's objects: reads must 404 or show nothing of A, writes must leave
 // A's rows in place. Each case also runs as A's owner, so a check that can
-// never fail (two empty pages match) is caught.
+// never fail (two empty pages match) is caught. Revoke is the exception: its
+// owner path needs the broker and is covered in device_revoke_integration_test.go.
 //
 //	go test -tags integration -run TestCrossTenant_WebRoutes ./pkg/web/...
 package web
@@ -186,6 +187,7 @@ func TestCrossTenant_WebRoutes(t *testing.T) {
 			wantHidden(t, getAs(f.srv, "/alerts", f.out), ctAlertText)
 			wantShown(t, getAs(f.srv, "/alerts", f.owner), ctAlertText)
 		},
+		// Owner side: TestOwnerRevoke_* (needs the broker for cert.clear).
 		"POST /devices/{id}/revoke": func(t *testing.T) {
 			form := url.Values{"confirm_device_id": {ctDeviceID}}
 			if rec := postAuthed(t, f.srv, dev+"/revoke", form, f.out, ""); rec.Code != http.StatusNotFound {
