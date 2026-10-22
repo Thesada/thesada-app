@@ -12,8 +12,9 @@ import (
 
 // deviceSendSites is every function in this package that talks to the broker
 // (an <x>.mqtt.<Method> call), with the admin_audit action that records it or
-// why it needs none. A new site fails TestDeviceSendSitesAreAudited until it
-// is listed here, so a command path cannot skip the audit by accident.
+// why it needs none. TestDeviceSendSitesAreAudited forces that decision for a
+// new site; it does not prove the row is written. That is checked by
+// TestAdminAuditTrail, TestAdminMqttShell and the service audit tests.
 var deviceSendSites = map[string]string{
 	"runCLICmd":                  "device.command, written at enqueue in handleAdminDeviceConfigCmd",
 	"runCLIWrite":                "device.config_write, written at enqueue in handleAdminDeviceConfigWrite",
