@@ -132,9 +132,11 @@
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       addRow(m.type, m);
     };
-    ws.onclose = function () {
-      setStatus('disconnected', 'err');
+    ws.onclose = function (ev) {
       ws = null;
+      // 4000: the server's lifetime cap, reconnect (and re-auth) at once.
+      if (ev.code === 4000) { connect(); return; }
+      setStatus('disconnected', 'err');
     };
     ws.onerror = function () {
       setStatus('error', 'err');
