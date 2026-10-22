@@ -52,6 +52,7 @@ func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 		"TotalDevices":    totalDevices,
 		"PendingWaitlist": pendingWaitlist,
 		"MultiTenantMode": s.services.Settings.GetBool("default", "multi_tenant_mode", false),
+		"TopicRoot":       s.cfg.MQTTTopicRoot,
 	})
 }
 
@@ -84,6 +85,7 @@ func (s *Server) handleAdminTenants(w http.ResponseWriter, r *http.Request) {
 		"QuotaDevices":    s.quotaDevices(),
 		"QuotaEvents":     s.quotaEvents(),
 		"MultiTenantMode": s.services.Settings.GetBool("default", "multi_tenant_mode", false),
+		"TopicRoot":       s.cfg.MQTTTopicRoot,
 	})
 }
 
@@ -208,6 +210,7 @@ func (s *Server) renderAdminTenantsWithError(w http.ResponseWriter, r *http.Requ
 		"QuotaDevices":    s.quotaDevices(),
 		"QuotaEvents":     s.quotaEvents(),
 		"MultiTenantMode": s.services.Settings.GetBool("default", "multi_tenant_mode", false),
+		"TopicRoot":       s.cfg.MQTTTopicRoot,
 	})
 }
 

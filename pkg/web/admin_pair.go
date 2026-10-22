@@ -33,7 +33,7 @@ func dynsecDeviceRoleName(tenant, deviceID string) string {
 
 // dynsecSettingCrossTenantRead is the per-tenant settings key that controls
 // whether paired devices get broad subscribe access across the tenant tree.
-// When true: broad subscribe + receive on the ENTIRE thesada/# tree across
+// When true: broad subscribe + receive on the ENTIRE <root>/# tree across
 // every tenant. Default ON for the "default" tenant (homelab, legacy 3-tier
 // layout where CYD reads OWB, OLED reads sht31, Spotify state, etc), OFF
 // for any other tenant - multi-tenant isolation stays tight unless an
@@ -43,22 +43,26 @@ const dynsecSettingCrossTenantRead = "mqtt_cross_tenant_read"
 // dynsecDeviceACLs returns the per-device ACL set for a paired device.
 //
 // Publish scope is always narrow: the device can only send on its own
-// `thesada/<prefix>/#` plus the shared `homeassistant/#` discovery tree.
+// `<prefix>/#` plus the shared `homeassistant/#` discovery tree.
 // Tenant isolation on the write path is enforced here regardless of any
 // subscribe-side policy.
 //
 // Subscribe scope depends on the `mqtt_cross_tenant_read` per-tenant
 // setting:
-//   - broadRead=true  -> read on `thesada/#` so display devices can consume
+//   - broadRead=true  -> read on `<root>/#` so display devices can consume
 //     other devices' sensor topics (CYD dashboard reading OWB/sht31,
 //     Spotify state from HA, etc). Default for the `default` tenant.
-//   - broadRead=false -> tenant-scoped read only (`thesada/<tenant>/#`).
+//   - broadRead=false -> tenant-scoped read only (`<root>/<tenant>/#`).
 //     Default for every non-default tenant.
 //
 // HA discovery topics (`homeassistant/#`) are readable in both modes
 // because HA lives outside the tenant tree and is one-per-deployment.
-// in: tenant id, topic prefix, broad-read flag. out: ACL list.
-func dynsecDeviceACLs(tenantID, topicPrefix string, broadRead bool) []mqtt.DynsecACL {
+// in: topic root (THESADA_MQTT_TOPIC_ROOT), tenant id, topic prefix,
+// broad-read flag. out: ACL list.
+func dynsecDeviceACLs(root, tenantID, topicPrefix string, broadRead bool) []mqtt.DynsecACL {
+	if root == "" {
+		root = "thesada"
+	}
 	ownTopic := topicPrefix + "/#"
 	acls := make([]mqtt.DynsecACL, 0, 6)
 	acls = append(acls,
@@ -72,9 +76,9 @@ func dynsecDeviceACLs(tenantID, topicPrefix string, broadRead bool) []mqtt.Dynse
 	)
 	var subTopic string
 	if broadRead {
-		subTopic = "thesada/#"
+		subTopic = root + "/#"
 	} else {
-		subTopic = "thesada/" + tenantID + "/#"
+		subTopic = root + "/" + tenantID + "/#"
 	}
 	acls = append(acls,
 		mqtt.DynsecACL{ACLType: "subscribePattern", Topic: subTopic, Allow: true},
@@ -109,7 +113,7 @@ func (s *Server) provisionDeviceDynsec(ctx context.Context, tenantID, deviceID, 
 	broadRead := s.services.Settings.GetBool(tenantID,
 		dynsecSettingCrossTenantRead, tenantID == "default")
 	if err := s.mqtt.CreateDynsecRole(ctx, roleName,
-		dynsecDeviceACLs(tenantID, topicPrefix, broadRead)); err != nil &&
+		dynsecDeviceACLs(s.cfg.MQTTTopicRoot, tenantID, topicPrefix, broadRead)); err != nil &&
 		!mqtt.IsDynsecAlreadyExists(err) {
 		return "dynsec_role_create", err
 	}
