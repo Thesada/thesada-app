@@ -26,6 +26,10 @@ import (
 // knows it missed traffic.
 const adminMqttMaxBuffer = 256
 
+// adminMqttAuditCap bounds the topics and patterns one session's audit row
+// lists; the publish count stays exact.
+const adminMqttAuditCap = 50
+
 // adminMqttPublishMax is the per-socket publish rate limit window + count.
 const (
 	adminMqttPublishWindow = 10 * time.Second
@@ -100,28 +104,41 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
+	// The route is super-admin only (RequireSuperAdmin), so the whole tree
+	// under the topic root is in scope; nothing outside it.
 	root := s.cfg.MQTTTopicRoot
 	allowedPrefix := root + "/"
-	if !authz.Can(user, authz.MQTTPublishAnyTenant) {
-		allowedPrefix = root + "/" + user.TenantID + "/"
-	}
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	// One admin_audit row per ws session, written on close with the publish
-	// count - never per message, or a busy shell would flood the table.
-	// Fresh context: the request/ws contexts are already canceled by the
-	// time this defer runs.
-	var publishes int
+	// One admin_audit row per ws session, written on close - never per
+	// message, or a busy shell would flood the table. It names the first
+	// adminMqttAuditCap topics with payload sizes (never payloads: they can
+	// carry secrets, and the table is append-only) and every pattern read.
+	// Fresh context: the request/ws contexts are canceled by then.
+	var (
+		publishes  int
+		published  []map[string]any
+		subscribed []string
+	)
 	defer func() {
-		if publishes == 0 {
+		if publishes == 0 && len(subscribed) == 0 {
 			return
+		}
+		action := authz.MQTTShellPublish
+		if publishes == 0 {
+			action = authz.MQTTShellSubscribe
 		}
 		actx, acancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer acancel()
-		s.audit(actx, user, authz.MQTTShellPublish, service.AuditEntry{
-			Detail: map[string]any{"publishes": publishes},
+		s.audit(actx, user, action, service.AuditEntry{
+			Detail: map[string]any{
+				"publishes":  publishes,
+				"published":  published,
+				"truncated":  publishes > len(published),
+				"subscribed": subscribed,
+			},
 		})
 	}()
 
@@ -227,6 +244,9 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 				out <- adminMqttOutboundMsg{Type: "error", Error: "bad pattern: " + err.Error()}
 				continue
 			}
+			if len(subscribed) < adminMqttAuditCap {
+				subscribed = append(subscribed, pattern)
+			}
 			out <- adminMqttOutboundMsg{Type: "info", Info: "subscribed: " + pattern}
 		case "publish":
 			topic := strings.TrimSpace(in.Topic)
@@ -248,6 +268,11 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			publishes++
+			if len(published) < adminMqttAuditCap {
+				published = append(published, map[string]any{
+					"topic": topic, "bytes": len(in.Payload), "retain": in.Retain,
+				})
+			}
 			slog.Info("admin mqtt publish",
 				"user", func() string {
 					if user == nil {

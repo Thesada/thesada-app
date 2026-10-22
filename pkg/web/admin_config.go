@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/mqtt"
 	"thesada.app/app/pkg/service"
 )
@@ -144,6 +145,12 @@ func (s *Server) handleAdminDeviceConfigCmd(w http.ResponseWriter, r *http.Reque
 		"user", user.Email, "device", device.DeviceID,
 		"cmd", req.Command, "payload_len", len(req.Payload))
 
+	// Recorded at enqueue, before the device answers: a command that hangs
+	// or reboots the device is still on the trail. Payload size only.
+	s.audit(r.Context(), user, authz.DeviceCommand, service.AuditEntry{
+		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
+		Detail: map[string]any{"device_id": device.DeviceID, "command": req.Command, "payload_bytes": len(req.Payload)},
+	})
 	reqID := s.cliRequests.enqueue()
 
 	// Goroutine context is detached from r.Context() via WithoutCancel - the
@@ -313,6 +320,12 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 		"user", user.Email, "device", device.DeviceID,
 		"path", req.Path, "content_len", len(req.Content))
 
+	h := sha256.Sum256([]byte(req.Content))
+	s.audit(r.Context(), user, authz.DeviceConfigWrite, service.AuditEntry{
+		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
+		Detail: map[string]any{"device_id": device.DeviceID, "path": req.Path,
+			"bytes": len(req.Content), "sha256": hex.EncodeToString(h[:])},
+	})
 	reqID := s.cliRequests.enqueue()
 	// Detached goroutine - same rationale as runCLICmd above: the async CLI
 	// proxy outlives the HTTP request, so WithoutCancel sheds r.Context()
