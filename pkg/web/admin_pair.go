@@ -83,8 +83,29 @@ func dynsecDeviceACLs(root, tenantID, topicPrefix string, broadRead bool) []mqtt
 	acls = append(acls,
 		mqtt.DynsecACL{ACLType: "subscribePattern", Topic: subTopic, Allow: true},
 		mqtt.DynsecACL{ACLType: "publishClientReceive", Topic: subTopic, Allow: true},
+		// Own prefix always: a stored prefix from before a root change sits
+		// outside subTopic, and the device must still get its CLI requests.
+		mqtt.DynsecACL{ACLType: "subscribePattern", Topic: ownTopic, Allow: true},
+		mqtt.DynsecACL{ACLType: "publishClientReceive", Topic: ownTopic, Allow: true},
 	)
 	return acls
+}
+
+// dynsecRoleWriter is the slice of the broker client ensureDynsecRole needs.
+type dynsecRoleWriter interface {
+	CreateDynsecRole(ctx context.Context, name string, acls []mqtt.DynsecACL) error
+	SetDynsecRoleACLs(ctx context.Context, name string, acls []mqtt.DynsecACL) error
+}
+
+// ensureDynsecRole creates the role, or replaces its ACLs when it already
+// exists, so a re-pair or a changed broad-read setting reaches the broker.
+// in: ctx, broker client, role name, ACLs. out: error.
+func ensureDynsecRole(ctx context.Context, w dynsecRoleWriter, name string, acls []mqtt.DynsecACL) error {
+	err := w.CreateDynsecRole(ctx, name, acls)
+	if mqtt.IsDynsecAlreadyExists(err) {
+		return w.SetDynsecRoleACLs(ctx, name, acls)
+	}
+	return err
 }
 
 // provisionDeviceDynsec creates the broker-side role and client for a device.
@@ -96,9 +117,9 @@ func dynsecDeviceACLs(root, tenantID, topicPrefix string, broadRead bool) []mqtt
 // cryptographically valid, and the failure is silent from the app side - the
 // pairing looks complete and the device simply never appears.
 //
-// Role first so the client create can attach it atomically. "already exists"
-// is tolerated on both, which is what makes the whole step safe to retry after
-// a partial failure.
+// Role first so the client create can attach it atomically. An existing role
+// gets its ACLs replaced and an existing client is tolerated, which is what
+// makes the whole step safe to retry and to re-run on a re-pair.
 //
 // Shared by the operator pair flow and the self-service claim flow. Keeping it
 // in one place is the point: a second copy would drift, and the drift would be
@@ -112,9 +133,8 @@ func (s *Server) provisionDeviceDynsec(ctx context.Context, tenantID, deviceID, 
 	// every other tenant. Operators can flip via SettingsService.
 	broadRead := s.services.Settings.GetBool(tenantID,
 		dynsecSettingCrossTenantRead, tenantID == "default")
-	if err := s.mqtt.CreateDynsecRole(ctx, roleName,
-		dynsecDeviceACLs(s.cfg.MQTTTopicRoot, tenantID, topicPrefix, broadRead)); err != nil &&
-		!mqtt.IsDynsecAlreadyExists(err) {
+	if err := ensureDynsecRole(ctx, s.mqtt, roleName,
+		dynsecDeviceACLs(s.cfg.MQTTTopicRoot, tenantID, topicPrefix, broadRead)); err != nil {
 		return "dynsec_role_create", err
 	}
 	// Cert-only client: empty password, auth via TLS CN on the mTLS listener.
