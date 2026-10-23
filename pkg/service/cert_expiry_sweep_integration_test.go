@@ -4,6 +4,7 @@ package service_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,16 @@ func TestCertExpirySweep_OneWarnPerCertAndClearOnRevoke(t *testing.T) {
 	}
 	if n := certExpiryAlerts(t, env, later, false); n != 0 {
 		t.Fatalf("later alerts = %d, want 0", n)
+	}
+	gone := seedCertDevice(t, env, "cx-a", "thesada-cx-gone", "cx-gone", now.Add(-48*time.Hour))
+	env.Services.Alerts.RaiseCertExpiriesAny(ctx)
+	var msg string
+	if err := env.Super.QueryRow(ctx,
+		`SELECT message FROM device_alerts WHERE device_pk = $1 AND code = 'cert_expiring'`, gone).Scan(&msg); err != nil {
+		t.Fatalf("expired cert alert: %v", err)
+	}
+	if !strings.Contains(msg, "expired") {
+		t.Fatalf("expired cert message %q", msg)
 	}
 
 	if err := env.Services.Certificates.Revoke(ctx, "cx-a", soon); err != nil {

@@ -84,6 +84,9 @@ func (s *AlertService) RaiseCertExpiriesAny(ctx context.Context) {
 			continue
 		}
 		msg := "client certificate expires " + r.notAfter.UTC().Format("2006-01-02") + "; re-pair the device before then"
+		if !r.notAfter.After(time.Now()) {
+			msg = "client certificate expired " + r.notAfter.UTC().Format("2006-01-02") + "; the device is refused until it is re-paired"
+		}
 		id, err := s.InsertAlert(ctx, r.tenantID, r.devicePk, "warn", "cert_expiring", msg, raw)
 		if errors.Is(err, ErrDuplicateAlert) {
 			continue

@@ -958,7 +958,8 @@ Device certs live `pki.DeviceCertValidity` (365 days) and nothing renews
 them; the device is offline on the mTLS listener once `not_after` passes.
 The alert sweep raises one `warn` alert with code `cert_expiring` per
 active certificate that expires within `CertExpiryWarning` (30 days),
-keyed by serial in `raw`, so a cert is warned once. The alert clears once
+keyed by serial in `raw`, so a cert is warned once. A cert already past
+`not_after` still gets the alert, worded as expired, so a dead device is never silent. The alert clears once
 that serial is no longer the device's active, unrevoked cert (re-pair or
 revoke). The fix for the device is a re-pair.
 
