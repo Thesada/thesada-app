@@ -26,8 +26,8 @@ func TestValidWebhookURL_RefusesInternalUnlessAllowed(t *testing.T) {
 	}
 	for _, internal := range []string{
 		"http://127.0.0.1/hook", "http://localhost/hook", "http://169.254.169.254/",
-		"http://10.10.10.1:8006/", "http://192.168.1.5/hook", "http://172.16.0.9/",
-		"http://100.78.126.149/hook", "http://[fd00::1]/hook",
+		"http://10.9.9.1:8080/", "http://192.168.1.5/hook", "http://172.16.0.9/",
+		"http://100.64.0.1/hook", "http://[fd00::1]/hook",
 	} {
 		if ValidWebhookURL(internal, nil) {
 			t.Errorf("%s accepted without an allowlist", internal)
@@ -38,7 +38,7 @@ func TestValidWebhookURL_RefusesInternalUnlessAllowed(t *testing.T) {
 	if !ValidWebhookURL("http://10.0.0.30:8123/api/webhook/x", allow) {
 		t.Fatal("allowlisted private address rejected")
 	}
-	if ValidWebhookURL("http://10.10.10.1:8006/", allow) {
+	if ValidWebhookURL("http://10.9.9.1:8080/", allow) {
 		t.Fatal("private address outside the allowlist accepted")
 	}
 	_, all, _ := net.ParseCIDR("0.0.0.0/0")

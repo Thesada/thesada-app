@@ -92,13 +92,21 @@ func TestSendWebhook_RefusesLoopbackAndRedirect(t *testing.T) {
 func TestDialWebhookAddr_PrivateNeedsTheAllowlist(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err := dialWebhookAddr(ctx, "tcp", "10.10.10.1:8006", nil)
+	_, err := dialWebhookAddr(ctx, "tcp", "10.9.9.1:8080", nil)
 	if err == nil || !strings.Contains(err.Error(), "address refused") {
 		t.Fatalf("private dial without allowlist = %v, want address refused", err)
 	}
-	_, lan, _ := net.ParseCIDR("10.10.10.0/24")
-	_, err = dialWebhookAddr(ctx, "tcp", "10.10.10.1:8006", []*net.IPNet{lan})
-	if err != nil && strings.Contains(err.Error(), "address refused") {
-		t.Fatalf("allowlisted dial was refused: %v", err)
+	var dialed string
+	webhookDial = func(_ context.Context, _, addr string) (net.Conn, error) {
+		dialed = addr
+		c, _ := net.Pipe()
+		return c, nil
 	}
+	defer func() { webhookDial = (&net.Dialer{Timeout: 5 * time.Second}).DialContext }()
+	_, lan, _ := net.ParseCIDR("10.9.9.0/24")
+	conn, err := dialWebhookAddr(ctx, "tcp", "10.9.9.1:8080", []*net.IPNet{lan})
+	if err != nil || dialed != "10.9.9.1:8080" {
+		t.Fatalf("allowlisted dial = %v to %q, want a dial to 10.9.9.1:8080", err, dialed)
+	}
+	_ = conn.Close()
 }

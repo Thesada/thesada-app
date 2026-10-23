@@ -25,6 +25,9 @@ func webhookDialer(allow []*net.IPNet) func(ctx context.Context, network, addr s
 	}
 }
 
+// webhookDial is the network dial; tests swap it so no test touches a network.
+var webhookDial = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
+
 // dialWebhookAddr dials addr after refusing a resolved address we will not POST.
 // in: ctx, network, host:port, operator allowlist. out: conn, error.
 func dialWebhookAddr(ctx context.Context, network, addr string, allow []*net.IPNet) (net.Conn, error) {
@@ -44,10 +47,9 @@ func dialWebhookAddr(ctx context.Context, network, addr string, allow []*net.IPN
 			return nil, fmt.Errorf("webhook dial %s: address refused", ip.IP)
 		}
 	}
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	var lastErr error
 	for _, ip := range ips {
-		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+		conn, err := webhookDial(ctx, network, net.JoinHostPort(ip.IP.String(), port))
 		if err == nil {
 			return conn, nil
 		}
