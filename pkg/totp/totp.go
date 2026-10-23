@@ -69,17 +69,36 @@ func Check(encoded, code string, at time.Time) (bool, error) {
 	return Verify(raw, code, at), nil
 }
 
+// CheckStep is Check that also returns the matched time step, so a caller can
+// refuse a step it has already accepted.
+// in: base32 secret, code, time. out: step, accepted, error.
+func CheckStep(encoded, code string, at time.Time) (int64, bool, error) {
+	raw, err := DecodeKey(encoded)
+	if err != nil {
+		return 0, false, err
+	}
+	s, ok := VerifyStep(raw, code, at)
+	return s, ok, nil
+}
+
 // Verify accepts the current step and one step either side.
 // in: raw key, code, time. out: true when the code matches.
 func Verify(key []byte, code string, at time.Time) bool {
+	_, ok := VerifyStep(key, code, at)
+	return ok
+}
+
+// VerifyStep is Verify that returns the time step the code matched.
+// in: raw key, code, time. out: step (unix seconds / 30), matched.
+func VerifyStep(key []byte, code string, at time.Time) (int64, bool) {
 	if len(code) != digits {
-		return false
+		return 0, false
 	}
 	for delta := -skew; delta <= skew; delta++ {
-		got := Code(key, at.Add(time.Duration(delta)*step))
-		if hmac.Equal([]byte(got), []byte(code)) {
-			return true
+		t := at.Add(time.Duration(delta) * step)
+		if hmac.Equal([]byte(Code(key, t)), []byte(code)) {
+			return t.Unix() / int64(step/time.Second), true
 		}
 	}
-	return false
+	return 0, false
 }
