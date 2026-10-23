@@ -76,6 +76,12 @@ func Bootstrap(dir, passphrase string) (*CA, *PlaintextKey, error) {
 	return ca, warn, err
 }
 
+// DeviceCertValidity is the lifetime of a device client cert, for every issue
+// path (pair, enroll, API). Short enough to limit blast radius if a device is
+// compromised, long enough to avoid fleet-wide re-pair churn. Nothing renews
+// it; the cert_expiring alert warns ahead of not_after.
+const DeviceCertValidity = 365 * 24 * time.Hour
+
 // SignDeviceCert generates an ECDSA P-256 keypair for a device and signs
 // a client certificate with the CA. The private key is returned but NOT
 // stored server-side - it is pushed to the device and then discarded.
