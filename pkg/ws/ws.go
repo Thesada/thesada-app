@@ -26,6 +26,16 @@ const pingPeriod = 30 * time.Second
 // pongWait is how long the server waits for a pong before dropping the client.
 const pongWait = 60 * time.Second
 
+// MaxLifetime caps one WebSocket connection. The session is only checked at
+// the upgrade, so a revoked or demoted user would otherwise keep streaming;
+// the browser reconnects and passes the auth middleware again. A var so tests
+// can shorten it.
+var MaxLifetime = 10 * time.Minute
+
+// ReauthCloseCode is the close code sent when MaxLifetime ends a connection,
+// so a client can tell "reconnect now" from a real failure.
+const ReauthCloseCode = 4000
+
 // sendBuffer is the per-connection outbound queue depth before we drop frames.
 const sendBuffer = 32
 
@@ -149,8 +159,10 @@ func (h *Hub) unregister(cn *conn) {
 // in: *conn. out: none.
 func (h *Hub) writePump(cn *conn) {
 	ticker := time.NewTicker(pingPeriod)
+	lifetime := time.NewTimer(MaxLifetime)
 	defer func() {
 		ticker.Stop()
+		lifetime.Stop()
 		h.unregister(cn)
 	}()
 	for {
@@ -169,6 +181,11 @@ func (h *Hub) writePump(cn *conn) {
 			if err := cn.ws.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
+		case <-lifetime.C:
+			_ = cn.ws.SetWriteDeadline(time.Now().Add(writeTimeout))
+			_ = cn.ws.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(ReauthCloseCode, "reauthenticate"))
+			return
 		}
 	}
 }

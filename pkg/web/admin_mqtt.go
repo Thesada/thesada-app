@@ -19,6 +19,7 @@ import (
 	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/ratelimit"
 	"thesada.app/app/pkg/service"
+	"thesada.app/app/pkg/ws"
 )
 
 // adminMqttMaxBuffer caps the per-socket outbound channel. When full, new
@@ -179,6 +180,10 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 		defer func() { _ = conn.Close() }()
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
+		// Same cap as /ws: the shell reconnects and passes RequireSuperAdmin
+		// again, so a demoted admin loses it within ws.MaxLifetime.
+		lifetime := time.NewTimer(ws.MaxLifetime)
+		defer lifetime.Stop()
 		for {
 			select {
 			case <-ctx.Done():
@@ -201,6 +206,11 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 					return
 				}
+			case <-lifetime.C:
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				_ = conn.WriteMessage(websocket.CloseMessage,
+					websocket.FormatCloseMessage(ws.ReauthCloseCode, "reauthenticate"))
+				return
 			}
 		}
 	}()
