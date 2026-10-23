@@ -179,6 +179,9 @@ func noteWrongTOTP(ctx context.Context, tx pgx.Tx, hash []byte) error {
 		   SET attempts = attempts + 1
 		 WHERE token_hash = $1
 		RETURNING attempts`, hash).Scan(&n)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrExpired // a parallel finish won and consumed the challenge
+	}
 	if err != nil {
 		return err
 	}

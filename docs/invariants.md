@@ -421,7 +421,8 @@ login parks a 5-minute challenge cookie and finishes at `POST /login/totp`.
 A code signs in once: the accepted time step is stored in
 `users.totp_last_step` by a guarded `UPDATE` (only a newer step lands), so a
 second login with the same code inside its 90 s window is refused, and of
-two parallel finishes on one challenge only one opens a session
+two parallel finishes on one challenge only one opens a session; a loser
+gets `ErrExpired`, never an internal error
 (`pkg/service/auth_totp_replay_integration_test.go`).
 A web finish that cannot decode the secret returns HTTP 500. An expired
 challenge redirects to `/login`. Password and magic-link API calls log
