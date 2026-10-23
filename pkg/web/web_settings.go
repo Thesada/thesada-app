@@ -85,7 +85,7 @@ func (s *Server) handleSettingsNotificationAdd(w http.ResponseWriter, r *http.Re
 		http.Error(w, "invalid channel", http.StatusBadRequest)
 		return
 	}
-	if err := service.WebhookDestinationError(channel, destination); err != nil {
+	if err := service.WebhookDestinationError(channel, destination, s.cfg.WebhookAllowNets); err != nil {
 		http.Error(w, "webhook needs an http(s) URL", http.StatusBadRequest)
 		return
 	}

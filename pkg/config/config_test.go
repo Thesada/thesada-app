@@ -59,10 +59,10 @@ func TestValidate_WeakSecretErrorIsActionable(t *testing.T) {
 
 // TestParseTrustedProxies covers IPs, CIDRs, empty, and loud failure on junk.
 func TestParseTrustedProxies(t *testing.T) {
-	if got, err := parseTrustedProxies(""); err != nil || got != nil {
+	if got, err := parseNetList("THESADA_TRUSTED_PROXIES", ""); err != nil || got != nil {
 		t.Errorf("empty = %v / %v, want nil/nil", got, err)
 	}
-	got, err := parseTrustedProxies(" 10.0.0.0/8 , 192.168.66.10 ")
+	got, err := parseNetList("THESADA_TRUSTED_PROXIES", " 10.0.0.0/8 , 192.168.66.10 ")
 	if err != nil {
 		t.Fatalf("valid list errored: %v", err)
 	}
@@ -76,8 +76,8 @@ func TestParseTrustedProxies(t *testing.T) {
 		t.Error("bare IP should parse to a single-host net")
 	}
 	for _, bad := range []string{"garbage", "10.0.0.0/99", "999.1.1.1", ",", "10.0.0.10,", "10.0.0.10,,10.0.0.11"} {
-		if _, err := parseTrustedProxies(bad); err == nil {
-			t.Errorf("parseTrustedProxies(%q) = nil error, want failure", bad)
+		if _, err := parseNetList("THESADA_TRUSTED_PROXIES", bad); err == nil {
+			t.Errorf("parseNetList(%q) = nil error, want failure", bad)
 		}
 	}
 }
@@ -175,5 +175,12 @@ func TestDeviceBrokerHostIgnoresTheAppURL(t *testing.T) {
 	}
 	if got := (*Config)(nil).DeviceBrokerHost(); got != "" {
 		t.Fatalf("nil config = %q", got)
+	}
+}
+
+func TestParseNetListNamesTheVariable(t *testing.T) {
+	_, err := parseNetList("THESADA_WEBHOOK_ALLOW_CIDRS", "10.0.0.0/33")
+	if err == nil || !strings.Contains(err.Error(), "THESADA_WEBHOOK_ALLOW_CIDRS") {
+		t.Fatalf("err = %v, want it to name THESADA_WEBHOOK_ALLOW_CIDRS", err)
 	}
 }

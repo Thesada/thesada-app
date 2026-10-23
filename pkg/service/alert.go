@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/google/uuid"
@@ -184,7 +185,11 @@ func (s *AlertService) ListSubscriptions(ctx context.Context, tenantID string, u
 // CreateSubscription creates a new alert subscription. Tenant-scoped via WithTenant.
 // in: ctx, tenantID, user id, device pk, channel, min severity, destination. out: error.
 func (s *AlertService) CreateSubscription(ctx context.Context, tenantID string, userID uuid.UUID, devicePK *uuid.UUID, channel, minSeverity, destination string) error {
-	if err := WebhookDestinationError(channel, destination); err != nil {
+	var allow []*net.IPNet
+	if s.cfg != nil {
+		allow = s.cfg.WebhookAllowNets
+	}
+	if err := WebhookDestinationError(channel, destination, allow); err != nil {
 		return err
 	}
 	var dest any
