@@ -104,12 +104,24 @@ func EffectiveTenantID(r *http.Request) string {
 	return s.User.TenantID
 }
 
+// redirectToLogin sends an anonymous caller to /login. htmx gets 401 plus
+// HX-Redirect, since fetch follows a 302 and the swap empties the block.
+// in: writer, request. out: none.
+func redirectToLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Redirect", "/login")
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
 // RequireAuth wraps a handler and redirects unauthenticated requests to /login.
 // in: handler. out: wrapper http.HandlerFunc.
 func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if CurrentUser(r) == nil {
-			http.Redirect(w, r, "/login", http.StatusFound)
+			redirectToLogin(w, r)
 			return
 		}
 		next(w, r)
@@ -125,7 +137,7 @@ func RequireSuperAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		u := CurrentUser(r)
 		if u == nil {
-			http.Redirect(w, r, "/login", http.StatusFound)
+			redirectToLogin(w, r)
 			return
 		}
 		if !u.IsSuperAdmin {
