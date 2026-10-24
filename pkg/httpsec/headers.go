@@ -27,9 +27,9 @@ func freshNonce() string {
 	return base64.RawURLEncoding.EncodeToString(b[:])
 }
 
-// cspPolicy is one policy for the whole app. Inline scripts and htmx's
-// injected indicator style carry the per-request nonce. style attributes
-// stay allowed: a handful of layout attributes cannot take a nonce.
+// cspPolicy is one policy for the whole app. Inline scripts and Blockly's
+// injected styles carry the per-request nonce. style attributes stay
+// allowed: a handful of layout attributes cannot take a nonce.
 func cspPolicy(nonce string) string {
 	return "default-src 'self'; " +
 		"script-src 'self' 'nonce-" + nonce + "'; " +
