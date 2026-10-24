@@ -57,11 +57,52 @@ func TestDeviceLiveBlockCarriesNoScript(t *testing.T) {
 	if strings.Contains(live, "<script") {
 		t.Error("#device-live contains a <script>")
 	}
-	if !strings.Contains(live, `id="chart-card" hx-preserve`) {
+	if !chartCard.MatchString(live) {
 		t.Error("chart card must be hx-preserve so a live swap keeps the drawn chart")
 	}
 	if !strings.Contains(body, "/chart.json?metric=") {
 		t.Error("chart script missing from the page")
+	}
+}
+
+var chartCard = regexp.MustCompile(`<section [^>]*id="(chart-card-[0-9a-f]{16})" data-chart-card hx-preserve>`)
+
+// hx-preserve keeps the old card for a matching id, so the id must change
+// with the metric set and only then. The chart script must ship either way.
+func TestChartCardIDTracksMetricSet(t *testing.T) {
+	s := &Server{}
+	s.parseTemplates()
+	render := func(metrics []string) (id, page string) {
+		t.Helper()
+		data := map[string]interface{}{
+			"Device": sampleDevice(), "NumericMetrics": metrics, "BackHref": "/devices", "BackLabel": "All devices",
+			"User": &service.User{ID: uuid.New(), TenantID: "acme"}, "CSRFToken": "tok", "CSPNonce": "nonce",
+		}
+		var buf bytes.Buffer
+		if err := s.templates["device-detail.html"].ExecuteTemplate(&buf, "layout", data); err != nil {
+			t.Fatal(err)
+		}
+		m := chartCard.FindStringSubmatch(divBlock(t, buf.String(), `<div id="device-live">`))
+		if m == nil {
+			t.Fatalf("%v: no hx-preserve chart card", metrics)
+		}
+		return m[1], buf.String()
+	}
+	two, _ := render([]string{"temp/boiler", "temp/room"})
+	if again, _ := render([]string{"temp/boiler", "temp/room"}); again != two {
+		t.Errorf("same metric set, id moved: %s then %s", two, again)
+	}
+	none, page := render(nil)
+	for _, other := range [][]string{{"temp/boiler"}, {"temp/boiler", "temp/room", "wifi/rssi"}, {"temp/boiler", "temp/roomx"}} {
+		if id, _ := render(other); id == two || id == none {
+			t.Errorf("%v: id %s matches another set", other, id)
+		}
+	}
+	if none == two {
+		t.Errorf("no metrics and two metrics share id %s", none)
+	}
+	if !strings.Contains(page, "/chart.json?metric=") {
+		t.Error("chart script must ship without metrics, so a first metric can wire its card")
 	}
 }
 

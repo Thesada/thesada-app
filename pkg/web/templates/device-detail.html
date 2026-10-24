@@ -11,7 +11,8 @@
   {{freshnessBadge .Device.LastSeenAt}}
   {{derefOrDash .Device.HardwareType}} - fw {{derefOrDash .Device.FirmwareVersion}} - last seen {{timeOrDash .Device.LastSeenAt}}
 </p>
-<section class="mb-8" id="chart-card" hx-preserve>
+{{/* hx-preserve matches by id: a swap keeps the drawn card until the metric set changes. */}}
+<section class="mb-8" id="chart-card-{{setKey .NumericMetrics}}" data-chart-card hx-preserve>
   <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
     <h2 class="text-lg font-semibold">History chart</h2>
     {{if .NumericMetrics}}
@@ -186,28 +187,22 @@
 </section>
 </div>
 
-{{if .NumericMetrics}}
   <script nonce="{{.CSPNonce}}">
     (function () {
       var deviceID = {{.Device.ID}};
-      var ctx, chart;
       var storageKey = "chart_pref_" + deviceID;
       var saved = {};
       try { saved = JSON.parse(localStorage.getItem(storageKey)) || {}; } catch(e) {}
-
-      var metricSelect = document.getElementById("chart-metric");
-      if (saved.metric && Array.from(metricSelect.options).some(function(o) { return o.value === saved.metric; })) {
-        metricSelect.value = saved.metric;
-      }
-      var currentMetric = metricSelect.value;
+      var currentMetric = saved.metric;
       var currentRange  = saved.range || "24h";
+      var card, chart;
 
       function savePrefs() {
-        localStorage.setItem(storageKey, JSON.stringify({ metric: currentMetric, range: currentRange }));
+        try { localStorage.setItem(storageKey, JSON.stringify({ metric: currentMetric, range: currentRange })); } catch(e) {}
       }
 
       function setActiveRangeButton() {
-        document.querySelectorAll('#chart-range button').forEach(function (b) {
+        card.querySelectorAll('#chart-range button').forEach(function (b) {
           if (b.dataset.range === currentRange) {
             b.classList.add('bg-slate-900', 'text-white');
           } else {
@@ -217,12 +212,14 @@
       }
 
       function fetchAndRender() {
+        var forCard = card;
         var url = "/devices/" + encodeURIComponent(deviceID) + "/chart.json?metric=" + encodeURIComponent(currentMetric) + "&range=" + encodeURIComponent(currentRange);
         fetch(url, { credentials: "same-origin" })
           .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
           .then(function (data) {
-            var canvas = document.getElementById("history-chart");
-            var empty  = document.getElementById("chart-empty");
+            if (forCard !== card) return;
+            var canvas = card.querySelector("#history-chart");
+            var empty  = card.querySelector("#chart-empty");
             if (!data.labels || data.labels.length === 0) {
               canvas.classList.add('hidden');
               empty.classList.remove('hidden');
@@ -230,7 +227,6 @@
             }
             canvas.classList.remove('hidden');
             empty.classList.add('hidden');
-            if (!ctx) { ctx = canvas.getContext("2d"); }
             var config = {
               type: "line",
               data: {
@@ -294,34 +290,48 @@
               }
             };
             if (chart) { chart.destroy(); }
-            chart = new Chart(ctx, config);
+            chart = new Chart(canvas, config);
           })
           .catch(function (err) { console.error("chart fetch failed", err); });
       }
 
-      document.getElementById("chart-metric").addEventListener("change", function (e) {
-        currentMetric = e.target.value;
-        savePrefs();
-        fetchAndRender();
-      });
-      document.querySelectorAll('#chart-range button').forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          currentRange = btn.dataset.range;
+      // A preserved card is the same node, so this wires each card exactly once.
+      function bindCard() {
+        var el = document.querySelector("[data-chart-card]");
+        if (!el || el === card) return;
+        card = el;
+        if (chart) { chart.destroy(); chart = null; }
+        var metricSelect = card.querySelector("#chart-metric");
+        if (!metricSelect) return;
+        if (currentMetric && Array.from(metricSelect.options).some(function(o) { return o.value === currentMetric; })) {
+          metricSelect.value = currentMetric;
+        }
+        currentMetric = metricSelect.value;
+        metricSelect.addEventListener("change", function (e) {
+          currentMetric = e.target.value;
           savePrefs();
-          setActiveRangeButton();
           fetchAndRender();
         });
-      });
+        card.querySelectorAll('#chart-range button').forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            currentRange = btn.dataset.range;
+            savePrefs();
+            setActiveRangeButton();
+            fetchAndRender();
+          });
+        });
+        setActiveRangeButton();
+        fetchAndRender();
+      }
 
       function init() {
         if (typeof Chart === "undefined") { setTimeout(init, 100); return; }
-        setActiveRangeButton();
-        fetchAndRender();
+        bindCard();
+        document.addEventListener("htmx:before:settle", bindCard);
       }
       init();
     })();
   </script>
-{{end}}
   <script nonce="{{.CSPNonce}}">
     function thesadaToggleGroups(open) {
       document.querySelectorAll('#metric-groups details.metric-group').forEach(function (d) {
