@@ -89,10 +89,13 @@
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js");
     }
-    document.querySelectorAll('time[datetime]').forEach(function (el) {
-      var d = new Date(el.getAttribute('datetime'));
-      if (!isNaN(d)) el.textContent = d.toLocaleString();
-    });
+    function localizeTimes() {
+      document.querySelectorAll('time[datetime]').forEach(function (el) {
+        var d = new Date(el.getAttribute('datetime'));
+        if (!isNaN(d)) el.textContent = d.toLocaleString();
+      });
+    }
+    localizeTimes();
     function paintFreshness(now) {
       document.querySelectorAll("[data-freshness]").forEach(function (el) {
         var raw = el.getAttribute("data-freshness");
@@ -121,7 +124,10 @@
     }
     paintFreshness(Date.now());
     setInterval(function () { paintFreshness(Date.now()); }, 30000);
-    document.addEventListener("htmx:after:swap", function () { paintFreshness(Date.now()); });
+    document.addEventListener("htmx:after:swap", function () {
+      localizeTimes();
+      paintFreshness(Date.now());
+    });
   </script>
   {{if .User}}
   <script nonce="{{.CSPNonce}}">
@@ -135,7 +141,7 @@
         s.onmessage = function (ev) {
           try {
             var m = JSON.parse(ev.data);
-            document.dispatchEvent(new CustomEvent("thesada:event", { detail: m }));
+            document.body.dispatchEvent(new CustomEvent("thesada:event", { detail: m }));
           } catch (e) {}
         };
         s.onclose = function () {

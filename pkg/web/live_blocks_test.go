@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -9,6 +10,27 @@ import (
 
 	"thesada.app/app/pkg/service"
 )
+
+// A live block listens with from:body, so the socket bridge must dispatch on
+// body: an event dispatched on document never reaches a body listener.
+func TestLiveBlocksHearTheSocket(t *testing.T) {
+	raw, err := fs.ReadFile(templatesFS, "templates/layout.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `document.body.dispatchEvent(new CustomEvent("thesada:event"`) {
+		t.Fatal("layout must dispatch thesada:event on document.body")
+	}
+	for _, page := range []string{"devices.html", "alerts.html", "device-detail.html"} {
+		raw, err := fs.ReadFile(templatesFS, "templates/"+page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), `hx-trigger="thesada:event from:body`) {
+			t.Errorf("%s: live block must listen for thesada:event from:body", page)
+		}
+	}
+}
 
 // Scripts inside a swapped block come back with the partial response's nonce,
 // which the page's CSP refuses, so #device-live must carry none.
