@@ -121,7 +121,8 @@ Optional (but recommended):
 - On success, a cookie `thesada_session` is set (HttpOnly, SameSite=Lax,
   Secure when `BASE_URL` starts with https).
 - `/devices`, `/devices/{id}`, `/alerts` are wrapped in `authmw.RequireAuth`
-  and 302 to `/login` for anonymous requests.
+  and 302 to `/login` for anonymous requests. An htmx request gets 401 with
+  `HX-Redirect: /login` instead, so a live block never swaps in the login page.
 - `POST /logout` revokes the session row and clears the cookie.
 
 Admin bootstrap: if `THESADA_ADMIN_EMAIL` is set, startup calls
