@@ -206,14 +206,8 @@
     apply(name);
   });
 
-  document.addEventListener("htmx:after:swap", function (ev) {
-    var target = ev.target;
-    if (!target || !target.querySelector) return;
-    var table = target.matches && target.matches("table[data-devices-table]")
-      ? target
-      : target.querySelector("table[data-devices-table]");
-    if (table) apply(table.getAttribute("data-devices-table"));
-  });
+  // htmx 4 fires after:swap on the requesting element, not the swapped one.
+  document.addEventListener("htmx:after:swap", function () { eachTable(apply); });
 
   function boot() { eachTable(apply); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
