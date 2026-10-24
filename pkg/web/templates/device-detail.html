@@ -66,7 +66,7 @@
   <div id="metric-groups" class="bg-white border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100">
     {{range groupLatest .Latest}}
       {{if .Name}}
-      <details class="metric-group group">
+      <details class="metric-group group" data-keep="group-{{.Name}}">
         <summary class="cursor-pointer select-none px-4 py-2 bg-slate-50 hover:bg-slate-100 flex items-center justify-between">
           <span class="font-mono text-xs uppercase text-slate-700 flex items-center gap-2">
             <svg class="h-3 w-3 transition-transform group-open:rotate-90" viewBox="0 0 12 12" fill="currentColor"><path d="M4 2l4 4-4 4V2z"/></svg>
@@ -74,7 +74,7 @@
           </span>
           <span class="text-xs text-slate-400">{{len .Rows}}</span>
         </summary>
-        <div class="overflow-x-auto">
+        <div class="overflow-x-auto" data-keep="scroll-group-{{.Name}}">
           <table class="min-w-full text-sm">
             <tbody class="divide-y divide-slate-100">
               {{range .Rows}}
@@ -97,7 +97,7 @@
         </div>
       </details>
       {{else}}
-      <div class="overflow-x-auto">
+      <div class="overflow-x-auto" data-keep="scroll-ungrouped">
         <table class="min-w-full text-sm">
           <tbody class="divide-y divide-slate-100">
             {{range .Rows}}
@@ -128,7 +128,7 @@
 
 <section class="mb-8">
   {{if .Telemetry}}
-  <details class="bg-white border border-slate-200 rounded-xl overflow-hidden group">
+  <details class="bg-white border border-slate-200 rounded-xl overflow-hidden group" data-keep="telemetry">
     <summary class="cursor-pointer select-none px-4 py-3 bg-slate-50 hover:bg-slate-100 flex items-center justify-between">
       <span class="font-semibold text-slate-700 flex items-center gap-2">
         <svg class="h-3 w-3 transition-transform group-open:rotate-90" viewBox="0 0 12 12" fill="currentColor"><path d="M4 2l4 4-4 4V2z"/></svg>
@@ -136,7 +136,7 @@
       </span>
       <span class="text-xs text-slate-500">{{len .Telemetry}} rows</span>
     </summary>
-    <div class="overflow-x-auto">
+    <div class="overflow-x-auto" data-keep="scroll-telemetry">
       <table class="min-w-full text-sm">
         <thead class="bg-slate-100 text-slate-600 text-xs uppercase">
           <tr>

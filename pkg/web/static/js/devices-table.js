@@ -206,8 +206,8 @@
     apply(name);
   });
 
-  // htmx 4 fires after:swap on the requesting element, not the swapped one.
-  document.addEventListener("htmx:after:swap", function () { eachTable(apply); });
+  // Re-apply on every swap, before the first paint, whatever element fired it.
+  document.addEventListener("htmx:before:settle", function () { eachTable(apply); });
 
   function boot() { eachTable(apply); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);

@@ -124,10 +124,30 @@
     }
     paintFreshness(Date.now());
     setInterval(function () { paintFreshness(Date.now()); }, 30000);
-    document.addEventListener("htmx:after:swap", function () {
+    // before:settle runs right after the insert and before the first paint;
+    // after:swap can land a frame later.
+    document.addEventListener("htmx:before:settle", function () {
       localizeTimes();
       paintFreshness(Date.now());
     });
+    (function () {
+      // A swap rebuilds [data-keep] elements: carry open and scroll over.
+      var kept = new Map();
+      document.addEventListener("htmx:before:swap", function () {
+        kept = new Map();
+        document.querySelectorAll("[data-keep]").forEach(function (el) {
+          kept.set(el.getAttribute("data-keep"), { open: el.open, left: el.scrollLeft });
+        });
+      });
+      document.addEventListener("htmx:before:settle", function () {
+        document.querySelectorAll("[data-keep]").forEach(function (el) {
+          var k = kept.get(el.getAttribute("data-keep"));
+          if (!k) return;
+          if (el.tagName === "DETAILS") el.open = k.open;
+          el.scrollLeft = k.left;
+        });
+      });
+    })();
   </script>
   {{if .User}}
   <script nonce="{{.CSPNonce}}">
