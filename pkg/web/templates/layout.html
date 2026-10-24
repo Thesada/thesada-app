@@ -132,20 +132,26 @@
     });
     (function () {
       // A swap rebuilds [data-keep] elements: carry open and scroll over.
-      var kept = new Map();
+      var kept = new Map(), page = null;
       document.addEventListener("htmx:before:swap", function () {
         kept = new Map();
+        page = [window.scrollX, window.scrollY];
         document.querySelectorAll("[data-keep]").forEach(function (el) {
           kept.set(el.getAttribute("data-keep"), { open: el.open, left: el.scrollLeft });
         });
       });
       document.addEventListener("htmx:before:settle", function () {
+        var els = [];
         document.querySelectorAll("[data-keep]").forEach(function (el) {
           var k = kept.get(el.getAttribute("data-keep"));
           if (!k) return;
           if (el.tagName === "DETAILS") el.open = k.open;
-          el.scrollLeft = k.left;
+          els.push([el, k.left]);
         });
+        // Reopen sections before any scroll write lays out the short page; the
+        // window offset goes back last, since focus moves can clamp it earlier.
+        els.forEach(function (e) { e[0].scrollLeft = e[1]; });
+        if (page && (window.scrollX !== page[0] || window.scrollY !== page[1])) window.scrollTo(page[0], page[1]);
       });
     })();
   </script>
