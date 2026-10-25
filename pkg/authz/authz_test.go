@@ -18,7 +18,6 @@ import (
 var allActions = []Action{
 	DeviceReadCrossTenant,
 	SensorDeleteCrossTenant,
-	MQTTPublishAnyTenant,
 	ImpersonationSet,
 	ImpersonationClear,
 	WaitlistConvert,
@@ -35,6 +34,19 @@ var allActions = []Action{
 	TenantSecretProvision,
 	OTADispatch,
 	MQTTShellPublish,
+	MQTTShellSubscribe,
+	DeviceCommand,
+	DeviceConfigWrite,
+	TenantCreate,
+	TenantDelete,
+	UserCreate,
+	UserUpdate,
+	UserToggleAdmin,
+	UserDelete,
+	UserSendReset,
+	RulesWorkspaceSave,
+	RuleTemplateSave,
+	RuleTemplateDelete,
 }
 
 func TestAuthz_GrantTableCoversEveryAction(t *testing.T) {
