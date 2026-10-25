@@ -290,18 +290,16 @@ func TestEnrollmentSquatterCannotLockOutDevice(t *testing.T) {
 	}
 }
 
-// newDeviceKeyBelow mints a keypair whose hex sorts before want, the way an
-// attacker grinds one to land first under ORDER BY pubkey_hex.
-func newDeviceKeyBelow(t *testing.T, want string) (string, ed25519.PrivateKey) {
+// newDeviceKeysSorted mints two keypairs and returns the lower hex first, the
+// key an attacker grinds to land first under ORDER BY pubkey_hex.
+func newDeviceKeysSorted(t *testing.T) (string, ed25519.PrivateKey, string, ed25519.PrivateKey) {
 	t.Helper()
-	for i := 0; i < 64; i++ {
-		pub, priv := newDeviceKey(t)
-		if pub < want {
-			return pub, priv
-		}
+	aPub, aPriv := newDeviceKey(t)
+	bPub, bPriv := newDeviceKey(t)
+	if bPub < aPub {
+		return bPub, bPriv, aPub, aPriv
 	}
-	t.Fatal("could not mint a key that sorts first")
-	return "", nil
+	return aPub, aPriv, bPub, bPriv
 }
 
 // TestEnrollmentSameTokenSquatterCannotTakeTheCert is the takeover regression.
@@ -326,8 +324,7 @@ func TestEnrollmentSameTokenSquatterCannotTakeTheCert(t *testing.T) {
 
 	// One token, off one QR, held by both parties.
 	const qrToken = "qr-token-off-the-label"
-	realPub, realPriv := newDeviceKey(t)
-	squatPub, squatPriv := newDeviceKeyBelow(t, realPub)
+	squatPub, squatPriv, realPub, realPriv := newDeviceKeysSorted(t)
 
 	announceAndVerify(t, enroll, enrollDeviceID, squatPub, squatPriv, qrToken)
 	// The real device still completes its own announce and verify while that
@@ -398,8 +395,7 @@ func TestEnrollmentAmbiguousClaimIsRefused(t *testing.T) {
 	owner := seedUser(t, env, tenant, "owner@enroll-ambiguous.test")
 
 	const qrToken = "shared-qr-token"
-	realPub, realPriv := newDeviceKey(t)
-	squatPub, squatPriv := newDeviceKeyBelow(t, realPub)
+	squatPub, squatPriv, realPub, realPriv := newDeviceKeysSorted(t)
 	announceAndVerify(t, enroll, enrollDeviceID, squatPub, squatPriv, qrToken)
 	announceAndVerify(t, enroll, enrollDeviceID, realPub, realPriv, qrToken)
 
