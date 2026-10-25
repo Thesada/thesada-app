@@ -206,14 +206,8 @@
     apply(name);
   });
 
-  document.addEventListener("htmx:afterSwap", function (ev) {
-    var target = ev.detail && ev.detail.target;
-    if (!target || !target.querySelector) return;
-    var table = target.matches && target.matches("table[data-devices-table]")
-      ? target
-      : target.querySelector("table[data-devices-table]");
-    if (table) apply(table.getAttribute("data-devices-table"));
-  });
+  // Re-apply on every swap, before the first paint, whatever element fired it.
+  document.addEventListener("htmx:before:settle", function () { eachTable(apply); });
 
   function boot() { eachTable(apply); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);

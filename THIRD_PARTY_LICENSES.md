@@ -26,12 +26,13 @@ the licence terms noted below. All are compatible with AGPL-3.0.
 ## Vendored frontend assets
 
 The HTML templates load JS assets vendored under
-`pkg/web/static/vendor/`:
+`pkg/web/static/js/`:
 
 | Asset | Version | Licence |
 |---|---|---|
-| htmx | as vendored | BSD-2-Clause |
+| htmx | as vendored | 0BSD |
 | Chart.js | as vendored | MIT |
+| Blockly | as vendored | Apache-2.0 |
 
 ## Notes
 

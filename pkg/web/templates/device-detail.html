@@ -11,7 +11,8 @@
   {{freshnessBadge .Device.LastSeenAt}}
   {{derefOrDash .Device.HardwareType}} - fw {{derefOrDash .Device.FirmwareVersion}} - last seen {{timeOrDash .Device.LastSeenAt}}
 </p>
-<section class="mb-8" id="chart-card">
+{{/* hx-preserve matches by id: a swap keeps the drawn card until the metric set changes. */}}
+<section class="mb-8" id="chart-card-{{setKey .NumericMetrics}}" data-chart-card hx-preserve>
   <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
     <h2 class="text-lg font-semibold">History chart</h2>
     {{if .NumericMetrics}}
@@ -45,27 +46,163 @@
     </div>
     <p id="chart-empty" class="hidden text-center text-sm text-slate-500 py-8">No data in this range.</p>
   </div>
+  {{else}}
+  <p class="text-sm text-slate-500">No numeric metrics to chart yet.</p>
+  {{end}}
+</section>
+
+<section class="mb-8">
+  <div class="flex items-center justify-between mb-2">
+    <h2 class="text-lg font-semibold">Latest sensors</h2>
+    {{if .Latest}}
+    <div class="flex gap-2 text-xs">
+      <button type="button" data-act="thesadaToggleGroups" data-arg="true"
+              class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:bg-slate-100">Expand all</button>
+      <button type="button" data-act="thesadaToggleGroups" data-arg="false"
+              class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:bg-slate-100">Collapse all</button>
+    </div>
+    {{end}}
+  </div>
+  {{if .Latest}}
+  <div id="metric-groups" class="bg-white border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100">
+    {{range groupLatest .Latest}}
+      {{if .Name}}
+      <details class="metric-group group" data-keep="group-{{.Name}}">
+        <summary class="cursor-pointer select-none px-4 py-2 bg-slate-50 hover:bg-slate-100 flex items-center justify-between">
+          <span class="font-mono text-xs uppercase text-slate-700 flex items-center gap-2">
+            <svg class="h-3 w-3 transition-transform group-open:rotate-90" viewBox="0 0 12 12" fill="currentColor"><path d="M4 2l4 4-4 4V2z"/></svg>
+            {{.Name}}
+          </span>
+          <span class="text-xs text-slate-400">{{len .Rows}}</span>
+        </summary>
+        <div class="overflow-x-auto" data-keep="scroll-group-{{.Name}}">
+          <table class="min-w-full text-sm">
+            <tbody class="divide-y divide-slate-100">
+              {{range .Rows}}
+              <tr>
+                <td class="px-4 py-2 pl-10 text-slate-700 font-mono text-xs">{{metricLeaf .Metric}}</td>
+                <td class="px-4 py-2 text-right text-slate-900">{{telemetryValue .}}</td>
+                <td class="px-4 py-2 text-slate-500 w-36 sm:w-48 text-xs whitespace-nowrap">{{fmtTime .ReceivedAt}}</td>
+                <td class="px-2 py-2 w-8 text-right">
+                  <form method="post" action="/devices/{{$.Device.ID}}/sensors/delete" class="inline" data-confirm="Delete all telemetry for {{.Metric}}? This cannot be undone.">
+                    <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+                    <input type="hidden" name="metric" value="{{.Metric}}">
+                    <input type="hidden" name="confirm_metric" value="{{.Metric}}">
+                    <button type="submit" class="text-slate-400 hover:text-red-600 text-xs" title="Delete telemetry for {{.Metric}}">&times;</button>
+                  </form>
+                </td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+      </details>
+      {{else}}
+      <div class="overflow-x-auto" data-keep="scroll-ungrouped">
+        <table class="min-w-full text-sm">
+          <tbody class="divide-y divide-slate-100">
+            {{range .Rows}}
+            <tr>
+              <td class="px-4 py-2 text-slate-700 font-mono text-xs">{{.Metric}}</td>
+              <td class="px-4 py-2 text-right text-slate-900">{{telemetryValue .}}</td>
+              <td class="px-4 py-2 text-slate-500 w-36 sm:w-48 text-xs whitespace-nowrap">{{fmtTime .ReceivedAt}}</td>
+              <td class="px-2 py-2 w-8 text-right">
+                <form method="post" action="/devices/{{$.Device.ID}}/sensors/delete" class="inline" data-confirm="Delete all telemetry for {{.Metric}}? This cannot be undone.">
+                  <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+                  <input type="hidden" name="metric" value="{{.Metric}}">
+                  <input type="hidden" name="confirm_metric" value="{{.Metric}}">
+                  <button type="submit" class="text-slate-400 hover:text-red-600 text-xs" title="Delete telemetry for {{.Metric}}">&times;</button>
+                </form>
+              </td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{end}}
+    {{end}}
+  </div>
+  {{else}}
+  <p class="text-sm text-slate-500">No sensor data yet.</p>
+  {{end}}
+</section>
+
+<section class="mb-8">
+  {{if .Telemetry}}
+  <details class="bg-white border border-slate-200 rounded-xl overflow-hidden group" data-keep="telemetry">
+    <summary class="cursor-pointer select-none px-4 py-3 bg-slate-50 hover:bg-slate-100 flex items-center justify-between">
+      <span class="font-semibold text-slate-700 flex items-center gap-2">
+        <svg class="h-3 w-3 transition-transform group-open:rotate-90" viewBox="0 0 12 12" fill="currentColor"><path d="M4 2l4 4-4 4V2z"/></svg>
+        Recent telemetry
+      </span>
+      <span class="text-xs text-slate-500">{{len .Telemetry}} rows</span>
+    </summary>
+    <div class="overflow-x-auto" data-keep="scroll-telemetry">
+      <table class="min-w-full text-sm">
+        <thead class="bg-slate-100 text-slate-600 text-xs uppercase">
+          <tr>
+            <th class="text-left px-4 py-2">Received</th>
+            <th class="text-left px-4 py-2">Metric</th>
+            <th class="text-right px-4 py-2">Value</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          {{range .Telemetry}}
+          <tr>
+            <td class="px-4 py-2 text-slate-500 whitespace-nowrap">{{fmtTime .ReceivedAt}}</td>
+            <td class="px-4 py-2 text-slate-700 font-mono text-xs">{{.Metric}}</td>
+            <td class="px-4 py-2 text-right text-slate-900">{{telemetryValue .}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  {{else}}
+  <h2 class="text-lg font-semibold mb-2">Recent telemetry</h2>
+  <p class="text-sm text-slate-500">No telemetry yet.</p>
+  {{end}}
+</section>
+
+<section>
+  <h2 class="text-lg font-semibold mb-2">Recent alerts</h2>
+  {{if .Alerts}}
+  <ul class="space-y-2">
+    {{range .Alerts}}
+    <li class="bg-white border border-slate-200 rounded p-3 text-sm">
+      <span class="inline-block px-2 py-0.5 text-xs rounded
+        {{if eq .Severity "crit"}}bg-red-100 text-red-700
+        {{else if eq .Severity "warn"}}bg-amber-100 text-amber-700
+        {{else}}bg-slate-100 text-slate-700{{end}}">
+        {{.Severity}}
+      </span>
+      <span class="ml-2 text-slate-500">{{fmtTime .ReceivedAt}}</span>
+      <div class="mt-1">{{.Message}}</div>
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="text-sm text-slate-500">No alerts yet.</p>
+  {{end}}
+</section>
+</div>
+
   <script nonce="{{.CSPNonce}}">
     (function () {
       var deviceID = {{.Device.ID}};
-      var ctx, chart;
       var storageKey = "chart_pref_" + deviceID;
       var saved = {};
       try { saved = JSON.parse(localStorage.getItem(storageKey)) || {}; } catch(e) {}
-
-      var metricSelect = document.getElementById("chart-metric");
-      if (saved.metric && Array.from(metricSelect.options).some(function(o) { return o.value === saved.metric; })) {
-        metricSelect.value = saved.metric;
-      }
-      var currentMetric = metricSelect.value;
+      var currentMetric = saved.metric;
       var currentRange  = saved.range || "24h";
+      var card, chart, latest = 0;
 
       function savePrefs() {
-        localStorage.setItem(storageKey, JSON.stringify({ metric: currentMetric, range: currentRange }));
+        try { localStorage.setItem(storageKey, JSON.stringify({ metric: currentMetric, range: currentRange })); } catch(e) {}
       }
 
       function setActiveRangeButton() {
-        document.querySelectorAll('#chart-range button').forEach(function (b) {
+        card.querySelectorAll('#chart-range button').forEach(function (b) {
           if (b.dataset.range === currentRange) {
             b.classList.add('bg-slate-900', 'text-white');
           } else {
@@ -74,13 +211,16 @@
         });
       }
 
+      // Only the newest request draws, so a slow older card, metric or range loses.
       function fetchAndRender() {
+        var seq = ++latest;
         var url = "/devices/" + encodeURIComponent(deviceID) + "/chart.json?metric=" + encodeURIComponent(currentMetric) + "&range=" + encodeURIComponent(currentRange);
         fetch(url, { credentials: "same-origin" })
           .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
           .then(function (data) {
-            var canvas = document.getElementById("history-chart");
-            var empty  = document.getElementById("chart-empty");
+            if (seq !== latest) return;
+            var canvas = card.querySelector("#history-chart");
+            var empty  = card.querySelector("#chart-empty");
             if (!data.labels || data.labels.length === 0) {
               canvas.classList.add('hidden');
               empty.classList.remove('hidden');
@@ -88,7 +228,6 @@
             }
             canvas.classList.remove('hidden');
             empty.classList.add('hidden');
-            if (!ctx) { ctx = canvas.getContext("2d"); }
             var config = {
               type: "line",
               data: {
@@ -152,109 +291,50 @@
               }
             };
             if (chart) { chart.destroy(); }
-            chart = new Chart(ctx, config);
+            chart = new Chart(canvas, config);
           })
           .catch(function (err) { console.error("chart fetch failed", err); });
       }
 
-      document.getElementById("chart-metric").addEventListener("change", function (e) {
-        currentMetric = e.target.value;
-        savePrefs();
-        fetchAndRender();
-      });
-      document.querySelectorAll('#chart-range button').forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          currentRange = btn.dataset.range;
+      // A preserved card is the same node: wire it once, refetch on every swap.
+      function bindCard() {
+        var el = document.querySelector("[data-chart-card]");
+        if (!el) return;
+        if (el === card) { if (card.querySelector("#chart-metric")) fetchAndRender(); return; }
+        card = el;
+        latest++;
+        if (chart) { chart.destroy(); chart = null; }
+        var metricSelect = card.querySelector("#chart-metric");
+        if (!metricSelect) return;
+        if (currentMetric && Array.from(metricSelect.options).some(function(o) { return o.value === currentMetric; })) {
+          metricSelect.value = currentMetric;
+        }
+        currentMetric = metricSelect.value;
+        metricSelect.addEventListener("change", function (e) {
+          currentMetric = e.target.value;
           savePrefs();
-          setActiveRangeButton();
           fetchAndRender();
         });
-      });
+        card.querySelectorAll('#chart-range button').forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            currentRange = btn.dataset.range;
+            savePrefs();
+            setActiveRangeButton();
+            fetchAndRender();
+          });
+        });
+        setActiveRangeButton();
+        fetchAndRender();
+      }
 
       function init() {
         if (typeof Chart === "undefined") { setTimeout(init, 100); return; }
-        setActiveRangeButton();
-        fetchAndRender();
+        bindCard();
+        document.addEventListener("htmx:before:settle", bindCard);
       }
       init();
     })();
   </script>
-  {{else}}
-  <p class="text-sm text-slate-500">No numeric metrics to chart yet.</p>
-  {{end}}
-</section>
-
-<section class="mb-8">
-  <div class="flex items-center justify-between mb-2">
-    <h2 class="text-lg font-semibold">Latest sensors</h2>
-    {{if .Latest}}
-    <div class="flex gap-2 text-xs">
-      <button type="button" data-act="thesadaToggleGroups" data-arg="true"
-              class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:bg-slate-100">Expand all</button>
-      <button type="button" data-act="thesadaToggleGroups" data-arg="false"
-              class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:bg-slate-100">Collapse all</button>
-    </div>
-    {{end}}
-  </div>
-  {{if .Latest}}
-  <div id="metric-groups" class="bg-white border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100">
-    {{range groupLatest .Latest}}
-      {{if .Name}}
-      <details class="metric-group group">
-        <summary class="cursor-pointer select-none px-4 py-2 bg-slate-50 hover:bg-slate-100 flex items-center justify-between">
-          <span class="font-mono text-xs uppercase text-slate-700 flex items-center gap-2">
-            <svg class="h-3 w-3 transition-transform group-open:rotate-90" viewBox="0 0 12 12" fill="currentColor"><path d="M4 2l4 4-4 4V2z"/></svg>
-            {{.Name}}
-          </span>
-          <span class="text-xs text-slate-400">{{len .Rows}}</span>
-        </summary>
-        <div class="overflow-x-auto">
-          <table class="min-w-full text-sm">
-            <tbody class="divide-y divide-slate-100">
-              {{range .Rows}}
-              <tr>
-                <td class="px-4 py-2 pl-10 text-slate-700 font-mono text-xs">{{metricLeaf .Metric}}</td>
-                <td class="px-4 py-2 text-right text-slate-900">{{telemetryValue .}}</td>
-                <td class="px-4 py-2 text-slate-500 w-36 sm:w-48 text-xs whitespace-nowrap">{{fmtTime .ReceivedAt}}</td>
-                <td class="px-2 py-2 w-8 text-right">
-                  <form method="post" action="/devices/{{$.Device.ID}}/sensors/delete" class="inline" data-confirm="Delete all telemetry for {{.Metric}}? This cannot be undone.">
-                    <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-                    <input type="hidden" name="metric" value="{{.Metric}}">
-                    <input type="hidden" name="confirm_metric" value="{{.Metric}}">
-                    <button type="submit" class="text-slate-400 hover:text-red-600 text-xs" title="Delete telemetry for {{.Metric}}">&times;</button>
-                  </form>
-                </td>
-              </tr>
-              {{end}}
-            </tbody>
-          </table>
-        </div>
-      </details>
-      {{else}}
-      <div class="overflow-x-auto">
-        <table class="min-w-full text-sm">
-          <tbody class="divide-y divide-slate-100">
-            {{range .Rows}}
-            <tr>
-              <td class="px-4 py-2 text-slate-700 font-mono text-xs">{{.Metric}}</td>
-              <td class="px-4 py-2 text-right text-slate-900">{{telemetryValue .}}</td>
-              <td class="px-4 py-2 text-slate-500 w-36 sm:w-48 text-xs whitespace-nowrap">{{fmtTime .ReceivedAt}}</td>
-              <td class="px-2 py-2 w-8 text-right">
-                <form method="post" action="/devices/{{$.Device.ID}}/sensors/delete" class="inline" data-confirm="Delete all telemetry for {{.Metric}}? This cannot be undone.">
-                  <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-                  <input type="hidden" name="metric" value="{{.Metric}}">
-                  <input type="hidden" name="confirm_metric" value="{{.Metric}}">
-                  <button type="submit" class="text-slate-400 hover:text-red-600 text-xs" title="Delete telemetry for {{.Metric}}">&times;</button>
-                </form>
-              </td>
-            </tr>
-            {{end}}
-          </tbody>
-        </table>
-      </div>
-      {{end}}
-    {{end}}
-  </div>
   <script nonce="{{.CSPNonce}}">
     function thesadaToggleGroups(open) {
       document.querySelectorAll('#metric-groups details.metric-group').forEach(function (d) {
@@ -262,70 +342,6 @@
       });
     }
   </script>
-  {{else}}
-  <p class="text-sm text-slate-500">No sensor data yet.</p>
-  {{end}}
-</section>
-
-<section class="mb-8">
-  {{if .Telemetry}}
-  <details class="bg-white border border-slate-200 rounded-xl overflow-hidden group">
-    <summary class="cursor-pointer select-none px-4 py-3 bg-slate-50 hover:bg-slate-100 flex items-center justify-between">
-      <span class="font-semibold text-slate-700 flex items-center gap-2">
-        <svg class="h-3 w-3 transition-transform group-open:rotate-90" viewBox="0 0 12 12" fill="currentColor"><path d="M4 2l4 4-4 4V2z"/></svg>
-        Recent telemetry
-      </span>
-      <span class="text-xs text-slate-500">{{len .Telemetry}} rows</span>
-    </summary>
-    <div class="overflow-x-auto">
-      <table class="min-w-full text-sm">
-        <thead class="bg-slate-100 text-slate-600 text-xs uppercase">
-          <tr>
-            <th class="text-left px-4 py-2">Received</th>
-            <th class="text-left px-4 py-2">Metric</th>
-            <th class="text-right px-4 py-2">Value</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-slate-100">
-          {{range .Telemetry}}
-          <tr>
-            <td class="px-4 py-2 text-slate-500 whitespace-nowrap">{{fmtTime .ReceivedAt}}</td>
-            <td class="px-4 py-2 text-slate-700 font-mono text-xs">{{.Metric}}</td>
-            <td class="px-4 py-2 text-right text-slate-900">{{telemetryValue .}}</td>
-          </tr>
-          {{end}}
-        </tbody>
-      </table>
-    </div>
-  </details>
-  {{else}}
-  <h2 class="text-lg font-semibold mb-2">Recent telemetry</h2>
-  <p class="text-sm text-slate-500">No telemetry yet.</p>
-  {{end}}
-</section>
-
-<section>
-  <h2 class="text-lg font-semibold mb-2">Recent alerts</h2>
-  {{if .Alerts}}
-  <ul class="space-y-2">
-    {{range .Alerts}}
-    <li class="bg-white border border-slate-200 rounded p-3 text-sm">
-      <span class="inline-block px-2 py-0.5 text-xs rounded
-        {{if eq .Severity "crit"}}bg-red-100 text-red-700
-        {{else if eq .Severity "warn"}}bg-amber-100 text-amber-700
-        {{else}}bg-slate-100 text-slate-700{{end}}">
-        {{.Severity}}
-      </span>
-      <span class="ml-2 text-slate-500">{{fmtTime .ReceivedAt}}</span>
-      <div class="mt-1">{{.Message}}</div>
-    </li>
-    {{end}}
-  </ul>
-  {{else}}
-  <p class="text-sm text-slate-500">No alerts yet.</p>
-  {{end}}
-</section>
-</div>
 
 {{if .CanRevoke}}
 <section class="mt-8 bg-white border border-rose-200 rounded-xl p-4">
