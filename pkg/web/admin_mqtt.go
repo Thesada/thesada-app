@@ -28,7 +28,7 @@ import (
 const adminMqttMaxBuffer = 256
 
 // adminMqttAuditCap bounds the topics and patterns one session's audit row
-// lists; the publish count stays exact.
+// lists; the publish and subscribe counts stay exact.
 const adminMqttAuditCap = 50
 
 // adminMqttPublishMax is the per-socket publish rate limit window + count.
@@ -117,15 +117,17 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 	// One admin_audit row per ws session, written on close - never per
 	// message, or a busy shell would flood the table. It names the first
 	// adminMqttAuditCap topics with payload sizes (never payloads: they can
-	// carry secrets, and the table is append-only) and every pattern read.
+	// carry secrets, and the table is append-only) and the first
+	// adminMqttAuditCap patterns read, each list with an exact count.
 	// Fresh context: the request/ws contexts are canceled by then.
 	var (
 		publishes  int
 		published  []map[string]any
+		subscribes int
 		subscribed []string
 	)
 	defer func() {
-		if publishes == 0 && len(subscribed) == 0 {
+		if publishes == 0 && subscribes == 0 {
 			return
 		}
 		action := authz.MQTTShellPublish
@@ -136,10 +138,12 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 		defer acancel()
 		s.audit(actx, user, action, service.AuditEntry{
 			Detail: map[string]any{
-				"publishes":  publishes,
-				"published":  published,
-				"truncated":  publishes > len(published),
-				"subscribed": subscribed,
+				"publishes":            publishes,
+				"published":            published,
+				"truncated":            publishes > len(published),
+				"subscribes":           subscribes,
+				"subscribed":           subscribed,
+				"subscribed_truncated": subscribes > len(subscribed),
 			},
 		})
 	}()
@@ -265,6 +269,7 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 				reply(adminMqttOutboundMsg{Type: "error", Error: "bad pattern: " + err.Error()})
 				continue
 			}
+			subscribes++
 			if len(subscribed) < adminMqttAuditCap {
 				subscribed = append(subscribed, pattern)
 			}
