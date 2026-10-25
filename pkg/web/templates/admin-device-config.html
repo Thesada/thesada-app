@@ -129,6 +129,13 @@
 
   /* ---- helpers ---- */
 
+  /* Device output, file names and error text are device-controlled: escape
+     before any innerHTML. */
+  function esc(v) {
+    return String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
   var statusHideTimer = null;
   function status(msg, ok) {
     var bar = document.getElementById("status-bar");
@@ -409,7 +416,7 @@
     postCmd("fs.ls", "/scripts").then(function(resp) {
       var container = document.getElementById("file-list");
       if (!resp.ok) {
-        container.innerHTML = '<p class="px-4 py-4 text-sm text-red-600">' + (resp.output || []).join(" ") + '</p>';
+        container.innerHTML = '<p class="px-4 py-4 text-sm text-red-600">' + esc((resp.output || []).join(" ")) + '</p>';
         status("File list failed", false);
         return;
       }
@@ -423,10 +430,10 @@
         var path = name.charAt(0) === "/" ? name : "/scripts/" + name;
         var display = name.charAt(0) === "/" ? name.replace(/^\/scripts\//, "") : name;
         html += '<div class="flex items-center justify-between px-4 py-2 hover:bg-slate-50">' +
-          '<div><span class="font-mono text-sm">' + display + '</span>' +
-          '<span class="text-xs text-slate-400 ml-2">' + size + ' bytes</span></div>' +
+          '<div><span class="font-mono text-sm">' + esc(display) + '</span>' +
+          '<span class="text-xs text-slate-400 ml-2">' + esc(size) + ' bytes</span></div>' +
           '<div class="flex gap-2">' +
-          '<button type="button" data-act="openFile" data-arg="' + path.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">Edit</button>' +
+          '<button type="button" data-act="openFile" data-arg="' + esc(path) + '" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">Edit</button>' +
           '</div></div>';
       });
       if (!html) html = '<p class="px-4 py-4 text-sm text-slate-500">No files found.</p>';
@@ -434,7 +441,7 @@
       status("File list loaded", true);
     }).catch(function(e) {
       document.getElementById("file-list").innerHTML =
-        '<p class="px-4 py-4 text-sm text-red-600">Error: ' + (e.message || e) + '</p>';
+        '<p class="px-4 py-4 text-sm text-red-600">Error: ' + esc(e.message || e) + '</p>';
       status("File list error: " + (e.message || e), false);
     });
   };
@@ -526,16 +533,16 @@
     postCmd("fs.df").then(function(resp) {
       var container = document.getElementById("disk-info");
       if (!resp.ok) {
-        container.innerHTML = '<p class="text-sm text-red-600">' + (resp.output || []).join(" ") + '</p>';
+        container.innerHTML = '<p class="text-sm text-red-600">' + esc((resp.output || []).join(" ")) + '</p>';
         status("Disk usage failed", false);
         return;
       }
       container.innerHTML = '<pre class="font-mono text-xs text-slate-700">' +
-        (resp.output || []).join("\n") + '</pre>';
+        esc((resp.output || []).join("\n")) + '</pre>';
       status("Disk usage loaded", true);
     }).catch(function(e) {
       document.getElementById("disk-info").innerHTML =
-        '<p class="text-sm text-red-600">Error: ' + (e.message || e) + '</p>';
+        '<p class="text-sm text-red-600">Error: ' + esc(e.message || e) + '</p>';
       status("Disk usage error: " + (e.message || e), false);
     });
   };
@@ -616,9 +623,9 @@
                           s.source === "write" ? "bg-sky-100 text-sky-700" :
                           "bg-slate-100 text-slate-600";
         html += '<tr>' +
-          '<td class="px-4 py-2 text-xs text-slate-500"><time datetime="' + s.created_at + '">' + t + '</time></td>' +
-          '<td class="px-4 py-2"><span class="text-xs px-2 py-0.5 rounded ' + sourceClass + '">' + s.source + '</span></td>' +
-          '<td class="px-4 py-2 font-mono text-xs text-slate-400">' + s.sha256.substring(0, 12) + '</td>' +
+          '<td class="px-4 py-2 text-xs text-slate-500"><time datetime="' + esc(s.created_at) + '">' + esc(t) + '</time></td>' +
+          '<td class="px-4 py-2"><span class="text-xs px-2 py-0.5 rounded ' + sourceClass + '">' + esc(s.source) + '</span></td>' +
+          '<td class="px-4 py-2 font-mono text-xs text-slate-400">' + esc(s.sha256.substring(0, 12)) + '</td>' +
           '<td class="px-4 py-2 text-xs text-slate-500">' + s.content.length + ' B</td>' +
           '<td class="px-4 py-2 text-right">' +
           '<button type="button" data-act="viewSnapshot" data-arg="' + idx + '" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">View</button> ' +
