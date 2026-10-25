@@ -42,11 +42,20 @@ func TestChartScriptLatestWinsAndRefetches(t *testing.T) {
 	if script == "" {
 		t.Fatal("chart script not found")
 	}
-	path := filepath.Join(t.TempDir(), "chart.js")
+	// Read the harness here so go test's cache sees it change.
+	harness, err := os.ReadFile("testdata/chart_script.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chart.js")
 	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(node, "testdata/chart_script.js", path).CombinedOutput()
+	if err := os.WriteFile(filepath.Join(dir, "harness.js"), harness, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, filepath.Join(dir, "harness.js"), path).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}

@@ -302,6 +302,7 @@
         if (!el) return;
         if (el === card) { if (card.querySelector("#chart-metric")) fetchAndRender(); return; }
         card = el;
+        latest++;
         if (chart) { chart.destroy(); chart = null; }
         var metricSelect = card.querySelector("#chart-metric");
         if (!metricSelect) return;

@@ -13,7 +13,7 @@ function el(extra) {
 function makeCard(metrics) {
   const select = el({ options: metrics.map((m) => ({ value: m })), value: metrics[0] });
   const buttons = ["1h", "6h", "24h", "7d", "30d", "90d"].map((r) => { const b = el(); b.dataset.range = r; return b; });
-  const parts = { "#chart-metric": select, "#history-chart": el(), "#chart-empty": el() };
+  const parts = metrics.length ? { "#chart-metric": select, "#history-chart": el(), "#chart-empty": el() } : {};
   return { select, buttons, querySelector: (s) => parts[s] || null, querySelectorAll: () => buttons, click: (r) => buttons.find((b) => b.dataset.range === r).fire("click") };
 }
 
@@ -21,13 +21,20 @@ let card = makeCard(["temp/boiler", "temp/room"]);
 const settle = [];
 const pending = [];
 const rendered = [];
-function Chart(canvas, config) { rendered.push(config.data.labels[0]); }
-Chart.prototype.destroy = function () {};
+const owned = new Set();
+const errors = [];
+function Chart(canvas, config) {
+  if (owned.has(canvas)) throw new Error("canvas already owned");
+  owned.add(canvas);
+  this.canvas = canvas;
+  rendered.push(config.data.labels[0]);
+}
+Chart.prototype.destroy = function () { owned.delete(this.canvas); };
 const sandbox = {
   document: { querySelector: (s) => (s === "[data-chart-card]" ? card : null), addEventListener: (t, f) => { if (t === "htmx:before:settle") settle.push(f); } },
   localStorage: { getItem: () => null, setItem: () => {} },
   window: { innerWidth: 1024 },
-  console: { error: () => {} },
+  console: { error: (...a) => errors.push(a.join(" ")) },
   setTimeout,
   Chart,
   fetch: (url) => new Promise((resolve) => pending.push({ url, resolve })),
@@ -60,9 +67,17 @@ function fail(msg) { console.log(msg); process.exit(1); }
   respond(3); await flush();
   if (!rendered[rendered.length - 1].includes("metric=temp%2Fboiler")) fail("metric switch ended on " + rendered[rendered.length - 1]);
 
-  const before = pending.length;
+  const before = pending.length, drawn = rendered.length;
   settle.forEach((f) => f());
   if (pending.length !== before + 1) fail("preserved swap fetched " + (pending.length - before) + " times, want 1");
   respond(pending.length - 1); await flush();
+  if (rendered.length !== drawn + 1) fail("refetch drew " + (rendered.length - drawn) + " times, want 1");
   if (!rendered[rendered.length - 1].includes("range=7d")) fail("refetch lost the range: " + rendered[rendered.length - 1]);
+
+  card.click("1h");
+  const old = pending.length - 1;
+  card = makeCard([]);
+  settle.forEach((f) => f());
+  respond(old); await flush();
+  if (errors.length) fail("old card's response hit the new card: " + errors.join("; "));
 })();
