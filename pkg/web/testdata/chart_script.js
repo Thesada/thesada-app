@@ -23,13 +23,21 @@ const pending = [];
 const rendered = [];
 const owned = new Set();
 const errors = [];
+let created = 0;
 function Chart(canvas, config) {
   if (owned.has(canvas)) throw new Error("canvas already owned");
   owned.add(canvas);
+  created++;
   this.canvas = canvas;
+  this.data = config.data;
   rendered.push(config.data.labels[0]);
 }
-Chart.prototype.destroy = function () { owned.delete(this.canvas); };
+Chart.prototype.destroy = function () { owned.delete(this.canvas); this.destroyed = true; };
+Chart.prototype.update = function (mode) {
+  if (this.destroyed) throw new Error("update on a destroyed chart");
+  if (mode !== "none") throw new Error("update mode " + mode + ", want none");
+  rendered.push(this.data.labels[0]);
+};
 const sandbox = {
   document: { querySelector: (s) => (s === "[data-chart-card]" ? card : null), addEventListener: (t, f) => { if (t === "htmx:before:settle") settle.push(f); } },
   localStorage: { getItem: () => null, setItem: () => {} },
@@ -67,11 +75,12 @@ function fail(msg) { console.log(msg); process.exit(1); }
   respond(3); await flush();
   if (!rendered[rendered.length - 1].includes("metric=temp%2Fboiler")) fail("metric switch ended on " + rendered[rendered.length - 1]);
 
-  const before = pending.length, drawn = rendered.length;
+  const before = pending.length, drawn = rendered.length, made = created;
   settle.forEach((f) => f());
   if (pending.length !== before + 1) fail("preserved swap fetched " + (pending.length - before) + " times, want 1");
   respond(pending.length - 1); await flush();
   if (rendered.length !== drawn + 1) fail("refetch drew " + (rendered.length - drawn) + " times, want 1");
+  if (created !== made) fail("refetch on the same canvas built " + (created - made) + " new charts, want 0");
   if (!rendered[rendered.length - 1].includes("range=7d")) fail("refetch lost the range: " + rendered[rendered.length - 1]);
 
   card.click("1h");
