@@ -195,7 +195,7 @@
       try { saved = JSON.parse(localStorage.getItem(storageKey)) || {}; } catch(e) {}
       var currentMetric = saved.metric;
       var currentRange  = saved.range || "24h";
-      var card, chart;
+      var card, chart, latest = 0;
 
       function savePrefs() {
         try { localStorage.setItem(storageKey, JSON.stringify({ metric: currentMetric, range: currentRange })); } catch(e) {}
@@ -211,13 +211,14 @@
         });
       }
 
+      // Only the newest request draws, so a slow older card, metric or range loses.
       function fetchAndRender() {
-        var forCard = card;
+        var seq = ++latest;
         var url = "/devices/" + encodeURIComponent(deviceID) + "/chart.json?metric=" + encodeURIComponent(currentMetric) + "&range=" + encodeURIComponent(currentRange);
         fetch(url, { credentials: "same-origin" })
           .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
           .then(function (data) {
-            if (forCard !== card) return;
+            if (seq !== latest) return;
             var canvas = card.querySelector("#history-chart");
             var empty  = card.querySelector("#chart-empty");
             if (!data.labels || data.labels.length === 0) {
@@ -295,10 +296,11 @@
           .catch(function (err) { console.error("chart fetch failed", err); });
       }
 
-      // A preserved card is the same node, so this wires each card exactly once.
+      // A preserved card is the same node: wire it once, refetch on every swap.
       function bindCard() {
         var el = document.querySelector("[data-chart-card]");
-        if (!el || el === card) return;
+        if (!el) return;
+        if (el === card) { if (card.querySelector("#chart-metric")) fetchAndRender(); return; }
         card = el;
         if (chart) { chart.destroy(); chart = null; }
         var metricSelect = card.querySelector("#chart-metric");
