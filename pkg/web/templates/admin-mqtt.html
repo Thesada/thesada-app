@@ -119,24 +119,32 @@
   }
 
   function connect() {
-    if (ws && ws.readyState === WebSocket.OPEN) return;
+    if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(proto + '//' + location.host + '/admin/mqtt/ws');
+    var sock = new WebSocket(proto + '//' + location.host + '/admin/mqtt/ws');
+    ws = sock;
     setStatus('connecting...', '');
-    ws.onopen = function () {
+    // A replaced socket's late events must not touch the current one.
+    sock.onopen = function () {
+      if (ws !== sock) return;
       setStatus('connected', 'ok');
-      ws.send(JSON.stringify({ type: 'subscribe', pattern: patternInput.value }));
+      sock.send(JSON.stringify({ type: 'subscribe', pattern: patternInput.value }));
     };
-    ws.onmessage = function (ev) {
+    sock.onmessage = function (ev) {
+      if (ws !== sock) return;
       var m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       addRow(m.type, m);
     };
-    ws.onclose = function () {
-      setStatus('disconnected', 'err');
+    sock.onclose = function (ev) {
+      if (ws !== sock) return;
       ws = null;
+      // 4000: the server's lifetime cap, reconnect (and re-auth) at once.
+      if (ev.code === 4000) { connect(); return; }
+      setStatus('disconnected', 'err');
     };
-    ws.onerror = function () {
+    sock.onerror = function () {
+      if (ws !== sock) return;
       setStatus('error', 'err');
     };
   }

@@ -945,6 +945,16 @@ the browser's SameSite=Lax session cookie to open a socket. Rejections log
 
 Source: `pkg/httpsec.OriginAllowed`, `pkg/ws/ws.go`, `pkg/web/admin_mqtt.go`.
 
+### A socket lives at most ws.MaxLifetime
+
+The session is checked only at the upgrade. Both sockets close after
+`ws.MaxLifetime` (10 minutes) with close code 4000 (`ws.ReauthCloseCode`),
+and both pages reconnect on it, which runs the auth middleware again. A
+revoked session or a demoted super-admin loses the stream or the shell
+within that time.
+
+How verified: `pkg/ws/ws_test.go`, `pkg/web/admin_mqtt_lifetime_integration_test.go`.
+
 ---
 
 ## PKI and mTLS
