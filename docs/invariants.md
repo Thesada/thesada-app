@@ -958,6 +958,21 @@ provisioner uses PKCS#8.
 
 Source: `pkg/pki/ca.go`, `pkg/pki/sign.go`.
 
+### A device cert warns 30 days before it expires
+
+Device certs live `pki.DeviceCertValidity` (365 days) and nothing renews
+them; the device is offline on the mTLS listener once `not_after` passes.
+The alert sweep raises one `warn` alert with code `cert_expiring` per
+active certificate that expires within `CertExpiryWarning` (30 days),
+keyed by serial in `raw`, so a cert is warned once. A cert already past
+`not_after` still gets the alert, worded as expired, so a dead device is never silent. The alert clears once
+that serial is no longer the device's active, unrevoked cert (re-pair or
+revoke). The fix for the device is a re-pair.
+
+How verified: `pkg/service/cert_expiry_sweep_integration_test.go`.
+
+Source: `pkg/service/cert_expiry_sweep.go`, `pkg/pki/ca.go`.
+
 ### Internal CA private key: KMS migration **(WIP)**
 
 Mitigated by passphrase encryption (see the CA-private-key-encrypted-on-disk

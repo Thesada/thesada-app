@@ -19,6 +19,7 @@ import (
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/mqtt"
+	"thesada.app/app/pkg/pki"
 	"thesada.app/app/pkg/service"
 )
 
@@ -219,11 +220,6 @@ func (s *Server) resetDeviceEnrollment(ctx context.Context, deviceID, op string)
 	return nil
 }
 
-// deviceCertValidity is the lifetime of a device client cert. Short enough
-// to limit blast radius if a device is compromised, long enough to avoid
-// fleet-wide re-pair churn. Re-issue is a one-click operation on this page.
-const deviceCertValidity = 365 * 24 * time.Hour
-
 // mTLS / password broker ports. Broker hostname is unchanged; only the port
 // swaps so the proxy can route to the matching listener. The mTLS port comes
 // from cfg.MQTTDeviceMTLSPort so the pair flow and the enroll response cannot
@@ -318,7 +314,7 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 	}
 
 	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
-	certPEM, keyPEM, serialHex, err := s.ca.SignDeviceCert(cn, deviceCertValidity)
+	certPEM, keyPEM, serialHex, err := s.ca.SignDeviceCert(cn, pki.DeviceCertValidity)
 	if err != nil {
 		slog.Error("sign device cert failed", "device", device.ID, "cn", cn, "err", err)
 		http.Redirect(w, r, flashPairSign.on("/admin/devices/pair"), http.StatusFound)
@@ -344,7 +340,7 @@ func (s *Server) handleAdminDevicePairIssue(w http.ResponseWriter, r *http.Reque
 	// Any failure in 2-6 flips the row 'failed' and surfaces the error.
 	now := time.Now()
 	certID, err := s.services.Certificates.IssuePending(r.Context(), device.TenantID, device.ID,
-		serialHex, cn, now, now.Add(deviceCertValidity), certPEM)
+		serialHex, cn, now, now.Add(pki.DeviceCertValidity), certPEM)
 	if err != nil {
 		slog.Error("persist pending device cert failed", "device", device.ID, "err", err)
 		http.Redirect(w, r, flashPairPersist.on("/admin/devices/pair"), http.StatusFound)
