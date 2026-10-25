@@ -52,6 +52,7 @@ func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 		"TotalDevices":    totalDevices,
 		"PendingWaitlist": pendingWaitlist,
 		"MultiTenantMode": s.services.Settings.GetBool("default", "multi_tenant_mode", false),
+		"TopicRoot":       s.cfg.MQTTTopicRoot,
 	})
 }
 
@@ -84,6 +85,7 @@ func (s *Server) handleAdminTenants(w http.ResponseWriter, r *http.Request) {
 		"QuotaDevices":    s.quotaDevices(),
 		"QuotaEvents":     s.quotaEvents(),
 		"MultiTenantMode": s.services.Settings.GetBool("default", "multi_tenant_mode", false),
+		"TopicRoot":       s.cfg.MQTTTopicRoot,
 	})
 }
 
@@ -109,6 +111,10 @@ func (s *Server) handleAdminTenantCreate(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.TenantCreate, service.AuditEntry{
+		TargetType: "tenant", TargetID: slug, TenantID: slug,
+		Detail: map[string]any{"display_name": displayName},
+	})
 	http.Redirect(w, r, "/admin/tenants", http.StatusFound)
 }
 
@@ -126,6 +132,9 @@ func (s *Server) handleAdminTenantDelete(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "delete failed", http.StatusInternalServerError)
 		return
 	}
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.TenantDelete, service.AuditEntry{
+		TargetType: "tenant", TargetID: slug, TenantID: slug,
+	})
 	http.Redirect(w, r, "/admin/tenants", http.StatusFound)
 }
 
@@ -208,6 +217,7 @@ func (s *Server) renderAdminTenantsWithError(w http.ResponseWriter, r *http.Requ
 		"QuotaDevices":    s.quotaDevices(),
 		"QuotaEvents":     s.quotaEvents(),
 		"MultiTenantMode": s.services.Settings.GetBool("default", "multi_tenant_mode", false),
+		"TopicRoot":       s.cfg.MQTTTopicRoot,
 	})
 }
 
@@ -417,7 +427,8 @@ func (s *Server) handleAdminTenantUserCreate(w http.ResponseWriter, r *http.Requ
 		http.Redirect(w, r, "/admin/tenants/"+slug+"/users?error=email+required", http.StatusFound)
 		return
 	}
-	if _, err := s.services.Auth.CreateUser(slug, email, displayName, isAdmin); err != nil {
+	created, err := s.services.Auth.CreateUser(slug, email, displayName, isAdmin)
+	if err != nil {
 		if errors.Is(err, service.ErrQuotaUsers) {
 			http.Redirect(w, r, flashAdminUserCap.on("/admin/tenants/"+slug+"/users"), http.StatusFound)
 			return
@@ -426,6 +437,10 @@ func (s *Server) handleAdminTenantUserCreate(w http.ResponseWriter, r *http.Requ
 		http.Redirect(w, r, "/admin/tenants/"+slug+"/users?error=create+failed", http.StatusFound)
 		return
 	}
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.UserCreate, service.AuditEntry{
+		TargetType: "user", TargetID: created.ID.String(), TenantID: slug,
+		Detail: map[string]any{"email": email, "is_admin": isAdmin},
+	})
 	http.Redirect(w, r, "/admin/tenants/"+slug+"/users", http.StatusFound)
 }
 
@@ -438,11 +453,16 @@ func (s *Server) handleAdminTenantUserToggle(w http.ResponseWriter, r *http.Requ
 		http.NotFound(w, r)
 		return
 	}
-	if _, err := s.services.Auth.ToggleAdmin(slug, uid); err != nil {
+	nowAdmin, err := s.services.Auth.ToggleAdmin(slug, uid)
+	if err != nil {
 		slog.Error("admin user toggle failed", "user", uid, "err", err)
 		http.Error(w, "toggle failed", http.StatusInternalServerError)
 		return
 	}
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.UserToggleAdmin, service.AuditEntry{
+		TargetType: "user", TargetID: uid.String(), TenantID: slug,
+		Detail: map[string]any{"is_admin": nowAdmin},
+	})
 	http.Redirect(w, r, "/admin/tenants/"+slug+"/users", http.StatusFound)
 }
 
@@ -470,6 +490,9 @@ func (s *Server) handleAdminTenantUserDelete(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "delete failed", http.StatusInternalServerError)
 		return
 	}
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.UserDelete, service.AuditEntry{
+		TargetType: "user", TargetID: uid.String(), TenantID: slug,
+	})
 	http.Redirect(w, r, "/admin/tenants/"+slug+"/users", http.StatusFound)
 }
 
@@ -520,6 +543,10 @@ func (s *Server) handleAdminTenantUserUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	slog.Info("admin user updated", "user_id", uid, "display_name", displayName, "is_admin", isAdmin)
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.UserUpdate, service.AuditEntry{
+		TargetType: "user", TargetID: uid.String(), TenantID: slug,
+		Detail: map[string]any{"display_name": displayName, "is_admin": isAdmin},
+	})
 	http.Redirect(w, r, "/admin/tenants/"+slug+"/users", http.StatusFound)
 }
 
@@ -550,6 +577,10 @@ func (s *Server) handleAdminTenantUserSendReset(w http.ResponseWriter, r *http.R
 		return
 	}
 	slog.Info("admin send-reset ok", "user_id", uid, "email", u.Email)
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.UserSendReset, service.AuditEntry{
+		TargetType: "user", TargetID: uid.String(), TenantID: slug,
+		Detail: map[string]any{"email": u.Email},
+	})
 	http.Redirect(w, r, "/admin/tenants/"+slug+"/users/"+uid.String()+"/edit?ok=reset+sent", http.StatusFound)
 }
 

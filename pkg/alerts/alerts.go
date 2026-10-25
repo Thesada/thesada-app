@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"html/template"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -65,6 +66,8 @@ type Notifier struct {
 	mailer      *mailer.Mailer
 	http        *http.Client
 	webhookHTTP *http.Client
+	// webhookAllow is cfg.WebhookAllowNets, checked on the URL and on every dial.
+	webhookAllow []*net.IPNet
 
 	// Send seams: tests swap these to drive retry outcomes without a live
 	// SMTP server or api.telegram.org.
@@ -85,13 +88,14 @@ type Notifier struct {
 // in: cfg, db pools, mailer. out: ready *Notifier.
 func New(cfg *config.Config, pools db.Pools, mail *mailer.Mailer) *Notifier {
 	n := &Notifier{
-		cfg:         cfg,
-		db:          pools.App,
-		admin:       pools.Admin,
-		mailer:      mail,
-		http:        &http.Client{Timeout: telegramAPITimeout},
-		webhookHTTP: newWebhookClient(),
-		inflight:    make(map[int64]struct{}),
+		cfg:          cfg,
+		db:           pools.App,
+		admin:        pools.Admin,
+		mailer:       mail,
+		http:         &http.Client{Timeout: telegramAPITimeout},
+		webhookHTTP:  newWebhookClient(cfg.WebhookAllowNets),
+		webhookAllow: cfg.WebhookAllowNets,
+		inflight:     make(map[int64]struct{}),
 	}
 	n.sendEmail = func(to, subject, text, html string) error {
 		// mailer.SendMIME silently no-ops when SMTP is unconfigured (documented

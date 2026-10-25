@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"hash/fnv"
 	"html/template"
 	"reflect"
 	"sort"
@@ -39,6 +40,20 @@ var funcMap = template.FuncMap{
 	"telemetryValue":   telemetryValueText,
 	"metricLeaf":       metricLeaf,
 	"groupLatest":      groupLatestByPrefix,
+	"setKey":           setKey,
+}
+
+// setKey hashes a set of names into a short id suffix, so an element id
+// changes exactly when the set does. in: names, any order. out: 16 hex chars.
+func setKey(names []string) string {
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	h := fnv.New64a()
+	for _, n := range sorted {
+		h.Write([]byte(n))
+		h.Write([]byte{0})
+	}
+	return fmt.Sprintf("%016x", h.Sum64())
 }
 
 // metricLeaf returns the part of a metric name after the first slash, or

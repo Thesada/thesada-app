@@ -160,6 +160,18 @@ func (c *Client) CreateDynsecRole(ctx context.Context, name string, acls []Dynse
 // exist - caller should inspect the returned error via
 // IsDynsecAlreadyExists-style matching if needed.
 // in: ctx, role name. out: error.
+// SetDynsecRoleACLs replaces an existing role's ACL list (modifyRole with
+// acls replaces, not merges; checked against mosquitto 2.1.2).
+// in: ctx, role name, full ACL list (must be non-empty). out: error.
+func (c *Client) SetDynsecRoleACLs(ctx context.Context, name string, acls []DynsecACL) error {
+	_, err := c.sendDynsec(ctx, dynsecCommand{
+		Command:  "modifyRole",
+		Rolename: name,
+		ACLs:     acls,
+	})
+	return err
+}
+
 func (c *Client) DeleteDynsecRole(ctx context.Context, name string) error {
 	_, err := c.sendDynsec(ctx, dynsecCommand{
 		Command:  "deleteRole",

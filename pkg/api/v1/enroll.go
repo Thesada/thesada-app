@@ -305,7 +305,7 @@ func (s *Server) handleEnrollCert(w http.ResponseWriter, r *http.Request) {
 	// asked for, so neither distinguishes a real id from a fabricated one, and
 	// a signing CA that cannot sign should look broken rather than picky.
 	cn := service.DeviceCertCN(tenant, device.DeviceID)
-	certPEM, keyPEM, serialHex, err := s.ca.SignDeviceCert(cn, deviceCertValidity)
+	certPEM, keyPEM, serialHex, err := s.ca.SignDeviceCert(cn, pki.DeviceCertValidity)
 	if err != nil {
 		slog.Error("device.enroll.cert_sign_failed", "device_id", req.DeviceID, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sign failed"})
@@ -313,7 +313,7 @@ func (s *Server) handleEnrollCert(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	if err := s.services.Certificates.IssueWithIdentity(r.Context(), tenant, device.ID,
-		serialHex, cn, now, now.Add(deviceCertValidity), certPEM, req.Pubkey); err != nil {
+		serialHex, cn, now, now.Add(pki.DeviceCertValidity), certPEM, req.Pubkey); err != nil {
 		slog.Error("device.enroll.cert_persist_failed", "device_id", req.DeviceID, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
 		return

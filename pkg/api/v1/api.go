@@ -23,10 +23,6 @@ import (
 	"thesada.app/app/pkg/service"
 )
 
-// deviceCertValidity is the lifetime of a device client cert issued by the
-// /pair endpoint. Matches pkg/web.deviceCertValidity - keep in sync.
-const deviceCertValidity = 365 * 24 * time.Hour
-
 // Server holds the JSON API handler tree.
 type Server struct {
 	cfg      *config.Config
@@ -222,14 +218,14 @@ func (s *Server) handleDevicePair(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
-	certPEM, keyPEM, serialHex, err := s.ca.SignDeviceCert(cn, deviceCertValidity)
+	certPEM, keyPEM, serialHex, err := s.ca.SignDeviceCert(cn, pki.DeviceCertValidity)
 	if err != nil {
 		slog.Error("api pair: sign failed", "device", device.ID, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sign failed"})
 		return
 	}
 	now := time.Now()
-	notAfter := now.Add(deviceCertValidity)
+	notAfter := now.Add(pki.DeviceCertValidity)
 	if err := s.services.Certificates.Issue(r.Context(), device.TenantID, device.ID, serialHex, cn, now, notAfter, certPEM); err != nil {
 		slog.Error("api pair: persist failed", "device", device.ID, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
