@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/service"
 )
 
@@ -116,6 +117,10 @@ func (s *Server) handleAdminDeviceRulesWorkspacePOST(w http.ResponseWriter, r *h
 		http.Error(w, "workspace save failed", http.StatusInternalServerError)
 		return
 	}
+	s.audit(r.Context(), user, authz.RulesWorkspaceSave, service.AuditEntry{
+		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
+		Detail: map[string]any{"device_id": device.DeviceID, "slot": req.Slot, "lua_sha256": sha, "source": req.Source},
+	})
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "slot": req.Slot, "lua_sha256": sha})
 }
@@ -192,6 +197,10 @@ func (s *Server) handleAdminRuleTemplatesPOST(w http.ResponseWriter, r *http.Req
 		http.Error(w, "template save failed", http.StatusInternalServerError)
 		return
 	}
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.RuleTemplateSave, service.AuditEntry{
+		TargetType: "rule_template", TargetID: strings.TrimSpace(req.Name), TenantID: device.TenantID,
+		Detail: map[string]any{"lua_sha256": sha},
+	})
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "name": strings.TrimSpace(req.Name), "lua_sha256": sha})
 }
@@ -217,6 +226,9 @@ func (s *Server) handleAdminRuleTemplatesDELETE(w http.ResponseWriter, r *http.R
 		http.Error(w, "template delete failed", http.StatusInternalServerError)
 		return
 	}
+	s.audit(r.Context(), authmw.CurrentUser(r), authz.RuleTemplateDelete, service.AuditEntry{
+		TargetType: "rule_template", TargetID: r.URL.Query().Get("name"), TenantID: device.TenantID,
+	})
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }

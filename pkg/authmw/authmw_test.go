@@ -117,6 +117,81 @@ func TestRequireSuperAdmin_SuperAdmin_PassesThrough(t *testing.T) {
 	}
 }
 
+var loginGates = map[string]func(http.HandlerFunc) http.HandlerFunc{
+	"RequireAuth":       RequireAuth,
+	"RequireSuperAdmin": RequireSuperAdmin,
+}
+
+// fetch follows a 302, so a live block would swap in the login page and lose
+// its content. An anonymous htmx request gets 401 + HX-Redirect instead.
+func TestLoginGates_AnonymousHTMX_401WithHXRedirect(t *testing.T) {
+	for name, gate := range loginGates {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/devices", nil)
+			req.Header.Set("HX-Request", "true")
+			gate(nextCalled(&called))(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+			}
+			if got := rec.Header().Get("HX-Redirect"); got != "/login" {
+				t.Errorf("HX-Redirect = %q, want /login", got)
+			}
+			if loc := rec.Header().Get("Location"); loc != "" {
+				t.Errorf("Location = %q, want none", loc)
+			}
+			if called {
+				t.Error("next should not have been called")
+			}
+		})
+	}
+}
+
+// Negative control: without HX-Request: true the gates keep the plain 302.
+func TestLoginGates_AnonymousNonHTMX_Keeps302(t *testing.T) {
+	for name, gate := range loginGates {
+		for _, hx := range []string{"", "false"} {
+			t.Run(name+"/hx="+hx, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, "/devices", nil)
+				if hx != "" {
+					req.Header.Set("HX-Request", hx)
+				}
+				gate(okHandler())(rec, req)
+				if rec.Code != http.StatusFound {
+					t.Errorf("status = %d, want %d", rec.Code, http.StatusFound)
+				}
+				if loc := rec.Header().Get("Location"); loc != "/login" {
+					t.Errorf("Location = %q, want /login", loc)
+				}
+				if got := rec.Header().Get("HX-Redirect"); got != "" {
+					t.Errorf("HX-Redirect = %q, want none", got)
+				}
+			})
+		}
+	}
+}
+
+// A signed-in htmx request is not bounced: the header alone changes nothing.
+func TestLoginGates_SignedInHTMX_PassesThrough(t *testing.T) {
+	for name, gate := range loginGates {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			rec := httptest.NewRecorder()
+			req := withSession(httptest.NewRequest(http.MethodGet, "/devices", nil), newSession(true, nil))
+			req.Header.Set("HX-Request", "true")
+			gate(nextCalled(&called))(rec, req)
+			if rec.Code != http.StatusOK || !called {
+				t.Errorf("status = %d, called = %v, want 200 and next called", rec.Code, called)
+			}
+			if got := rec.Header().Get("HX-Redirect"); got != "" {
+				t.Errorf("HX-Redirect = %q, want none", got)
+			}
+		})
+	}
+}
+
 func TestCurrentUser_NoSession(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	if u := CurrentUser(r); u != nil {

@@ -90,3 +90,17 @@ func TestCheck_WrongCodeIsFalse(t *testing.T) {
 		t.Fatalf("good code ok=%v err=%v", ok, err)
 	}
 }
+
+func TestVerifyStepReturnsTheMatchedStep(t *testing.T) {
+	key := []byte("12345678901234567890")
+	at := time.Unix(59, 0) // step 1
+	for _, tc := range []struct {
+		offset time.Duration
+		want   int64
+	}{{-step, 0}, {0, 1}, {step, 2}} {
+		got, ok := VerifyStep(key, Code(key, at.Add(tc.offset)), at)
+		if !ok || got != tc.want {
+			t.Errorf("offset %v: step %d ok %v, want %d", tc.offset, got, ok, tc.want)
+		}
+	}
+}

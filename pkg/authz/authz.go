@@ -31,8 +31,6 @@ const (
 	DeviceReadCrossTenant Action = "device.read_cross_tenant"
 	// SensorDeleteCrossTenant deletes sensor telemetry on a cross-tenant device.
 	SensorDeleteCrossTenant Action = "sensor.delete_cross_tenant"
-	// MQTTPublishAnyTenant publishes to any tenant's MQTT topic tree.
-	MQTTPublishAnyTenant Action = "mqtt.publish_any_tenant"
 )
 
 // Privileged admin mutations. Each successful mutation records an
@@ -54,6 +52,19 @@ const (
 	TenantSecretProvision Action = "tenant_secret.provision"
 	OTADispatch           Action = "ota.dispatch"
 	MQTTShellPublish      Action = "mqtt.shell_publish"
+	MQTTShellSubscribe    Action = "mqtt.shell_subscribe"
+	DeviceCommand         Action = "device.command"
+	DeviceConfigWrite     Action = "device.config_write"
+	TenantCreate          Action = "tenant.create"
+	TenantDelete          Action = "tenant.delete"
+	UserCreate            Action = "user.create"
+	UserUpdate            Action = "user.update"
+	UserToggleAdmin       Action = "user.toggle_admin"
+	UserDelete            Action = "user.delete"
+	UserSendReset         Action = "user.send_reset"
+	RulesWorkspaceSave    Action = "rules.workspace_save"
+	RuleTemplateSave      Action = "rule_template.save"
+	RuleTemplateDelete    Action = "rule_template.delete"
 )
 
 // ErrForbidden is returned by Require when the user may not perform the
@@ -68,7 +79,6 @@ var ErrForbidden = errors.New("authz: forbidden")
 var superAdminActions = map[Action]bool{
 	DeviceReadCrossTenant:   true,
 	SensorDeleteCrossTenant: true,
-	MQTTPublishAnyTenant:    true,
 	ImpersonationSet:        true,
 	ImpersonationClear:      true,
 	WaitlistConvert:         true,
@@ -85,6 +95,19 @@ var superAdminActions = map[Action]bool{
 	TenantSecretProvision:   true,
 	OTADispatch:             true,
 	MQTTShellPublish:        true,
+	MQTTShellSubscribe:      true,
+	DeviceCommand:           true,
+	DeviceConfigWrite:       true,
+	TenantCreate:            true,
+	TenantDelete:            true,
+	UserCreate:              true,
+	UserUpdate:              true,
+	UserToggleAdmin:         true,
+	UserDelete:              true,
+	UserSendReset:           true,
+	RulesWorkspaceSave:      true,
+	RuleTemplateSave:        true,
+	RuleTemplateDelete:      true,
 }
 
 // Actions returns every registered Action slug, sorted, for UIs that need

@@ -17,9 +17,20 @@ import (
 
 const webhookTimeout = 10 * time.Second
 
+// webhookDialer dials addr after refusing a resolved address we will not POST.
+// in: operator allowlist. out: DialContext func.
+func webhookDialer(allow []*net.IPNet) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dialWebhookAddr(ctx, network, addr, allow)
+	}
+}
+
+// webhookDial is the network dial; tests swap it so no test touches a network.
+var webhookDial = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
+
 // dialWebhookAddr dials addr after refusing a resolved address we will not POST.
-// in: ctx, network, host:port. out: conn, error.
-func dialWebhookAddr(ctx context.Context, network, addr string) (net.Conn, error) {
+// in: ctx, network, host:port, operator allowlist. out: conn, error.
+func dialWebhookAddr(ctx context.Context, network, addr string, allow []*net.IPNet) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, fmt.Errorf("webhook dial %s: %w", addr, err)
@@ -32,14 +43,13 @@ func dialWebhookAddr(ctx context.Context, network, addr string) (net.Conn, error
 		return nil, fmt.Errorf("webhook dial %s: address refused", host)
 	}
 	for _, ip := range ips {
-		if service.WebhookIPRefused(ip.IP) {
+		if service.WebhookIPRefused(ip.IP, allow) {
 			return nil, fmt.Errorf("webhook dial %s: address refused", ip.IP)
 		}
 	}
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	var lastErr error
 	for _, ip := range ips {
-		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+		conn, err := webhookDial(ctx, network, net.JoinHostPort(ip.IP.String(), port))
 		if err == nil {
 			return conn, nil
 		}
@@ -48,10 +58,10 @@ func dialWebhookAddr(ctx context.Context, network, addr string) (net.Conn, error
 	return nil, fmt.Errorf("webhook dial %s: %w", host, lastErr)
 }
 
-// newWebhookClient refuses redirects and link-local or loopback addresses.
-// in: none. out: client.
-func newWebhookClient() *http.Client {
-	transport := &http.Transport{DialContext: dialWebhookAddr}
+// newWebhookClient refuses redirects and every address WebhookIPRefused refuses.
+// in: operator allowlist. out: client.
+func newWebhookClient(allow []*net.IPNet) *http.Client {
+	transport := &http.Transport{DialContext: webhookDialer(allow)}
 	return &http.Client{
 		Timeout:   webhookTimeout,
 		Transport: transport,
@@ -64,7 +74,7 @@ func newWebhookClient() *http.Client {
 // sendWebhook POSTs one alert as JSON. Redirects are refused.
 // in: ctx, destination URL, JSON body. out: error.
 func (n *Notifier) sendWebhook(ctx context.Context, dest string, payload []byte) error {
-	if !service.ValidWebhookURL(dest) {
+	if !service.ValidWebhookURL(dest, n.webhookAllow) {
 		return errors.New("webhook url refused")
 	}
 	if n.webhookHTTP == nil {

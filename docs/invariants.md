@@ -418,6 +418,12 @@ and not "the code was wrong". The JSON login returns `totp_required`
 until `code` is present and valid. Magic-link verify returns the same
 error plus a `challenge` token, finished at `POST /auth/totp`. The web
 login parks a 5-minute challenge cookie and finishes at `POST /login/totp`.
+A code signs in once: the accepted time step is stored in
+`users.totp_last_step` by a guarded `UPDATE` (only a newer step lands), so a
+second login with the same code inside its 90 s window is refused, and of
+two parallel finishes on one challenge only one opens a session; a loser
+gets `ErrExpired`, never an internal error
+(`pkg/service/auth_totp_replay_integration_test.go`).
 A web finish that cannot decode the secret returns HTTP 500. An expired
 challenge redirects to `/login`. Password and magic-link API calls log
 `method` to `challenged`, then `challenged` to `passed` when the code
@@ -939,6 +945,16 @@ the browser's SameSite=Lax session cookie to open a socket. Rejections log
 
 Source: `pkg/httpsec.OriginAllowed`, `pkg/ws/ws.go`, `pkg/web/admin_mqtt.go`.
 
+### A socket lives at most ws.MaxLifetime
+
+The session is checked only at the upgrade. Both sockets close after
+`ws.MaxLifetime` (10 minutes) with close code 4000 (`ws.ReauthCloseCode`),
+and both pages reconnect on it, which runs the auth middleware again. A
+revoked session or a demoted super-admin loses the stream or the shell
+within that time.
+
+How verified: `pkg/ws/ws_test.go`, `pkg/web/admin_mqtt_lifetime_integration_test.go`.
+
 ---
 
 ## PKI and mTLS
@@ -951,6 +967,21 @@ KEY" envelope) is required by SIM7080G firmware 1951B17; the
 provisioner uses PKCS#8.
 
 Source: `pkg/pki/ca.go`, `pkg/pki/sign.go`.
+
+### A device cert warns 30 days before it expires
+
+Device certs live `pki.DeviceCertValidity` (365 days) and nothing renews
+them; the device is offline on the mTLS listener once `not_after` passes.
+The alert sweep raises one `warn` alert with code `cert_expiring` per
+active certificate that expires within `CertExpiryWarning` (30 days),
+keyed by serial in `raw`, so a cert is warned once. A cert already past
+`not_after` still gets the alert, worded as expired, so a dead device is never silent. The alert clears once
+that serial is no longer the device's active, unrevoked cert (re-pair or
+revoke). The fix for the device is a re-pair.
+
+How verified: `pkg/service/cert_expiry_sweep_integration_test.go`.
+
+Source: `pkg/service/cert_expiry_sweep.go`, `pkg/pki/ca.go`.
 
 ### Internal CA private key: KMS migration **(WIP)**
 
@@ -1181,7 +1212,7 @@ redispatch, no-double-send on partial channel failure).
 Source: `pkg/alerts/alerts.go::Dispatch`, `pkg/alerts/redispatch.go`,
 migration `0025_alert_delivery_retry.sql`.
 
-### A webhook is posted once per alert, and not at a loopback address
+### A webhook is posted once per alert, and not into the internal network
 
 A subscription with channel `webhook` is a third delivery channel. Dispatch
 POSTs a JSON body (`alert_id`, `device_id`, `severity`, `code`, `message`,
@@ -1196,7 +1227,13 @@ delivery row is accepted only when that subscription's user is in the
 device's tenant, and the subscription names that device or every device.
 The URL must be http or https
 with a host. Loopback, link-local, and redirects are refused. Private
-addresses are allowed so a receiver on the home network still works.
+(RFC 1918, fc00::/7) and CGNAT (100.64.0.0/10, the NetBird overlay)
+addresses are refused too, because from the server a tenant's webhook would
+otherwise reach the internal network. An operator opens specific ranges with
+`THESADA_WEBHOOK_ALLOW_CIDRS` (comma-separated IPs or CIDRs, e.g. a home
+Home Assistant); loopback and link-local stay refused even when listed. The
+check runs on the stored URL and again on every dial, against the resolved
+address.
 A refused destination is not copied into the error, so a token in the
 URL does not land in the log.
 

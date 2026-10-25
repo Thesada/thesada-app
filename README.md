@@ -49,7 +49,7 @@ One Go binary. Goroutines for HTTP, MQTT subscriber, background workers. No micr
 
 ## Requirements
 
-- Go 1.26.9 (the `go` directive in `go.mod`)
+- Go 1.26.10 (the `go` directive in `go.mod`)
 - Postgres 14+
 - The Tailwind v4 standalone binary, downloaded into `tools/tailwindcss`:
 
@@ -121,7 +121,8 @@ Optional (but recommended):
 - On success, a cookie `thesada_session` is set (HttpOnly, SameSite=Lax,
   Secure when `BASE_URL` starts with https).
 - `/devices`, `/devices/{id}`, `/alerts` are wrapped in `authmw.RequireAuth`
-  and 302 to `/login` for anonymous requests.
+  and 302 to `/login` for anonymous requests. An htmx request gets 401 with
+  `HX-Redirect: /login` instead, so a live block never swaps in the login page.
 - `POST /logout` revokes the session row and clears the cookie.
 
 Admin bootstrap: if `THESADA_ADMIN_EMAIL` is set, startup calls

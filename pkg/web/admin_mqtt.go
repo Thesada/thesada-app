@@ -19,12 +19,17 @@ import (
 	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/ratelimit"
 	"thesada.app/app/pkg/service"
+	"thesada.app/app/pkg/ws"
 )
 
 // adminMqttMaxBuffer caps the per-socket outbound channel. When full, new
 // messages are dropped and a `dropped` counter is surfaced so the browser
 // knows it missed traffic.
 const adminMqttMaxBuffer = 256
+
+// adminMqttAuditCap bounds the topics and patterns one session's audit row
+// lists; the publish and subscribe counts stay exact.
+const adminMqttAuditCap = 50
 
 // adminMqttPublishMax is the per-socket publish rate limit window + count.
 const (
@@ -63,6 +68,7 @@ func (s *Server) handleAdminMqttShell(w http.ResponseWriter, r *http.Request) {
 	root := s.cfg.MQTTTopicRoot
 	s.render(w, r, "admin-mqtt.html", map[string]interface{}{
 		"DefaultPattern": root + "/" + authmw.EffectiveTenantID(r) + "/#",
+		"TopicRoot":      root,
 	})
 }
 
@@ -100,28 +106,45 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
+	// The route is super-admin only (RequireSuperAdmin), so the whole tree
+	// under the topic root is in scope; nothing outside it.
 	root := s.cfg.MQTTTopicRoot
 	allowedPrefix := root + "/"
-	if !authz.Can(user, authz.MQTTPublishAnyTenant) {
-		allowedPrefix = root + "/" + user.TenantID + "/"
-	}
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	// One admin_audit row per ws session, written on close with the publish
-	// count - never per message, or a busy shell would flood the table.
-	// Fresh context: the request/ws contexts are already canceled by the
-	// time this defer runs.
-	var publishes int
+	// One admin_audit row per ws session, written on close - never per
+	// message, or a busy shell would flood the table. It names the first
+	// adminMqttAuditCap topics with payload sizes (never payloads: they can
+	// carry secrets, and the table is append-only) and the first
+	// adminMqttAuditCap patterns read, each list with an exact count.
+	// Fresh context: the request/ws contexts are canceled by then.
+	var (
+		publishes  int
+		published  []map[string]any
+		subscribes int
+		subscribed []string
+	)
 	defer func() {
-		if publishes == 0 {
+		if publishes == 0 && subscribes == 0 {
 			return
+		}
+		action := authz.MQTTShellPublish
+		if publishes == 0 {
+			action = authz.MQTTShellSubscribe
 		}
 		actx, acancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer acancel()
-		s.audit(actx, user, authz.MQTTShellPublish, service.AuditEntry{
-			Detail: map[string]any{"publishes": publishes},
+		s.audit(actx, user, action, service.AuditEntry{
+			Detail: map[string]any{
+				"publishes":            publishes,
+				"published":            published,
+				"truncated":            publishes > len(published),
+				"subscribes":           subscribes,
+				"subscribed":           subscribed,
+				"subscribed_truncated": subscribes > len(subscribed),
+			},
 		})
 	}()
 
@@ -174,11 +197,16 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Writer goroutine: drains out channel onto the websocket. Closes when
-	// ctx cancels or a write fails.
+	// ctx cancels or a write fails; cancel releases a reader blocked on send.
 	go func() {
 		defer func() { _ = conn.Close() }()
+		defer cancel()
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
+		// Same cap as /ws: the shell reconnects and passes RequireSuperAdmin
+		// again, so a demoted admin loses it within ws.MaxLifetime.
+		lifetime := time.NewTimer(ws.MaxLifetime)
+		defer lifetime.Stop()
 		for {
 			select {
 			case <-ctx.Done():
@@ -201,6 +229,11 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 					return
 				}
+			case <-lifetime.C:
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				_ = conn.WriteMessage(websocket.CloseMessage,
+					websocket.FormatCloseMessage(ws.ReauthCloseCode, "reauthenticate"))
+				return
 			}
 		}
 	}()
@@ -209,6 +242,15 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 	// addr so a browser that opens two tabs gets two independent buckets.
 	pubLimiter := ratelimit.New(adminMqttPublishWindow, adminMqttPublishMax)
 	pubKey := r.RemoteAddr
+
+	// reply queues a response unless the writer is gone; the closed conn
+	// then ends the read below.
+	reply := func(m adminMqttOutboundMsg) {
+		select {
+		case out <- m:
+		case <-ctx.Done():
+		}
+	}
 
 	// Reader loop: waits for subscribe / publish frames from the browser.
 	for {
@@ -224,18 +266,22 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 				pattern = root + "/#"
 			}
 			if err := registerTap(pattern); err != nil {
-				out <- adminMqttOutboundMsg{Type: "error", Error: "bad pattern: " + err.Error()}
+				reply(adminMqttOutboundMsg{Type: "error", Error: "bad pattern: " + err.Error()})
 				continue
 			}
-			out <- adminMqttOutboundMsg{Type: "info", Info: "subscribed: " + pattern}
+			subscribes++
+			if len(subscribed) < adminMqttAuditCap {
+				subscribed = append(subscribed, pattern)
+			}
+			reply(adminMqttOutboundMsg{Type: "info", Info: "subscribed: " + pattern})
 		case "publish":
 			topic := strings.TrimSpace(in.Topic)
 			if topic == "" || !strings.HasPrefix(topic, allowedPrefix) {
-				out <- adminMqttOutboundMsg{Type: "error", Error: "topic must start with " + allowedPrefix}
+				reply(adminMqttOutboundMsg{Type: "error", Error: "topic must start with " + allowedPrefix})
 				continue
 			}
 			if !pubLimiter.Allow(pubKey) {
-				out <- adminMqttOutboundMsg{Type: "error", Error: "publish rate limit (20 / 10s) exceeded"}
+				reply(adminMqttOutboundMsg{Type: "error", Error: "publish rate limit (20 / 10s) exceeded"})
 				continue
 			}
 			qos := byte(0)
@@ -243,11 +289,16 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 				qos = byte(in.QoS)
 			}
 			if err := s.mqtt.PublishRaw(topic, []byte(in.Payload), qos, in.Retain); err != nil {
-				out <- adminMqttOutboundMsg{Type: "error", Error: "publish failed: " + err.Error()}
+				reply(adminMqttOutboundMsg{Type: "error", Error: "publish failed: " + err.Error()})
 				slog.Warn("admin mqtt publish failed", "topic", topic, "err", err)
 				continue
 			}
 			publishes++
+			if len(published) < adminMqttAuditCap {
+				published = append(published, map[string]any{
+					"topic": topic, "bytes": len(in.Payload), "retain": in.Retain,
+				})
+			}
 			slog.Info("admin mqtt publish",
 				"user", func() string {
 					if user == nil {
@@ -259,9 +310,9 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 				"payload_len", len(in.Payload),
 				"qos", qos,
 				"retain", in.Retain)
-			out <- adminMqttOutboundMsg{Type: "info", Info: "published " + topic}
+			reply(adminMqttOutboundMsg{Type: "info", Info: "published " + topic})
 		default:
-			out <- adminMqttOutboundMsg{Type: "error", Error: "unknown type: " + in.Type}
+			reply(adminMqttOutboundMsg{Type: "error", Error: "unknown type: " + in.Type})
 		}
 	}
 }
