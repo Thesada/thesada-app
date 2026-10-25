@@ -64,6 +64,10 @@ type Config struct {
 	// client-IP resolution (logging, per-IP rate limit). Empty = use RemoteAddr.
 	TrustedProxies []*net.IPNet
 
+	// WebhookAllowNets lets webhooks reach these private networks (a home
+	// Home Assistant, say). Private and CGNAT ranges are refused otherwise.
+	WebhookAllowNets []*net.IPNet
+
 	ConfigSnapshotRetention int    // max snapshots per device+path, default 100
 	CADir                   string // directory for CA keypair, default /etc/thesada-app/ca
 
@@ -158,21 +162,26 @@ func Load() (*Config, error) {
 		QuotaEventsPerDay:       envOrInt("THESADA_QUOTA_EVENTS_PER_DAY", 10000),
 		EnrollmentPruneInterval: envOrDuration("THESADA_ENROLLMENT_PRUNE_INTERVAL", time.Hour),
 	}
-	tp, err := parseTrustedProxies(os.Getenv("THESADA_TRUSTED_PROXIES"))
+	tp, err := parseNetList("THESADA_TRUSTED_PROXIES", os.Getenv("THESADA_TRUSTED_PROXIES"))
 	if err != nil {
 		return nil, err
 	}
 	c.TrustedProxies = tp
+	wa, err := parseNetList("THESADA_WEBHOOK_ALLOW_CIDRS", os.Getenv("THESADA_WEBHOOK_ALLOW_CIDRS"))
+	if err != nil {
+		return nil, err
+	}
+	c.WebhookAllowNets = wa
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
 	return c, nil
 }
 
-// parseTrustedProxies parses a comma-separated list of IPs and CIDRs into
-// networks; a bare IP becomes a single-host net. Loud failure on a bad entry.
-// in: env value. out: networks (nil when empty), error.
-func parseTrustedProxies(s string) ([]*net.IPNet, error) {
+// parseNetList parses a comma-separated list of IPs and CIDRs into networks;
+// a bare IP becomes a single-host net. Loud failure on a bad entry, naming
+// the env var. in: env var name, value. out: networks (nil when empty), error.
+func parseNetList(name, s string) ([]*net.IPNet, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil, nil
@@ -181,19 +190,19 @@ func parseTrustedProxies(s string) ([]*net.IPNet, error) {
 	for i, part := range strings.Split(s, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
-			return nil, fmt.Errorf("THESADA_TRUSTED_PROXIES: empty entry at position %d", i+1)
+			return nil, fmt.Errorf("%s: empty entry at position %d", name, i+1)
 		}
 		if strings.Contains(part, "/") {
 			_, n, err := net.ParseCIDR(part)
 			if err != nil {
-				return nil, fmt.Errorf("THESADA_TRUSTED_PROXIES: invalid CIDR %q: %w", part, err)
+				return nil, fmt.Errorf("%s: invalid CIDR %q: %w", name, part, err)
 			}
 			nets = append(nets, n)
 			continue
 		}
 		ip := net.ParseIP(part)
 		if ip == nil {
-			return nil, fmt.Errorf("THESADA_TRUSTED_PROXIES: invalid IP %q", part)
+			return nil, fmt.Errorf("%s: invalid IP %q", name, part)
 		}
 		bits := 32
 		if ip.To4() == nil {

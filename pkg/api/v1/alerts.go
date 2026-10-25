@@ -71,7 +71,7 @@ func (s *Server) handleSubsCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "channel must be email, telegram, or webhook"})
 		return
 	}
-	if err := service.WebhookDestinationError(req.Channel, req.Destination); err != nil {
+	if err := service.WebhookDestinationError(req.Channel, req.Destination, s.cfg.WebhookAllowNets); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "webhook needs an http(s) URL"})
 		return
 	}

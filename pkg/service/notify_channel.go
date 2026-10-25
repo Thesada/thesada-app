@@ -21,10 +21,11 @@ func ValidNotifyChannel(channel string) bool {
 	}
 }
 
-// ValidWebhookURL reports whether raw is an http(s) URL we will POST.
-// Loopback and link-local hosts are refused. Private ranges stay allowed.
-// in: raw URL. out: true when the destination is acceptable.
-func ValidWebhookURL(raw string) bool {
+// ValidWebhookURL reports whether raw is an http(s) URL we will POST. A
+// literal IP goes through WebhookIPRefused; host names are checked again on
+// every dial, against what they resolve to.
+// in: raw URL, operator allowlist. out: true when the destination is acceptable.
+func ValidWebhookURL(raw string, allow []*net.IPNet) bool {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || u.User != nil {
 		return false
@@ -36,7 +37,7 @@ func ValidWebhookURL(raw string) bool {
 	if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") {
 		return false
 	}
-	if ip := net.ParseIP(host); ip != nil && WebhookIPRefused(ip) {
+	if ip := net.ParseIP(host); ip != nil && WebhookIPRefused(ip, allow) {
 		return false
 	}
 	return true
@@ -44,23 +45,41 @@ func ValidWebhookURL(raw string) bool {
 
 // WebhookDestinationError rejects a webhook channel whose URL we will not POST.
 // Other channels are not URL-checked.
-// in: channel, destination. out: ErrBadWebhook or nil.
-func WebhookDestinationError(channel, destination string) error {
+// in: channel, destination, operator allowlist. out: ErrBadWebhook or nil.
+func WebhookDestinationError(channel, destination string, allow []*net.IPNet) error {
 	if channel != "webhook" {
 		return nil
 	}
-	if !ValidWebhookURL(destination) {
+	if !ValidWebhookURL(destination, allow) {
 		return ErrBadWebhook
 	}
 	return nil
 }
 
-// WebhookIPRefused reports loopback, link-local, multicast, and unspecified addresses.
-// in: ip. out: true when a webhook must not dial it.
-func WebhookIPRefused(ip net.IP) bool {
+// cgnat is 100.64.0.0/10 (RFC 6598), the NetBird overlay range.
+var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// WebhookIPRefused reports addresses a webhook must not dial. Loopback,
+// link-local, multicast and unspecified are always refused. Private (RFC 1918,
+// fc00::/7) and CGNAT addresses are refused unless an operator listed them in
+// THESADA_WEBHOOK_ALLOW_CIDRS: from the server, a tenant's webhook would
+// otherwise reach the internal network.
+// in: ip, operator allowlist. out: true when a webhook must not dial it.
+func WebhookIPRefused(ip net.IP, allow []*net.IPNet) bool {
 	if ip == nil {
 		return true
 	}
-	return ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if !ip.IsPrivate() && !cgnat.Contains(ip) {
+		return false
+	}
+	for _, n := range allow {
+		if n.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
