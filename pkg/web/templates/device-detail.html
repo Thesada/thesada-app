@@ -290,6 +290,12 @@
                 }
               }
             };
+            // Same canvas: update in place, no destroy/recreate flicker.
+            if (chart && chart.canvas === canvas) {
+              chart.data = config.data;
+              chart.update("none");
+              return;
+            }
             if (chart) { chart.destroy(); }
             chart = new Chart(canvas, config);
           })

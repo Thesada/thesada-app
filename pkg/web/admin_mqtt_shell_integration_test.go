@@ -10,6 +10,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -213,6 +214,33 @@ func TestAdminMqttShell(t *testing.T) {
 		d := auditAfter(t, "mqtt.shell_subscribe", since)
 		if d["publishes"] != float64(0) {
 			t.Fatalf("publishes = %v, want 0", d["publishes"])
+		}
+	})
+
+	t.Run("subscribe list caps with an exact count", func(t *testing.T) {
+		since := maxID()
+		c, _, err := dial(s.cfg.BaseURL)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		n := adminMqttAuditCap + 1
+		for i := 0; i < n; i++ {
+			p := fmt.Sprintf("thesada/cap/%d/#", i)
+			if err := c.WriteJSON(adminMqttInboundMsg{Type: "subscribe", Pattern: p}); err != nil {
+				t.Fatal(err)
+			}
+			await(t, c, "info", "subscribed: "+p)
+		}
+		_ = c.Close()
+		d := auditAfter(t, "mqtt.shell_subscribe", since)
+		if d["subscribes"] != float64(n) {
+			t.Fatalf("subscribes = %v, want %d", d["subscribes"], n)
+		}
+		if d["subscribed_truncated"] != true {
+			t.Fatalf("subscribed_truncated = %v, want true", d["subscribed_truncated"])
+		}
+		if subs, _ := d["subscribed"].([]any); len(subs) != adminMqttAuditCap {
+			t.Fatalf("subscribed = %d entries, want %d", len(subs), adminMqttAuditCap)
 		}
 	})
 }
