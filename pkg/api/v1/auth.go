@@ -102,7 +102,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "totp_required"})
 			return
 		}
-		ok, checkErr := service.MatchTOTP(secret, req.Code)
+		ok, checkErr := s.services.Auth.AcceptTOTPLogin(u.TenantID, u.ID, secret, req.Code)
 		if checkErr != nil {
 			slog.Error("auth.totp.code_failed", "user_id", u.ID, "err", checkErr, "surface", "api")
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
