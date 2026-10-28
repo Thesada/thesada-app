@@ -7,9 +7,11 @@
 package web
 
 import (
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -30,6 +32,8 @@ func TestMagicLinkWeb_GetConsumesNothingPostSignsInOnce(t *testing.T) {
 	}
 
 	// A scanner, or the user's first click: a page with a button, no session.
+	var form url.Values
+	var csrfTok *http.Cookie
 	for i := 0; i < 2; i++ {
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/login/verify?token="+url.QueryEscape(token), nil))
@@ -41,12 +45,15 @@ func TestMagicLinkWeb_GetConsumesNothingPostSignsInOnce(t *testing.T) {
 				t.Fatal("GET set a session cookie")
 			}
 		}
+		form, csrfTok = hiddenFields(rec.Body.String()), cookieNamed(t, rec, csrf.CookieName)
+	}
+	if form.Get("token") != token || form.Get(csrf.FormField) != csrfTok.Value {
+		t.Fatalf("confirm form fields = %v, want the link token and the csrf cookie", form)
 	}
 
+	// The button submits what the page rendered.
 	post := func() *httptest.ResponseRecorder {
-		tok := csrfCookie(t, srv)
-		form := url.Values{"token": {token}, csrf.FormField: {tok.Value}}
-		return submitForm(srv, "/login/verify", form, []*http.Cookie{tok}, "")
+		return submitForm(srv, "/login/verify", form, []*http.Cookie{csrfTok}, "")
 	}
 	first := post()
 	if first.Code != http.StatusFound || first.Header().Get("Location") != "/devices" {
@@ -58,4 +65,16 @@ func TestMagicLinkWeb_GetConsumesNothingPostSignsInOnce(t *testing.T) {
 	if again := post(); !strings.Contains(again.Body.String(), "invalid or already used") {
 		t.Fatalf("second POST = %d, want the already-used page", again.Code)
 	}
+}
+
+var hiddenInput = regexp.MustCompile(`<input type="hidden" name="([^"]+)" value="([^"]*)">`)
+
+// hiddenFields reads a page's hidden inputs as the browser would submit them.
+// in: html body. out: form values.
+func hiddenFields(body string) url.Values {
+	v := url.Values{}
+	for _, m := range hiddenInput.FindAllStringSubmatch(body, -1) {
+		v.Add(m[1], html.UnescapeString(m[2]))
+	}
+	return v
 }
