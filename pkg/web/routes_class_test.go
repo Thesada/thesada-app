@@ -16,6 +16,7 @@ var webRoutes = map[string]routetest.Class{
 	"POST /login":                                     routetest.Public,
 	"GET /login/totp":                                 routetest.Public,
 	"POST /login/totp":                                routetest.Public,
+	"POST /login/verify":                              routetest.Public,
 	"GET /login/verify":                               routetest.Public,
 	"GET /forgot-password":                            routetest.Public,
 	"POST /forgot-password":                           routetest.Public,

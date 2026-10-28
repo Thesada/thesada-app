@@ -106,7 +106,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // in: receiver. out: none (mutates s.templates).
 func (s *Server) parseTemplates() {
 	pages := []string{
-		"login.html", "login-totp.html", "devices.html", "device-detail.html", "alerts.html",
+		"login.html", "login-totp.html", "login-verify.html", "devices.html", "device-detail.html", "alerts.html",
 		"device-claim.html",
 		"signup.html", "settings.html", "forgot.html", "reset.html",
 		"admin-index.html", "admin-tenants.html",
@@ -141,7 +141,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /login", s.handleLoginSubmit)
 	s.mux.HandleFunc("GET /login/totp", s.handleTOTPForm)
 	s.mux.HandleFunc("POST /login/totp", s.handleTOTPSubmit)
-	s.mux.HandleFunc("GET /login/verify", s.handleMagicLinkVerify)
+	s.mux.HandleFunc("GET /login/verify", s.handleMagicLinkForm)
+	s.mux.HandleFunc("POST /login/verify", s.handleMagicLinkVerify)
 	s.mux.HandleFunc("GET /forgot-password", s.handleForgotForm)
 	s.mux.HandleFunc("POST /forgot-password", s.handleForgotSubmit)
 	s.mux.HandleFunc("GET /reset-password", s.handleResetForm)

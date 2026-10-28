@@ -67,10 +67,23 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "login.html", map[string]interface{}{"Sent": true, "Email": email})
 }
 
-// handleMagicLinkVerify consumes a magic link, then a session or a TOTP challenge.
-// in: writer, request with ?token=. out: 302 to /devices or /login/totp, or the login form.
-func (s *Server) handleMagicLinkVerify(w http.ResponseWriter, r *http.Request) {
+// handleMagicLinkForm shows a sign-in button for the emailed link. The GET
+// consumes nothing: mail scanners open links ahead of the user, and a GET that
+// signed in would burn the token and hand the scanner a session.
+// in: writer, request with ?token=. out: confirm page, or the login form.
+func (s *Server) handleMagicLinkForm(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
+	if token == "" {
+		s.render(w, r, "login.html", map[string]interface{}{"Error": "Missing link token."})
+		return
+	}
+	s.render(w, r, "login-verify.html", map[string]interface{}{"Token": token})
+}
+
+// handleMagicLinkVerify consumes a magic link, then a session or a TOTP challenge.
+// in: writer, POST form (token). out: 302 to /devices or /login/totp, or the login form.
+func (s *Server) handleMagicLinkVerify(w http.ResponseWriter, r *http.Request) {
+	token := r.PostFormValue("token")
 	if token == "" {
 		s.render(w, r, "login.html", map[string]interface{}{"Error": "Missing link token."})
 		return
