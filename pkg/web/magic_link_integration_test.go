@@ -40,6 +40,9 @@ func TestMagicLinkWeb_GetConsumesNothingPostSignsInOnce(t *testing.T) {
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `action="/login/verify"`) {
 			t.Fatalf("GET = %d, want the confirm form", rec.Code)
 		}
+		if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
+			t.Fatalf("Referrer-Policy = %q, want no-referrer", got)
+		}
 		for _, c := range rec.Result().Cookies() {
 			if c.Name == authmw.CookieName && c.Value != "" {
 				t.Fatal("GET set a session cookie")
