@@ -1,0 +1,13 @@
+{{define "title"}}Sign in - thesada{{end}}
+{{define "content"}}
+<div class="max-w-sm mx-auto bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+  <h1 class="text-xl font-semibold mb-4">Sign in to thesada</h1>
+  <form method="POST" action="/login/verify">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <input type="hidden" name="token" value="{{.Token}}">
+    <button type="submit" class="w-full bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium py-2 rounded">
+      Sign in
+    </button>
+  </form>
+</div>
+{{end}}
