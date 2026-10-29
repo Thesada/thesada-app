@@ -77,6 +77,8 @@ func (s *Server) handleMagicLinkForm(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "login.html", map[string]interface{}{"Error": "Missing link token."})
 		return
 	}
+	// The URL carries a live token; keep it out of Referer on asset loads and the POST.
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	s.render(w, r, "login-verify.html", map[string]interface{}{"Token": token})
 }
 
