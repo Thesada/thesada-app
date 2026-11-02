@@ -142,3 +142,5 @@ ci: lint pools test coverage sec ## Local CI: lint, pools guard, unit tests, cov
 .PHONY: clean
 clean: ## Remove the binary and the generated CSS
 	rm -rf bin pkg/web/static/css/app.css
+
+-include .forgejo/publish.mk
