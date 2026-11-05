@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -274,20 +275,19 @@ func (c *Client) onMessage(_ mqttlib.Client, msg mqttlib.Message) {
 		slog.Debug("mqtt: unknown tenant slug, dropping", "tenant", tenant, "topic", msg.Topic())
 		return
 	}
-	// Cross-tenant pairing check: when a device_id is already paired (active
-	// non-revoked certificate) under a different tenant, the topic-claimed
-	// tenant cannot be trusted - broker ACL drift would otherwise let the
-	// app auto-create a duplicate device row in the wrong tenant. Drop the
-	// message entirely so neither the tombstone path nor the handlers
-	// observe it. A device with no active pairing (never paired, or last
-	// pairing revoked) falls through; the topic tenant is authoritative.
-	if pairedTenant, paired, err := c.services.Certificates.FindActivePairingTenant(context.Background(), device); err != nil {
+	// Cross-tenant pairing check: when a device_id holds live certificates
+	// (active, non-revoked), the topic tenant must be one of the tenants
+	// holding them. Otherwise broker ACL drift could auto-create a duplicate
+	// device row in the wrong tenant, so the message is dropped before the
+	// tombstone path or any handler sees it. A device with no live pairing
+	// falls through and the topic tenant is authoritative.
+	if paired, err := c.services.Certificates.ActivePairingTenants(context.Background(), device); err != nil {
 		slog.Warn("mqtt: pairing lookup failed, dropping conservatively",
 			"device", device, "topic", msg.Topic(), "err", err)
 		return
-	} else if paired && pairedTenant != tenant {
+	} else if len(paired) > 0 && !slices.Contains(paired, tenant) {
 		slog.Error("mqtt: topic tenant does not match paired tenant - dropping",
-			"device", device, "topic_tenant", tenant, "paired_tenant", pairedTenant,
+			"device", device, "topic_tenant", tenant, "paired_tenants", paired,
 			"topic", msg.Topic())
 		return
 	}

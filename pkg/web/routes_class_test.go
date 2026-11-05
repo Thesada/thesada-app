@@ -48,6 +48,7 @@ var webRoutes = map[string]routetest.Class{
 	"GET /admin/tenants":                              routetest.Admin,
 	"POST /admin/tenants":                             routetest.Admin,
 	"POST /admin/tenants/{slug}/delete":               routetest.Admin,
+	"GET /admin/jobs/{id}":                            routetest.Admin,
 	"GET /admin/tenants/{slug}/users":                 routetest.Admin,
 	"POST /admin/tenants/{slug}/users":                routetest.Admin,
 	"GET /admin/tenants/{slug}/users/{user_id}/edit":  routetest.Admin,

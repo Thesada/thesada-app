@@ -218,7 +218,7 @@ func TestAuthService(t *testing.T) {
 		}
 	})
 
-	t.Run("ResetLink_consume_then_mark_single_winner", func(t *testing.T) {
+	t.Run("ResetLink_validate_then_reset_single_winner", func(t *testing.T) {
 		u := mustCreateUser(t, auth, tA, "reset-mark@a.test")
 		token, _, err := auth.CreateResetLink(u.ID)
 		if err != nil {
@@ -232,15 +232,22 @@ func TestAuthService(t *testing.T) {
 		if _, _, err := auth.ConsumeResetLink(token); err != nil {
 			t.Errorf("second ConsumeResetLink (still unconsumed) = %v, want nil", err)
 		}
-		// MarkResetConsumed is the single-winner gate.
-		if err := auth.MarkResetConsumed(tokenID); err != nil {
-			t.Fatalf("MarkResetConsumed: %v", err)
+		// A too-short password leaves the token unspent.
+		if _, err := auth.ResetPassword(token, "short"); !errors.Is(err, service.ErrPasswordTooShort) {
+			t.Fatalf("ResetPassword(short) = %v, want ErrPasswordTooShort", err)
 		}
-		if err := auth.MarkResetConsumed(tokenID); !errors.Is(err, service.ErrNotFound) {
-			t.Errorf("second MarkResetConsumed = %v, want ErrNotFound", err)
+		// ResetPassword is the single-winner gate.
+		if _, err := auth.ResetPassword(token, "first-password-ok"); err != nil {
+			t.Fatalf("ResetPassword: %v", err)
+		}
+		if _, err := auth.ResetPassword(token, "second-password-ok"); !errors.Is(err, service.ErrNotFound) {
+			t.Errorf("second ResetPassword = %v, want ErrNotFound", err)
+		}
+		if _, err := auth.VerifyPassword(tA, "reset-mark@a.test", "first-password-ok"); err != nil {
+			t.Errorf("VerifyPassword(winner) = %v, want nil", err)
 		}
 		if _, _, err := auth.ConsumeResetLink(token); !errors.Is(err, service.ErrNotFound) {
-			t.Errorf("ConsumeResetLink after mark = %v, want ErrNotFound", err)
+			t.Errorf("ConsumeResetLink after reset = %v, want ErrNotFound", err)
 		}
 	})
 

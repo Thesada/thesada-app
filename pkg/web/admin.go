@@ -2,6 +2,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -79,8 +80,11 @@ func (s *Server) handleAdminTenants(w http.ResponseWriter, r *http.Request) {
 			CrossTenantRead: s.services.Settings.GetBool(t.ID, "mqtt_cross_tenant_read", t.ID == "default"),
 		})
 	}
+	ok, bad := adminFlash(r.URL.Query())
 	s.render(w, r, "admin-tenants.html", map[string]interface{}{
 		"Rows":            rows,
+		"Flash":           ok,
+		"Error":           bad,
 		"QuotaUsers":      s.quotaUsers(),
 		"QuotaDevices":    s.quotaDevices(),
 		"QuotaEvents":     s.quotaEvents(),
@@ -118,24 +122,127 @@ func (s *Server) handleAdminTenantCreate(w http.ResponseWriter, r *http.Request)
 	http.Redirect(w, r, "/admin/tenants", http.StatusFound)
 }
 
-// handleAdminTenantDelete deletes a tenant; guards default tenant and the super-admin's active impersonation target.
-// in: writer, POST to /admin/tenants/{slug}/delete. out: 302 to /admin/tenants.
+// handleAdminTenantDelete walks every device of the tenant through the device
+// delete cascade (revoke, dynsec teardown, tombstone, enrollment reset), then
+// deletes the tenant. The walk runs as a job, because it can outlast the edge
+// proxy. A refused or failed device keeps the tenant. A broker client that may
+// survive is flagged on its device.delete audit row and shown.
+// in: writer, POST to /admin/tenants/{slug}/delete. out: 302 to the job page.
 func (s *Server) handleAdminTenantDelete(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
 	effective := authmw.EffectiveTenantID(r)
-	if err := s.services.Tenants.Delete(slug, effective); err != nil {
-		if errors.Is(err, service.ErrTenantProtected) {
-			s.renderAdminTenantsWithError(w, r, "That tenant cannot be deleted (default or your current tenant).")
-			return
-		}
-		slog.Error("admin tenant delete failed", "slug", slug, "err", err)
+	user := authmw.CurrentUser(r)
+	if err := service.DeleteAllowed(slug, effective, user.TenantID); err != nil {
+		s.renderAdminTenantsWithError(w, r, tenantProtectedMsg)
+		return
+	}
+	hasSuper, err := s.services.Tenants.HasSuperAdmins(slug)
+	if err != nil {
+		slog.Error("admin tenant delete: super-admin check failed", "slug", slug, "err", err)
 		http.Error(w, "delete failed", http.StatusInternalServerError)
 		return
 	}
-	s.audit(r.Context(), authmw.CurrentUser(r), authz.TenantDelete, service.AuditEntry{
-		TargetType: "tenant", TargetID: slug, TenantID: slug,
+	if hasSuper {
+		s.renderAdminTenantsWithError(w, r, tenantSuperAdminMsg)
+		return
+	}
+	devices, err := s.services.Devices.ListByTenant(slug)
+	if err != nil {
+		slog.Error("admin tenant delete: device list failed", "slug", slug, "err", err)
+		http.Error(w, "delete failed", http.StatusInternalServerError)
+		return
+	}
+	override := acceptSerialRecovery(r)
+	s.startJob(w, r, len(devices), func(ctx context.Context, progress func(int)) string {
+		return s.deleteTenant(ctx, user, slug, effective, devices, override, progress)
 	})
-	http.Redirect(w, r, "/admin/tenants", http.StatusFound)
+}
+
+// deleteTenant is the tenant delete job body.
+// in: ctx, operator, slug, operator's effective tenant, devices, override,
+// progress. out: redirect target with registered flash codes.
+func (s *Server) deleteTenant(ctx context.Context, user *service.User, slug, effective string, devices []service.Device, override bool, progress func(int)) string {
+	res := s.deleteTenantDevices(ctx, user, devices, override, progress)
+	if res.notDeleted > 0 {
+		slog.Warn("admin tenant delete: kept, devices left", "slug", slug,
+			"devices", len(devices), "not_deleted", res.notDeleted)
+		return flashTenantKept.on("/admin/tenants")
+	}
+	if err := s.services.Tenants.Delete(slug, effective, user.TenantID); err != nil {
+		switch {
+		case errors.Is(err, service.ErrTenantProtected):
+			return flashTenantProtected.on("/admin/tenants")
+		case errors.Is(err, service.ErrTenantHasSuperAdmins):
+			return flashTenantSuperAdmin.on("/admin/tenants")
+		case errors.Is(err, service.ErrTenantHasDevices):
+			return flashTenantRaced.on("/admin/tenants")
+		default:
+			slog.Error("admin tenant delete failed", "slug", slug, "err", err)
+			return flashTenantDeleteFailed.on("/admin/tenants")
+		}
+	}
+	// A surviving broker client is flagged on its device.delete row, not here.
+	detail := map[string]any{"devices": len(devices)}
+	if len(res.sealed) > 0 {
+		detail["enroll_reset_failed"] = res.sealed
+	}
+	auditCtx, auditCancel := context.WithTimeout(ctx, auditTimeout)
+	defer auditCancel()
+	s.audit(auditCtx, user, authz.TenantDelete, service.AuditEntry{
+		TargetType: "tenant", TargetID: slug, TenantID: slug, Detail: detail,
+	})
+	if len(res.brokerLive) > 0 || len(res.sealed) > 0 {
+		slog.Error("admin tenant delete: device teardown incomplete", "slug", slug,
+			"broker_teardown_failed", res.brokerLive, "enroll_reset_failed", res.sealed)
+		return flashTenantDeleted.on("/admin/tenants") + "&" + flashTenantIncomplete.query()
+	}
+	return flashTenantDeleted.on("/admin/tenants")
+}
+
+const tenantProtectedMsg = "That tenant cannot be deleted (default or your current tenant)."
+
+const tenantSuperAdminMsg = "That tenant holds a super-admin account, so it cannot be deleted."
+
+// tenantDeviceResult is what the per-device cascade left behind.
+type tenantDeviceResult struct {
+	notDeleted int      // refused by the recovery gate, or revoke or DB delete failed
+	brokerLive []string // device ids whose broker client may still be live
+	sealed     []string // device ids whose enrollment reset failed
+}
+
+// deleteTenantDevices runs cascadeDeleteOne per device, the bulk delete loop
+// with one recovery probe and an audit row per deleted device.
+// in: ctx, operator, devices, override, progress. out: result.
+func (s *Server) deleteTenantDevices(ctx context.Context, user *service.User, devices []service.Device, override bool, progress func(int)) tenantDeviceResult {
+	var res tenantDeviceResult
+	if len(devices) == 0 {
+		return res
+	}
+	v := s.recoveryPath(ctx)
+	for i := range devices {
+		d := &devices[i]
+		progress(i)
+		verdict, brokerClean := s.cascadeDeleteOne(ctx, "tenant delete", user.Email, d, v, override)
+		if !brokerClean {
+			res.brokerLive = append(res.brokerLive, d.DeviceID)
+		}
+		switch verdict {
+		case cascadeRefused, cascadeFailed:
+			res.notDeleted++
+			continue
+		case cascadeOKSealed:
+			res.sealed = append(res.sealed, d.DeviceID)
+		}
+		rowCtx, rowCancel := context.WithTimeout(ctx, auditTimeout)
+		s.audit(rowCtx, user, authz.DeviceDelete, service.AuditEntry{
+			TargetType: "device", TargetID: d.ID.String(), TenantID: d.TenantID,
+			Detail: deviceDeleteDetail(map[string]any{"device_id": d.DeviceID, "tenant_delete": true},
+				serialRecoveryAccepted(d.PairedAt != nil, v, override), brokerClean),
+		})
+		rowCancel()
+	}
+	progress(len(devices))
+	return res
 }
 
 // handleAdminImpersonate scopes the session to the target tenant; caller is super-admin by middleware contract.

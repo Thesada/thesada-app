@@ -74,6 +74,14 @@ var ErrSlugTaken = errors.New("slug already in use")
 // be removed (default, or the acting super-admin's current tenant).
 var ErrTenantProtected = errors.New("tenant is protected")
 
+// ErrTenantHasDevices means a device row still belongs to the tenant. Devices
+// leave through the device delete path, never by tenant cascade.
+var ErrTenantHasDevices = errors.New("tenant still has devices")
+
+// ErrTenantHasSuperAdmins means a super-admin user is homed in the tenant. The
+// users FK cascades, so deleting it would delete those accounts.
+var ErrTenantHasSuperAdmins = errors.New("tenant holds a super-admin user")
+
 // ValidateSlug runs the regex and reserved-slug checks with no db round-trip.
 // in: proposed slug. out: nil on ok, ErrInvalidSlug / ErrReservedSlug.
 func ValidateSlug(slug string) error {
@@ -256,19 +264,63 @@ func (s *TenantService) CountRecentAlertsAny(slug string) (int, error) {
 	return n, err
 }
 
-// Delete removes a tenant by slug. Protected slugs: the 'default' bootstrap
-// tenant and whatever tenant the caller is currently operating as (prevents
-// a super-admin from deleting the seat they are sitting on).
-// in: slug, callerTenantID. out: error (ErrTenantProtected on guard fail).
-func (s *TenantService) Delete(slug, callerTenantID string) error {
+// DeleteAllowed is the guard Delete runs: the 'default' bootstrap tenant and
+// every tenant the caller sits in (home and effective) are protected.
+// in: slug, caller's tenant ids. out: ErrTenantProtected or nil.
+func DeleteAllowed(slug string, callerTenantIDs ...string) error {
 	if slug == "default" {
 		return ErrTenantProtected
 	}
-	if slug == callerTenantID {
-		return ErrTenantProtected
+	for _, id := range callerTenantIDs {
+		if slug == id {
+			return ErrTenantProtected
+		}
+	}
+	return nil
+}
+
+// HasSuperAdmins reports whether any super-admin user is homed in the tenant.
+// in: slug. out: bool, error.
+func (s *TenantService) HasSuperAdmins(slug string) (bool, error) {
+	ctx := context.Background()
+	var has bool
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "tenant.has_super_admins", func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM users WHERE tenant_id = $1 AND is_super_admin)`, slug).Scan(&has)
+	})
+	return has, err
+}
+
+// Delete removes a tenant by slug, refusing while any device row or any
+// super-admin user remains. The tenant row and its users are locked first, so
+// a racing device insert or promote waits and then sees the tenant gone.
+// in: slug, caller's tenant ids. out: error (ErrTenantProtected, ErrTenantHasDevices, ErrTenantHasSuperAdmins).
+func (s *TenantService) Delete(slug string, callerTenantIDs ...string) error {
+	if err := DeleteAllowed(slug, callerTenantIDs...); err != nil {
+		return err
 	}
 	ctx := context.Background()
 	if err := db.WithAdminAudit(ctx, s.pools.Admin, "tenant.delete", func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM tenants WHERE id = $1 FOR UPDATE`, slug); err != nil {
+			return err
+		}
+		var hasDevices bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM devices WHERE tenant_id = $1)`, slug).Scan(&hasDevices); err != nil {
+			return err
+		}
+		if hasDevices {
+			return ErrTenantHasDevices
+		}
+		var hasSuper bool
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(bool_or(is_super_admin), false)
+			   FROM (SELECT is_super_admin FROM users WHERE tenant_id = $1 FOR UPDATE) u`, slug).Scan(&hasSuper); err != nil {
+			return err
+		}
+		if hasSuper {
+			return ErrTenantHasSuperAdmins
+		}
 		_, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, slug)
 		return err
 	}); err != nil {
