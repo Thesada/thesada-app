@@ -168,8 +168,8 @@ func TestTenantService(t *testing.T) {
 			t.Fatalf("Create: %v", err)
 		}
 		pk := mustUpsert(t, env.Services.Devices, slug, "shred-dev", "", "", "", "")
-		if err := env.Services.Secrets.SetSecret(ctx, slug, pk, "wifi.password", "gone-soon"); err != nil {
-			t.Fatalf("SetSecret: %v", err)
+		if err := env.Services.Secrets.SetTenantSecret(ctx, slug, "mqtt.password", "gone-soon"); err != nil {
+			t.Fatalf("SetTenantSecret: %v", err)
 		}
 		// Precondition: both the DEK and the secret exist.
 		if got := countRows(t, env, ctx, "tenant_dek", slug); got != 1 {
@@ -177,6 +177,13 @@ func TestTenantService(t *testing.T) {
 		}
 		if got := countRows(t, env, ctx, "device_config_secrets", slug); got != 1 {
 			t.Fatalf("pre-delete device_config_secrets = %d, want 1", got)
+		}
+		// Devices leave through the device delete path, never by tenant cascade.
+		if err := ten.Delete(slug, "some-caller"); !errors.Is(err, service.ErrTenantHasDevices) {
+			t.Fatalf("Delete with a device = %v, want ErrTenantHasDevices", err)
+		}
+		if err := env.Services.Devices.DeleteByID(ctx, slug, pk); err != nil {
+			t.Fatalf("DeleteByID: %v", err)
 		}
 		// Delete the tenant: the DEK row cascades away (crypto-shred) and the
 		// ciphertext cascades with it - the value is now unrecoverable.

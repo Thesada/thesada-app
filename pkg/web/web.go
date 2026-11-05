@@ -53,6 +53,7 @@ type Server struct {
 	// claimLimits bounds self-service device claim attempts per user.
 	claimLimits *ratelimit.Limiter
 	cliRequests *cliRequestStore
+	jobs        *requestStore[jobResult]
 }
 
 // New constructs the HTMX server with all page routes wired up.
@@ -71,6 +72,7 @@ func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mq
 		waitlistNotify: ratelimit.New(24*time.Hour, 1),
 		claimLimits:    newClaimLimiter(cfg),
 		cliRequests:    newCLIRequestStore(cfg.CLIRequestTimeout + 60*time.Second),
+		jobs:           newRequestStore[jobResult](10 * time.Minute),
 	}
 	s.parseTemplates()
 	s.routes()
@@ -109,7 +111,7 @@ func (s *Server) parseTemplates() {
 		"login.html", "login-totp.html", "login-verify.html", "devices.html", "device-detail.html", "alerts.html",
 		"device-claim.html",
 		"signup.html", "settings.html", "forgot.html", "reset.html",
-		"admin-index.html", "admin-tenants.html",
+		"admin-index.html", "admin-tenants.html", "admin-job.html",
 		"admin-tenant-users.html", "admin-tenant-user-edit.html",
 		"admin-devices.html",
 		"admin-mqtt.html", "admin-waitlist.html",
@@ -178,6 +180,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /admin/tenants", authmw.RequireSuperAdmin(s.handleAdminTenants))
 	s.mux.HandleFunc("POST /admin/tenants", authmw.RequireSuperAdmin(s.handleAdminTenantCreate))
 	s.mux.HandleFunc("POST /admin/tenants/{slug}/delete", authmw.RequireSuperAdmin(s.handleAdminTenantDelete))
+	s.mux.HandleFunc("GET /admin/jobs/{id}", authmw.RequireSuperAdmin(s.handleAdminJob))
 	s.mux.HandleFunc("GET /admin/tenants/{slug}/users", authmw.RequireSuperAdmin(s.handleAdminTenantUsers))
 	s.mux.HandleFunc("POST /admin/tenants/{slug}/users", authmw.RequireSuperAdmin(s.handleAdminTenantUserCreate))
 	s.mux.HandleFunc("GET /admin/tenants/{slug}/users/{user_id}/edit", authmw.RequireSuperAdmin(s.handleAdminTenantUserEdit))

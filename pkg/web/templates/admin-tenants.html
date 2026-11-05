@@ -5,6 +5,11 @@
   <a href="/admin" class="text-sm text-slate-500 hover:underline">back to admin</a>
 </div>
 
+{{if .Flash}}
+<div class="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded p-3 mb-4 text-sm">
+  {{.Flash}}
+</div>
+{{end}}
 {{if .Error}}
 <div class="bg-red-50 border border-red-200 text-red-700 rounded p-3 mb-4 text-sm">
   {{.Error}}
@@ -51,9 +56,13 @@
             </form>
             {{end}}
             {{if and (not .IsDefault) (not .IsCurrent)}}
-            <form method="POST" action="/admin/tenants/{{.Tenant.ID}}/delete" class="inline"
-                  data-confirm="Delete tenant {{.Tenant.ID}}? Users, devices, alerts and telemetry for this tenant will be deleted (cascade).">
+            <form method="POST" action="/admin/tenants/{{.Tenant.ID}}/delete" class="inline-flex items-center gap-2"
+                  data-confirm="Delete tenant {{.Tenant.ID}}? Every device is revoked and torn down on the broker, then users, devices, alerts and telemetry for this tenant are deleted.">
               <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+              <label class="text-xs text-slate-500 flex items-center gap-1"
+                     title="Delete paired devices even if they cannot get back onto the broker by themselves. You will recover them over serial.">
+                <input type="checkbox" name="accept_serial_recovery" value="true"> accept serial recovery
+              </label>
               <button type="submit" class="text-xs px-2 py-1 rounded bg-red-600 hover:bg-red-500 text-white">
                 delete
               </button>

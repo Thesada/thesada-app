@@ -106,7 +106,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	ctx := context.WithoutCancel(r.Context())
 
 	// Step 2: dynsec teardown.
-	s.teardownDeviceDynsec(ctx, device, "device_delete")
+	brokerClean := s.teardownDeviceDynsec(ctx, device, "device_delete")
 
 	// Step 3: clear retained MQTT topics owned by this device.
 	// Best-effort, logged. Reads cached manifest from the firmware
@@ -171,17 +171,17 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	defer auditCancel()
 	s.audit(auditCtx, user, authz.DeviceDelete, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
-		Detail: auditDetail(map[string]any{"device_id": device.DeviceID}, accepted),
+		Detail: deviceDeleteDetail(map[string]any{"device_id": device.DeviceID}, accepted, brokerClean),
 	})
 
+	// A sealed enrollment or a surviving broker client is said on the page,
+	// never reported as a clean success.
+	target := flashAdminDeleted.on("/admin/devices")
 	if enrollErr != nil {
-		// Deleted, but the enrollment rows may still be sealed: the hardware
-		// cannot re-enroll under this id until they are cleared. Say so
-		// instead of reporting a clean success.
-		http.Redirect(w, r, flashAdminDeleted.on("/admin/devices")+"&"+flashAdminEnrollReset.query(), http.StatusFound)
-		return
+		target += "&" + flashAdminEnrollReset.query()
 	}
-	http.Redirect(w, r,
-		flashAdminDeleted.on("/admin/devices"),
-		http.StatusFound)
+	if !brokerClean {
+		target += "&" + flashAdminBrokerLive.query()
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }

@@ -183,10 +183,10 @@ func (s *Server) runCLICmd(parentCtx context.Context, reqID uuid.UUID, device *s
 	resp, err := s.mqtt.CLIRequest(ctx, topicPrefix, command, payload)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			s.cliRequests.markError(reqID, cliStatusTimeout,
+			s.cliRequests.markError(reqID, reqStatusTimeout,
 				fmt.Sprintf("device did not respond within %s", s.cfg.CLIRequestTimeout))
 		} else {
-			s.cliRequests.markError(reqID, cliStatusError, err.Error())
+			s.cliRequests.markError(reqID, reqStatusError, err.Error())
 		}
 		return
 	}
@@ -378,16 +378,16 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID uuid.UUID, device 
 
 		if err != nil {
 			if ctx.Err() == context.DeadlineExceeded {
-				s.cliRequests.markError(reqID, cliStatusTimeout,
+				s.cliRequests.markError(reqID, reqStatusTimeout,
 					fmt.Sprintf("chunk %d/%d timed out after %s", i+1, totalChunks, s.cfg.CLIRequestTimeout))
 			} else {
-				s.cliRequests.markError(reqID, cliStatusError,
+				s.cliRequests.markError(reqID, reqStatusError,
 					fmt.Sprintf("chunk %d/%d failed: %v", i+1, totalChunks, err))
 			}
 			return
 		}
 		if !resp.OK {
-			s.cliRequests.markError(reqID, cliStatusError,
+			s.cliRequests.markError(reqID, reqStatusError,
 				fmt.Sprintf("chunk %d/%d device error: %v", i+1, totalChunks, resp.Output))
 			return
 		}
