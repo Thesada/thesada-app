@@ -120,6 +120,11 @@ type FakeDevice struct {
 	handlers map[string]Handler
 	calls    map[string]int
 	respMode CLIResponseMode
+
+	// live is read-held by every onCommand; Cleanup write-locks it so it
+	// waits out an in-flight reply before disconnecting.
+	live   sync.RWMutex
+	closed bool
 }
 
 // SetCLIResponseMode changes which response topic(s) this device answers on.
@@ -155,7 +160,12 @@ func NewFakeDevice(t *testing.T, brokerURL, topicPrefix string) *FakeDevice {
 	} else if tok.Error() != nil {
 		t.Fatalf("fake device connect: %v", tok.Error())
 	}
-	t.Cleanup(func() { fd.c.Disconnect(250) })
+	t.Cleanup(func() {
+		fd.live.Lock()
+		fd.closed = true
+		fd.live.Unlock()
+		fd.c.Disconnect(250)
+	})
 
 	cliTree := topicPrefix + fakeCLIInputWildcard
 	if tok := fd.c.Subscribe(cliTree, 0, fd.onCommand); !tok.WaitTimeout(10 * time.Second) {
@@ -222,6 +232,11 @@ func OK(output ...string) []Response {
 // each response with the request's req_id echoed - exactly the contract the
 // app's CLIRequest/CLIRequestRaw correlation relies on.
 func (fd *FakeDevice) onCommand(_ paho.Client, msg paho.Message) {
+	fd.live.RLock()
+	defer fd.live.RUnlock()
+	if fd.closed {
+		return
+	}
 	topic := msg.Topic()
 	cmd := strings.TrimPrefix(topic, fd.prefix+fakeCLIInputSegment)
 	if cmd == "response" || strings.Contains(cmd, "/") {

@@ -1,0 +1,12 @@
+{{define "title"}}Admin - Job - thesada{{end}}
+{{define "head"}}{{if .Running}}<meta http-equiv="refresh" content="2">{{end}}{{end}}
+{{define "content"}}
+<h1 class="text-2xl font-semibold mb-4">{{if .Running}}Running{{else}}Finished{{end}}</h1>
+<div class="bg-white border border-slate-200 rounded-xl p-4 text-sm">
+  {{if .Running}}
+  <p>{{.Done}} of {{.Total}} devices done.</p>
+  {{else}}
+  <p>This job finished or expired. The outcome is in the <a href="/admin/audit" class="underline">audit log</a>.</p>
+  {{end}}
+</div>
+{{end}}

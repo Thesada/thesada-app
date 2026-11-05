@@ -56,6 +56,7 @@ func startWebBrokerServer(t *testing.T, env *servicetest.Env, brokerURL string) 
 		services:    env.Services,
 		mqtt:        client,
 		cliRequests: newCLIRequestStore(time.Minute),
+		jobs:        newRequestStore[jobResult](time.Minute),
 	}
 }
 
@@ -91,7 +92,7 @@ func TestAdminConfigCmd_SnapshotsRead(t *testing.T) {
 	s.runCLICmd(ctx, reqID, device, prefix, "config.dump", "", nil)
 
 	entry := s.cliRequests.get(reqID)
-	if entry == nil || entry.Status != cliStatusDone {
+	if entry == nil || entry.Status != reqStatusDone {
 		t.Fatalf("store entry = %+v, want done", entry)
 	}
 	snap, err := env.Services.DeviceFiles.Latest(ctx, tenant, pk, "config.json")
@@ -145,7 +146,7 @@ func TestAdminConfigWrite_ChunksAndSnapshots(t *testing.T) {
 		s.runCLIWrite(ctx, reqID, device, prefix, "/scripts/pushed.lua", content, nil)
 
 		entry := s.cliRequests.get(reqID)
-		if entry == nil || entry.Status != cliStatusDone {
+		if entry == nil || entry.Status != reqStatusDone {
 			t.Fatalf("store entry = %+v, want done", entry)
 		}
 		if fd.Calls("fs.write") != 1 || fd.Calls("fs.append") != 1 {
@@ -174,7 +175,7 @@ func TestAdminConfigWrite_ChunksAndSnapshots(t *testing.T) {
 		s.runCLIWrite(ctx, reqID, device, prefix, "/scripts/fail.lua", content, nil)
 
 		entry := s.cliRequests.get(reqID)
-		if entry == nil || entry.Status != cliStatusError {
+		if entry == nil || entry.Status != reqStatusError {
 			t.Fatalf("store entry = %+v, want error", entry)
 		}
 		snap, err := env.Services.DeviceFiles.Latest(ctx, tenant, pk, "/scripts/fail.lua")

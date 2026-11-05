@@ -166,7 +166,9 @@ var ThesadaRules = (function () {
           '    local key = "' +
           keyLit +
           '"\n' +
-          "    if s.temp_c ~= nil and s.temp_c " +
+          "    if s.temp_c == nil then\n" +
+          "      -- stale probe: hold the streak, neither count nor clear\n" +
+          "    elseif s.temp_c " +
           op +
           " " +
           thresh +

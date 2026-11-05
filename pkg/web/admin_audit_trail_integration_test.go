@@ -18,6 +18,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/mqtt/mqtttest"
@@ -130,7 +133,18 @@ func TestAdminAuditTrail(t *testing.T) {
 		call("POST", "/", s.handleAdminTenantUserDelete, "", true, uid)
 		want(t, "user.delete", u.ID.String())
 
-		call("POST", "/", s.handleAdminTenantDelete, "", true, map[string]string{"slug": slug})
+		// The delete runs as a job: wait for it to leave pending.
+		loc := call("POST", "/", s.handleAdminTenantDelete, "", true, map[string]string{"slug": slug}).Header().Get("Location")
+		id, err := uuid.Parse(strings.TrimPrefix(loc, "/admin/jobs/"))
+		if err != nil {
+			t.Fatalf("tenant delete answered %q, want the job page", loc)
+		}
+		for i := 0; i < 600; i++ {
+			if e := s.jobs.get(id); e == nil || e.Status != reqStatusPending {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 		want(t, "tenant.delete", slug)
 	})
 
