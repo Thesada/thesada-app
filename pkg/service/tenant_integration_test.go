@@ -142,6 +142,35 @@ func TestTenantService(t *testing.T) {
 		if err := ten.Delete("self", "self"); !errors.Is(err, service.ErrTenantProtected) {
 			t.Errorf("delete own seat = %v, want ErrTenantProtected", err)
 		}
+		if err := ten.Delete("home", "elsewhere", "home"); !errors.Is(err, service.ErrTenantProtected) {
+			t.Errorf("delete own home while elsewhere = %v, want ErrTenantProtected", err)
+		}
+	})
+
+	t.Run("Delete_refuses_super_admin_tenant", func(t *testing.T) {
+		if _, err := ten.Create("tensuper", ""); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		u, err := env.Services.Auth.CreateUser("tensuper", "su@tensuper.test", "", true)
+		if err != nil {
+			t.Fatalf("CreateUser: %v", err)
+		}
+		// A tenant admin alone does not block the delete, a super-admin does.
+		if has, err := ten.HasSuperAdmins("tensuper"); err != nil || has {
+			t.Fatalf("HasSuperAdmins before promote = %v, %v", has, err)
+		}
+		if err := env.Services.Auth.PromoteSuperAdmin(u.ID); err != nil {
+			t.Fatalf("PromoteSuperAdmin: %v", err)
+		}
+		if has, err := ten.HasSuperAdmins("tensuper"); err != nil || !has {
+			t.Fatalf("HasSuperAdmins after promote = %v, %v", has, err)
+		}
+		if err := ten.Delete("tensuper", "other"); !errors.Is(err, service.ErrTenantHasSuperAdmins) {
+			t.Fatalf("Delete = %v, want ErrTenantHasSuperAdmins", err)
+		}
+		if _, err := ten.Get("tensuper"); err != nil {
+			t.Errorf("tenant gone after refused delete: %v", err)
+		}
 	})
 
 	// Phase 3: tenant lifecycle wires the device-config-secrets DEK. The
@@ -168,8 +197,8 @@ func TestTenantService(t *testing.T) {
 			t.Fatalf("Create: %v", err)
 		}
 		pk := mustUpsert(t, env.Services.Devices, slug, "shred-dev", "", "", "", "")
-		if err := env.Services.Secrets.SetSecret(ctx, slug, pk, "wifi.password", "gone-soon"); err != nil {
-			t.Fatalf("SetSecret: %v", err)
+		if err := env.Services.Secrets.SetTenantSecret(ctx, slug, "mqtt.password", "gone-soon"); err != nil {
+			t.Fatalf("SetTenantSecret: %v", err)
 		}
 		// Precondition: both the DEK and the secret exist.
 		if got := countRows(t, env, ctx, "tenant_dek", slug); got != 1 {
@@ -177,6 +206,13 @@ func TestTenantService(t *testing.T) {
 		}
 		if got := countRows(t, env, ctx, "device_config_secrets", slug); got != 1 {
 			t.Fatalf("pre-delete device_config_secrets = %d, want 1", got)
+		}
+		// Devices leave through the device delete path, never by tenant cascade.
+		if err := ten.Delete(slug, "some-caller"); !errors.Is(err, service.ErrTenantHasDevices) {
+			t.Fatalf("Delete with a device = %v, want ErrTenantHasDevices", err)
+		}
+		if err := env.Services.Devices.DeleteByID(ctx, slug, pk); err != nil {
+			t.Fatalf("DeleteByID: %v", err)
 		}
 		// Delete the tenant: the DEK row cascades away (crypto-shred) and the
 		// ciphertext cascades with it - the value is now unrecoverable.

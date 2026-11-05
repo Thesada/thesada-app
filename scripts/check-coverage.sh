@@ -33,13 +33,23 @@ FILES=(
 
 status=0
 profile="$(mktemp)"
-trap 'rm -f "$profile"' EXIT
+log="$(mktemp)"
+trap 'rm -f "$profile" "$log"' EXIT
+
+# Same budget as test-integration: pkg/service shares the runner's Docker with
+# the integration job and ran past 300s there. On a failure, show why.
+cover() {
+  local pkg="$1"
+  if ! go test -tags integration -covermode=set -timeout "${COVER_TIMEOUT:-600s}" \
+    -coverpkg="./${pkg}/..." -coverprofile="$profile" "./${pkg}/..." >"$log" 2>&1; then
+    printf 'FAIL  %s: go test failed\n' "$pkg" >&2
+    tail -n 40 "$log" >&2
+    exit 1
+  fi
+}
 
 for p in "${PKGS[@]}"; do
-  go test -tags integration -covermode=set -timeout 300s \
-    -coverpkg="./pkg/${p}/..." \
-    -coverprofile="$profile" \
-    "./pkg/${p}/..." >/dev/null
+  cover "pkg/${p}"
 
   pct="$(go tool cover -func="$profile" | awk '/^total:/ {sub(/%/,"",$3); print $3}')"
 
@@ -55,10 +65,7 @@ for entry in "${FILES[@]}"; do
   file="${entry%%:*}"
   pkg="${entry##*:}"
 
-  go test -tags integration -covermode=set -timeout 300s \
-    -coverpkg="./${pkg}/..." \
-    -coverprofile="$profile" \
-    "./${pkg}/..." >/dev/null
+  cover "${pkg}"
 
   # allow-long-comment
   # Statement coverage for one file, off the profile lines

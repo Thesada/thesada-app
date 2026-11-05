@@ -1,7 +1,7 @@
 //go:build integration
 
 // CertificateService integration tests. Device mTLS cert
-// issue / revoke / active-lookup / list, plus FindActivePairingTenant - the
+// issue / revoke / active-lookup / list, plus ActivePairingTenants - the
 // cross-tenant pairing discovery that backs the "MQTT topic tenant must match
 // the device's active pairing tenant" invariant (docs/invariants.md).
 //
@@ -10,6 +10,7 @@ package service_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -101,10 +102,10 @@ func TestCertificateService(t *testing.T) {
 		}
 	})
 
-	t.Run("FindActivePairingTenant_discovers_paired_tenant", func(t *testing.T) {
-		// Unknown device -> not found, MQTT path treats topic tenant as authoritative.
-		if tid, found, err := certs.FindActivePairingTenant(ctx, "never-paired"); err != nil || found || tid != "" {
-			t.Errorf("unknown device = %q %v err %v, want \"\" false", tid, found, err)
+	t.Run("ActivePairingTenants_discovers_paired_tenants", func(t *testing.T) {
+		// Unknown device -> empty, MQTT path treats topic tenant as authoritative.
+		if got, err := certs.ActivePairingTenants(ctx, "never-paired"); err != nil || len(got) != 0 {
+			t.Errorf("unknown device = %v err %v, want empty", got, err)
 		}
 
 		// Paired into tenant A -> discovered as A regardless of caller context.
@@ -112,27 +113,28 @@ func TestCertificateService(t *testing.T) {
 		if err := certs.Issue(ctx, tA, pkA, "serial-pair-a", "cn-pair", nb, na, pem); err != nil {
 			t.Fatalf("Issue: %v", err)
 		}
-		tid, found, err := certs.FindActivePairingTenant(ctx, "paired-dev")
-		if err != nil || !found || tid != tA {
-			t.Errorf("FindActivePairingTenant = %q %v err %v, want %s true", tid, found, err, tA)
+		if got, err := certs.ActivePairingTenants(ctx, "paired-dev"); err != nil || !slices.Equal(got, []string{tA}) {
+			t.Errorf("ActivePairingTenants = %v err %v, want [%s]", got, err, tA)
 		}
 
-		// After revoke the gate falls open again (no active pairing).
+		// A second tenant claiming the same id adds to the set, it does not replace A.
+		pkSquat := mustUpsert(t, dev, tB, "paired-dev", "", "", "", "")
+		if err := certs.Issue(ctx, tB, pkSquat, "serial-pair-squat", "cn-pair-squat", nb, na, pem); err != nil {
+			t.Fatalf("Issue squat: %v", err)
+		}
+		if got, _ := certs.ActivePairingTenants(ctx, "paired-dev"); !slices.Equal(got, []string{tA, tB}) {
+			t.Errorf("with a second tenant = %v, want [%s %s]", got, tA, tB)
+		}
+
+		// After both revoke the gate falls open again (no active pairing).
 		if err := certs.Revoke(ctx, tA, pkA); err != nil {
 			t.Fatalf("Revoke: %v", err)
 		}
-		if tid, found, _ := certs.FindActivePairingTenant(ctx, "paired-dev"); found || tid != "" {
-			t.Errorf("after revoke = %q %v, want \"\" false", tid, found)
+		if err := certs.Revoke(ctx, tB, pkSquat); err != nil {
+			t.Fatalf("Revoke squat: %v", err)
 		}
-
-		// A different device paired into tenant B resolves to B - cross-tenant
-		// discovery is the whole point.
-		pkB := mustUpsert(t, dev, tB, "paired-dev-b", "", "", "", "")
-		if err := certs.Issue(ctx, tB, pkB, "serial-pair-b", "cn-pair-b", nb, na, pem); err != nil {
-			t.Fatalf("Issue B: %v", err)
-		}
-		if tid, found, _ := certs.FindActivePairingTenant(ctx, "paired-dev-b"); !found || tid != tB {
-			t.Errorf("tenant-B pairing = %q %v, want %s true", tid, found, tB)
+		if got, _ := certs.ActivePairingTenants(ctx, "paired-dev"); len(got) != 0 {
+			t.Errorf("after revoke = %v, want empty", got)
 		}
 	})
 

@@ -244,7 +244,7 @@ func (s *Server) handleResetForm(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "reset.html", map[string]interface{}{"Token": token})
 }
 
-// handleResetSubmit revalidates the token, stores the new bcrypt hash, marks the token consumed, then redirects to /login.
+// handleResetSubmit revalidates the token, then consumes it and stores the new hash in one tx, then redirects to /login.
 // in: writer, POST form (token, password, confirm). out: redirect or error.
 func (s *Server) handleResetSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -258,8 +258,7 @@ func (s *Server) handleResetSubmit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "reset.html", map[string]interface{}{"Error": "Missing reset token."})
 		return
 	}
-	u, tokenID, err := s.services.Auth.ConsumeResetLink(token)
-	if err != nil {
+	if _, _, err := s.services.Auth.ConsumeResetLink(token); err != nil {
 		s.render(w, r, "reset.html", map[string]interface{}{"Error": resetErrMessage(err)})
 		return
 	}
@@ -271,13 +270,14 @@ func (s *Server) handleResetSubmit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "reset.html", map[string]interface{}{"Token": token, "Error": "Passwords do not match."})
 		return
 	}
-	if err := s.services.Auth.SetPassword(u.TenantID, u.ID, password); err != nil {
-		slog.Error("reset set password failed", "user_id", u.ID, "err", err)
+	if _, err := s.services.Auth.ResetPassword(token, password); err != nil {
+		if errors.Is(err, service.ErrNotFound) || errors.Is(err, service.ErrExpired) {
+			s.render(w, r, "reset.html", map[string]interface{}{"Error": resetErrMessage(err)})
+			return
+		}
+		slog.Error("reset password failed", "err", err)
 		http.Error(w, "reset failed", http.StatusInternalServerError)
 		return
-	}
-	if err := s.services.Auth.MarkResetConsumed(tokenID); err != nil {
-		slog.Warn("reset token mark consumed failed", "err", err)
 	}
 	http.Redirect(w, r, "/login", http.StatusFound)
 }

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -168,7 +169,7 @@ func (s *Server) bulkOTACheck(w http.ResponseWriter, r *http.Request) {
 // the failed subset after diagnosing.
 //
 // in: writer, request (device_ids[] + optional confirm_cross_tenant in
-// form). out: 302 to /admin/devices.
+// form). out: 302 to the job page, or to /admin/devices when nothing runs.
 func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 	ids := r.PostForm["device_ids"]
 	if len(ids) == 0 {
@@ -220,18 +221,33 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Second pass: cascade per device. Each step bounded so a single
-	// broker hiccup or DB hang doesn't pin the whole batch. One recovery
-	// probe covers the batch; the gate is per device. Audit rows are written
-	// on a context that outlives the request: the revoke they record is
-	// already committed.
-	v := s.recoveryPath(r.Context())
+	// Second pass, as a job: about 2 s per paired online device and up to
+	// 30 s per broker timeout would outlast the edge proxy.
 	override := acceptSerialRecovery(r)
-	auditCtx := context.WithoutCancel(r.Context())
-	var ok, failed, refused, sealed int
+	devices := make([]*service.Device, len(resolved))
+	for i, p := range resolved {
+		devices[i] = p.device
+	}
+	s.startJob(w, r, len(devices), func(ctx context.Context, progress func(int)) string {
+		return s.bulkDeleteRun(ctx, user, devices, len(tenants), lookupFailed, len(ids), override, progress)
+	})
+}
+
+// bulkDeleteRun is the bulk delete job body: cascade per device, each step
+// bounded so one broker hiccup or DB hang does not pin the batch. One
+// recovery probe covers the batch, the gate is per device.
+// in: ctx, operator, devices, tenant count, lookup failures, ids submitted,
+// override, progress. out: redirect target with registered flash codes.
+func (s *Server) bulkDeleteRun(ctx context.Context, user *service.User, devices []*service.Device, tenants, lookupFailed, total int, override bool, progress func(int)) string {
+	v := s.recoveryPath(ctx)
+	var ok, failed, refused, sealed, brokerLive int
 	failed = lookupFailed
-	for _, p := range resolved {
-		verdict := s.cascadeDeleteOne(r.Context(), user.Email, p.device, v, override)
+	for i, device := range devices {
+		progress(i)
+		verdict, brokerClean := s.cascadeDeleteOne(ctx, "bulk delete", user.Email, device, v, override)
+		if !brokerClean {
+			brokerLive++
+		}
 		switch verdict {
 		case cascadeRefused:
 			refused++
@@ -242,20 +258,22 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 		case cascadeOKSealed:
 			sealed++
 		}
-		rowCtx, rowCancel := context.WithTimeout(auditCtx, auditTimeout)
+		rowCtx, rowCancel := context.WithTimeout(ctx, auditTimeout)
 		s.audit(rowCtx, user, authz.DeviceDelete, service.AuditEntry{
-			TargetType: "device", TargetID: p.device.ID.String(), TenantID: p.device.TenantID,
-			Detail: auditDetail(map[string]any{"device_id": p.device.DeviceID, "bulk": true},
-				serialRecoveryAccepted(p.device.PairedAt != nil, v, override)),
+			TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
+			Detail: deviceDeleteDetail(map[string]any{"device_id": device.DeviceID, "bulk": true},
+				serialRecoveryAccepted(device.PairedAt != nil, v, override), brokerClean),
 		})
 		rowCancel()
 		ok++
 	}
+	progress(len(devices))
 	slog.Info("admin bulk delete dispatched",
 		"user", user.Email,
-		"tenants", len(tenants),
-		"cross_tenant", len(tenants) > 1,
-		"ok", ok, "failed", failed, "refused", refused, "sealed", sealed, "total", len(ids))
+		"tenants", tenants,
+		"cross_tenant", tenants > 1,
+		"ok", ok, "failed", failed, "refused", refused, "sealed", sealed,
+		"broker_teardown_failed", brokerLive, "total", total)
 
 	done := flashAdminBulkDeleted
 	if failed > 0 {
@@ -270,7 +288,10 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 	case sealed > 0:
 		target += "&" + flashAdminBulkSealed.query()
 	}
-	http.Redirect(w, r, target, http.StatusFound)
+	if brokerLive > 0 {
+		target += "&" + flashAdminBrokerLive.query()
+	}
+	return target
 }
 
 // recoveryVerdict is one probe of the shared fallback credential.
@@ -348,6 +369,16 @@ func auditDetail(detail map[string]any, accepted bool) map[string]any {
 	return detail
 }
 
+// deviceDeleteDetail is the device.delete audit detail on every delete path.
+// The row outlives the device, so it carries a broker client that may survive.
+// in: base detail, override accepted, broker teardown clean. out: detail.
+func deviceDeleteDetail(detail map[string]any, accepted, brokerClean bool) map[string]any {
+	if !brokerClean {
+		detail["broker_teardown_failed"] = true
+	}
+	return auditDetail(detail, accepted)
+}
+
 // auditTimeout bounds one audit write after a committed mutation: the row
 // must outlive the request, not a database outage.
 const auditTimeout = 10 * time.Second
@@ -390,7 +421,7 @@ const auditTimeout = 10 * time.Second
 // WiFi side.
 //
 // in: ctx, server, device pointer (only MQTTTopicPrefix is used), op
-// label for slog ("device delete" / "bulk delete"), recovery path usable
+// label for slog ("device delete" / "bulk delete" / "tenant delete"), recovery path usable
 // (from recoveryPath; the caller already passed destructiveAllowed). out: none.
 func preemptiveCertClear(ctx context.Context, s *Server, device *service.Device, op string, usable bool) {
 	if device.MQTTTopicPrefix == nil || *device.MQTTTopicPrefix == "" {
@@ -462,7 +493,7 @@ func preemptiveCertClear(ctx context.Context, s *Server, device *service.Device,
 	}
 }
 
-// cascadeVerdict is the outcome of one bulk cascade.
+// cascadeVerdict is the outcome of one cascadeDeleteOne.
 type cascadeVerdict int
 
 const (
@@ -475,31 +506,33 @@ const (
 // cascadeDeleteOne gates, revokes, tears down dynsec and cascades the DB row
 // for one device; everything after the committed revoke ignores request
 // cancellation. Mirrors handleAdminDeviceDelete minus the confirm gate.
-// in: ctx, operator email, device, probe verdict, operator override. out: verdict.
-func (s *Server) cascadeDeleteOne(ctx context.Context, opEmail string, device *service.Device, v recoveryVerdict, override bool) cascadeVerdict {
+// in: ctx, caller ("bulk delete"|"tenant delete"), operator email, device,
+// probe verdict, operator override. out: verdict, false when the broker client may still be live.
+func (s *Server) cascadeDeleteOne(ctx context.Context, op, opEmail string, device *service.Device, v recoveryVerdict, override bool) (cascadeVerdict, bool) {
+	reason := strings.ReplaceAll(op, " ", "_")
 	paired := device.PairedAt != nil
 	if !destructiveAllowed(paired, v.usable, override) {
 		slog.Warn("device.delete.refused", "reason", "recovery_path_unusable",
-			"user", opEmail, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason, "bulk", true)
-		return cascadeRefused
+			"user", opEmail, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason, "op", op)
+		return cascadeRefused, true
 	}
 	if serialRecoveryAccepted(paired, v, override) {
 		slog.Warn("device.delete.serial_recovery_accepted",
-			"user", opEmail, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason, "bulk", true)
+			"user", opEmail, "device", device.ID, "device_id", device.DeviceID, "detail", v.reason, "op", op)
 	}
-	preemptiveCertClear(ctx, s, device, "bulk delete", v.usable)
+	preemptiveCertClear(ctx, s, device, op, v.usable)
 
 	if err := s.services.Certificates.Revoke(ctx, device.TenantID, device.ID); err != nil {
-		slog.Error("bulk delete: revoke cert failed",
+		slog.Error(op+": revoke cert failed",
 			"user", opEmail, "device", device.ID, "err", err)
-		return cascadeFailed
+		return cascadeFailed, true
 	}
 	ctx = context.WithoutCancel(ctx)
 	if device.PairedAt != nil {
-		logPairStateChange(device, "paired", "revoked", opEmail, "bulk_delete")
+		logPairStateChange(device, "paired", "revoked", opEmail, reason)
 	}
 
-	s.teardownDeviceDynsec(ctx, device, "bulk_delete")
+	brokerClean := s.teardownDeviceDynsec(ctx, device, reason)
 
 	// Clear retained MQTT topics owned by this device.
 	// Best-effort, identical semantics to the single-device path.
@@ -508,28 +541,28 @@ func (s *Server) cascadeDeleteOne(ctx context.Context, opEmail string, device *s
 		cleared, failed, rerr := s.mqtt.ClearDeviceRetained(retCtx, *device.MQTTTopicPrefix)
 		retCancel()
 		if rerr != nil {
-			slog.Warn("bulk delete: clear retained skipped",
+			slog.Warn(op+": clear retained skipped",
 				"device", device.ID, "topic_prefix", *device.MQTTTopicPrefix, "err", rerr)
 		} else {
-			slog.Info("bulk delete: cleared retained topics",
+			slog.Info(op+": cleared retained topics",
 				"device", device.ID, "topic_prefix", *device.MQTTTopicPrefix,
 				"cleared", cleared, "failed", failed)
 		}
 	} else {
 		// See admin_device_delete.go for rationale - keep the new code
 		// path observable on devices that never published an info message.
-		slog.Info("bulk delete: clear retained skipped (no topic_prefix)",
+		slog.Info(op+": clear retained skipped (no topic_prefix)",
 			"device", device.ID, "device_id", device.DeviceID)
 	}
 
 	dbCtx, dbCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer dbCancel()
 	if err := s.services.Devices.DeleteByID(dbCtx, device.TenantID, device.ID); err != nil {
-		slog.Error("bulk delete: DB delete failed",
+		slog.Error(op+": DB delete failed",
 			"user", opEmail, "device", device.ID, "err", err)
-		return cascadeFailed
+		return cascadeFailed, brokerClean
 	}
-	enrollErr := s.resetDeviceEnrollment(ctx, device.DeviceID, "bulk delete")
+	enrollErr := s.resetDeviceEnrollment(ctx, device.DeviceID, op)
 
 	tombPrefix := ""
 	if device.MQTTTopicPrefix != nil {
@@ -538,13 +571,13 @@ func (s *Server) cascadeDeleteOne(ctx context.Context, opEmail string, device *s
 	tombCtx, tombCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer tombCancel()
 	if terr := s.services.Devices.Tombstone(tombCtx, device.TenantID, device.DeviceID, tombPrefix); terr != nil {
-		slog.Warn("bulk delete: tombstone write failed",
+		slog.Warn(op+": tombstone write failed",
 			"device", device.ID, "tenant", device.TenantID, "device_id", device.DeviceID, "err", terr)
 	}
-	slog.Info("device deleted (bulk)",
+	slog.Info("device deleted", "op", op,
 		"user", opEmail, "device", device.DeviceID, "tenant", device.TenantID, "pk", device.ID)
 	if enrollErr != nil {
-		return cascadeOKSealed
+		return cascadeOKSealed, brokerClean
 	}
-	return cascadeOK
+	return cascadeOK, brokerClean
 }

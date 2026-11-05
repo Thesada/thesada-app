@@ -13,6 +13,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -61,8 +62,8 @@ func TestCertificateLifecycle(t *testing.T) {
 		if got, err := certs.GetActive(ctx, tA, pk); err != nil || got != nil {
 			t.Errorf("GetActive on pending = %v err %v, want nil nil", got, err)
 		}
-		if tid, found, _ := certs.FindActivePairingTenant(ctx, "lc-pending"); found || tid != "" {
-			t.Errorf("FindActivePairingTenant on pending = %q %v, want \"\" false", tid, found)
+		if got, _ := certs.ActivePairingTenants(ctx, "lc-pending"); len(got) != 0 {
+			t.Errorf("ActivePairingTenants on pending = %v, want empty", got)
 		}
 		d, _ := dev.GetByID(pk, tA)
 		if d.PairedAt != nil {
@@ -91,8 +92,8 @@ func TestCertificateLifecycle(t *testing.T) {
 		if got.ID != certID || got.Status != service.CertStatusActive {
 			t.Errorf("active cert = id %d status %q, want id %d status active", got.ID, got.Status, certID)
 		}
-		if tid, found, _ := certs.FindActivePairingTenant(ctx, "lc-activate"); !found || tid != tA {
-			t.Errorf("FindActivePairingTenant = %q %v, want %s true", tid, found, tA)
+		if got, _ := certs.ActivePairingTenants(ctx, "lc-activate"); !slices.Equal(got, []string{tA}) {
+			t.Errorf("ActivePairingTenants = %v, want [%s]", got, tA)
 		}
 		d, _ := dev.GetByID(pk, tA)
 		if d.PairedAt == nil {
@@ -116,8 +117,8 @@ func TestCertificateLifecycle(t *testing.T) {
 		if got, _ := certs.GetActive(ctx, tA, pk); got != nil {
 			t.Errorf("GetActive on failed = %+v, want nil", got)
 		}
-		if _, found, _ := certs.FindActivePairingTenant(ctx, "lc-failed"); found {
-			t.Error("FindActivePairingTenant found a failed cert")
+		if got, _ := certs.ActivePairingTenants(ctx, "lc-failed"); len(got) != 0 {
+			t.Error("ActivePairingTenants found a failed cert")
 		}
 		list, _ := certs.ListByDevice(ctx, tA, pk)
 		if len(list) != 1 || list[0].Status != service.CertStatusFailed {
@@ -221,8 +222,8 @@ func TestCertificateLifecycle(t *testing.T) {
 		if err != nil || got == nil || got.Status != service.CertStatusActive {
 			t.Errorf("GetActive on legacy row = %+v err %v, want status active", got, err)
 		}
-		if tid, found, _ := certs.FindActivePairingTenant(ctx, "lc-legacy"); !found || tid != tA {
-			t.Errorf("FindActivePairingTenant legacy = %q %v, want %s true", tid, found, tA)
+		if got, _ := certs.ActivePairingTenants(ctx, "lc-legacy"); !slices.Equal(got, []string{tA}) {
+			t.Errorf("ActivePairingTenants legacy = %v, want [%s]", got, tA)
 		}
 	})
 

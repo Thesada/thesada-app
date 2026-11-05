@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 // Admin flash messages. Redirects carry a code, never text, so a crafted
@@ -32,6 +33,7 @@ var (
 	flashTenantWifiSet        = adminFlashOK("wifi_default_set", "WiFi default stored.")
 	flashTenantCleared        = adminFlashOK("default_cleared", "Default cleared. Devices keep the old value until the next provision.")
 	flashTenantPushed         = adminFlashOK("pushed", "Push finished.")
+	flashTenantDeleted        = adminFlashOK("tenant_deleted", "Tenant deleted.")
 	flashTenantPushedMix      = adminFlashOK("pushed_partial", "Push finished with devices unreachable, rejected, or skipped. Counts are in the log.")
 
 	flashAdminUserCap         = adminFlashErr("user_cap", "This tenant is at its user cap.")
@@ -42,6 +44,7 @@ var (
 	flashAdminRevokeFailed    = adminFlashErr("revoke_failed", "Revoke failed.")
 	flashAdminDeleteFailed    = adminFlashErr("delete_failed", "Delete failed.")
 	flashAdminEnrollReset     = adminFlashErr("enroll_reset_failed", "Deleted, but enrollment reset failed. Re-enrollment stays blocked.")
+	flashAdminBrokerLive      = adminFlashErr("broker_live", "The broker may still accept a revoked certificate. The device ids are in the audit log.")
 	flashAdminUnknownAction   = adminFlashErr("unknown_action", "Unknown bulk action.")
 	flashAdminNoneSelected    = adminFlashErr("none_selected", "No devices selected.")
 	flashAdminNoneResolvable  = adminFlashErr("none_resolvable", "None of the selected devices could be found.")
@@ -75,6 +78,12 @@ var (
 	flashTenantCountUnknown   = adminFlashErr("inheritor_unknown", "The default was stored, but the device count is unknown. Run Push to devices.")
 	flashTenantDecrypt        = adminFlashErr("decrypt_failed", "Could not read that default.")
 	flashTenantNoneSet        = adminFlashErr("no_default_set", "No default is set for that field.")
+	flashTenantKept           = adminFlashErr("tenant_kept", "Some devices were refused or failed, so the tenant was kept. Counts are in the log.")
+	flashTenantRaced          = adminFlashErr("tenant_raced", "A device joined the tenant during the delete, so the tenant was kept. Try again.")
+	flashTenantProtected      = adminFlashErr("tenant_protected", "That tenant cannot be deleted (default or your current tenant).")
+	flashTenantSuperAdmin     = adminFlashErr("tenant_super_admin", "That tenant holds a super-admin account, so it cannot be deleted.")
+	flashTenantDeleteFailed   = adminFlashErr("tenant_delete_failed", "Tenant delete failed. The cause is in the log.")
+	flashTenantIncomplete     = adminFlashErr("tenant_teardown_incomplete", "The broker may still accept some device certificates, or some devices cannot re-enroll yet. The device ids are in the audit log.")
 	flashTenantTargets        = adminFlashErr("target_lookup_failed", "Could not list the devices that inherit this default.")
 )
 
@@ -104,9 +113,16 @@ func (f adminFlashCode) on(path string) string {
 }
 
 // adminFlash maps a request's codes to page text. Unknown codes render nothing.
+// Every registered error code renders, so one redirect can report two failures.
 // in: query values. out: ok text, error text.
 func adminFlash(q url.Values) (string, string) {
-	return adminFlashText["ok"][q.Get("ok")], adminFlashText["error"][q.Get("error")]
+	var errs []string
+	for _, c := range q["error"] {
+		if t := adminFlashText["error"][c]; t != "" {
+			errs = append(errs, t)
+		}
+	}
+	return adminFlashText["ok"][q.Get("ok")], strings.Join(errs, " ")
 }
 
 // secretAbortFlash maps a provision abort token to a registered code.

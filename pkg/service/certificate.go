@@ -248,51 +248,43 @@ func (s *CertificateService) GetActive(ctx context.Context, tenantID string, dev
 	return &dc, nil
 }
 
-// FindActivePairingTenant returns the tenant_id of the device that holds
-// a live (non-revoked, status='active') certificate for the given
-// firmware-claimed device_id, regardless of which tenant the caller thinks
-// the message belongs to. Used by the MQTT receive path to reject topic
-// traffic that claims a different tenant than the one this device was
-// paired into: without this check, a misconfigured broker ACL plus an
-// existing target tenant slug is enough to auto-create a duplicate device
-// row in the wrong tenant.
+// ActivePairingTenants returns every tenant whose device row for this
+// firmware-claimed device_id holds a live (non-revoked, status='active')
+// certificate. The MQTT receive path accepts a topic tenant only when it is
+// in this set, so a duplicate device row in the wrong tenant cannot be
+// auto-created through broker ACL drift. A set rather than the newest cert,
+// because any account can claim a guessable id into its own tenant, and a
+// newest-wins gate let that squat drop the real device's traffic.
 //
-// Returns "", false if no live certificate exists for this device_id -
-// meaning this device has never paired, its last pairing was revoked, or
-// an issue is still mid-push (pending) / failed. In all cases the MQTT
-// handler treats the incoming topic tenant as authoritative and proceeds.
+// Empty when no live certificate exists for this device_id: never paired,
+// last pairing revoked, or an issue still pending or failed. The MQTT
+// handler then treats the topic tenant as authoritative.
 //
-// Cross-tenant BY DESIGN: the whole purpose is to discover which tenant a
-// device_id is paired into, so there is no tenantID to scope by - the
-// answer IS the tenantID. Runs through WithAdminAudit on the BYPASSRLS
-// pool. Without this, an RLS policy with no app.tenant_id GUC would return
-// zero rows and the gate would silently fall open.
-// in: ctx, firmware-claimed device_id string. out: paired tenant slug, found bool, error.
-func (s *CertificateService) FindActivePairingTenant(ctx context.Context, deviceID string) (string, bool, error) {
+// Cross-tenant BY DESIGN: the answer IS the tenant. Runs through
+// WithAdminAudit on the BYPASSRLS pool. Under RLS with no app.tenant_id GUC
+// it would return zero rows and the gate would silently fall open.
+// in: ctx, firmware-claimed device_id string. out: tenant slugs (sorted), error.
+func (s *CertificateService) ActivePairingTenants(ctx context.Context, deviceID string) ([]string, error) {
 	const query = `
-		SELECT d.tenant_id
+		SELECT DISTINCT d.tenant_id
 		FROM device_certificates c
 		JOIN devices d ON d.id = c.device_pk
 		WHERE d.device_id = $1 AND c.revoked = false AND c.status = 'active'
-		ORDER BY c.created_at DESC LIMIT 1`
-	var tenantID string
-	found := false
-	err := db.WithAdminAudit(ctx, s.pools.Admin, "certificate.find_active_pairing_tenant",
+		ORDER BY d.tenant_id`
+	var out []string
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "certificate.active_pairing_tenants",
 		func(tx pgx.Tx) error {
-			scanErr := tx.QueryRow(ctx, query, deviceID).Scan(&tenantID)
-			if errors.Is(scanErr, pgx.ErrNoRows) {
-				return nil
+			rows, err := tx.Query(ctx, query, deviceID)
+			if err != nil {
+				return err
 			}
-			if scanErr != nil {
-				return scanErr
-			}
-			found = true
-			return nil
+			out, err = pgx.CollectRows(rows, pgx.RowTo[string])
+			return err
 		})
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
-	return tenantID, found, nil
+	return out, nil
 }
 
 // ListByDevice returns all certificates (including revoked and
