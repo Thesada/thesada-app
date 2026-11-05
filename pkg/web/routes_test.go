@@ -42,6 +42,7 @@ var gatedRoutes = []struct {
 	{http.MethodGet, "/admin/tenants"},
 	{http.MethodPost, "/admin/tenants"},
 	{http.MethodPost, "/admin/tenants/acme/delete"},
+	{http.MethodGet, "/admin/jobs/x"},
 	{http.MethodGet, "/admin/tenants/acme/users"},
 	{http.MethodPost, "/admin/tenants/acme/users"},
 	{http.MethodGet, "/admin/tenants/acme/users/x/edit"},

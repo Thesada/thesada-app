@@ -4,7 +4,7 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-10-06 (a tenant at its abuse cap cannot add a user, a new device, or another alert that day; updating a device that already exists still lands, and zero turns that one cap off). Previously 2026-09-29 (admin list, pair, and secret pages render flash from a registered code, so a crafted query cannot put words on the page). Previously 2026-09-29 (a device asks POST /devices/enroll/status with a signed serial and is told active, revoked, or unknown; only revoked for that serial wipes the cert, and a deleted device's serial is kept so the answer survives the row). Previously 2026-09-28 (the owner of a claimed device can revoke it; that path clears enrollment under a row lock that refuses another tenant's claim, before the cert revoke and cert.clear, and never hands the device to the fallback credential). Previously 2026-09-26 (ten wrong claim-form codes lock that device id until the earliest verified row announces the token already stored for it; an unverified or later key does not clear the lock). Previously 2026-09-25 (a device is told THESADA_MQTT_DEVICE_HOST, never the app's broker URL; a new claim token is stored as an HMAC when THESADA_CLAIM_HASH_KEY is set and a legacy SHA-256 still matches). Previously 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, an address rejection does not spend the client's cap, and the two caps are reserved together). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
+Dated 2026-11-03 (bulk delete and tenant delete run their device cascade as a job on `/admin/jobs/{id}` that the page polls, so a long fleet cannot hit the edge proxy timeout). Previously 2026-11-03 (a broker teardown that fails on single, bulk or tenant delete is flagged on that device's `device.delete` audit row and on the page, because the device alert cascades away with the row, and the tenant delete form carries the serial recovery override). Previously 2026-11-03 (tenant delete walks every device through the device delete cascade first and the service refuses a tenant that still has devices, so a deleted tenant's serials answer revoked and its broker clients are torn down or named in the audit row). Previously 2026-10-06 (a tenant at its abuse cap cannot add a user, a new device, or another alert that day; updating a device that already exists still lands, and zero turns that one cap off). Previously 2026-09-29 (admin list, pair, and secret pages render flash from a registered code, so a crafted query cannot put words on the page). Previously 2026-09-29 (a device asks POST /devices/enroll/status with a signed serial and is told active, revoked, or unknown; only revoked for that serial wipes the cert, and a deleted device's serial is kept so the answer survives the row). Previously 2026-09-28 (the owner of a claimed device can revoke it; that path clears enrollment under a row lock that refuses another tenant's claim, before the cert revoke and cert.clear, and never hands the device to the fallback credential). Previously 2026-09-26 (ten wrong claim-form codes lock that device id until the earliest verified row announces the token already stored for it; an unverified or later key does not clear the lock). Previously 2026-09-25 (a device is told THESADA_MQTT_DEVICE_HOST, never the app's broker URL; a new claim token is stored as an HMAC when THESADA_CLAIM_HASH_KEY is set and a legacy SHA-256 still matches). Previously 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, an address rejection does not spend the client's cap, and the two caps are reserved together). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
 recovery refuses to run when the shared fallback credential is not
 connectable; unauthenticated device enrollment surface; device-facing
 enrollment endpoints address the row by its primary key and the claim
@@ -154,20 +154,24 @@ is that same form.
 | status has its own limits: 600 requests per source IP per hour, 30 per `(device_id, pubkey)` per hour, and it does not spend the enrollment buckets | the firmware backs off at 150 seconds, which is 24 asks an hour. Sharing the enrollment budget would let a fleet's checks starve a first boot |
 | enrollment stores the identity pubkey on the certificate | owner revoke deletes the enrollment rows, and the status check still has to know which key may speak for that serial |
 | device delete copies those serials into `device_cert_serial_tombstones` in the same transaction, before the certificate rows cascade away | a deleted device must answer revoked. A serial with no pubkey is not copied, because nothing could prove the request |
+| tenant delete runs every device through that same cascade first, and `TenantService.Delete` refuses while any device row remains, under a lock on the tenant row | a tenant cascade would drop the certificates with no tombstone, leave unclaimed enrollment rows and keep the broker clients. The lock makes a racing device insert wait and fail its FK instead |
 
 Source: `pkg/api/v1/enroll.go` (`handleEnrollStatus`),
 `pkg/service/cert_status.go`, `pkg/service/cert_status_policy.go`,
-`pkg/service/device_delete.go`, `migrations/0031_cert_serial_tombstones.sql`.
+`pkg/service/device_delete.go`, `pkg/service/tenant.go` (`Delete`),
+`pkg/web/admin.go` (`handleAdminTenantDelete`),
+`migrations/0031_cert_serial_tombstones.sql`.
 
 ### Admin flash is a registered code
 
-The device list, the pair page, and the device and tenant secret pages
-render `ok` and `error` only when the code was registered in
-`pkg/web/admin_flash.go`. Anything else is blank. Counts, device ids,
+The device list, the tenant list, the pair page, and the device and tenant
+secret pages render `ok` and `error` only when the code was registered in
+`pkg/web/admin_flash.go`. Anything else is blank. Every registered
+`error` code on the URL renders, so one redirect can name two failures. Counts, device ids,
 field names, and broker errors stay in the log. They are not part of the
 URL, because the URL is the one string a visitor can choose.
 
-Source: `pkg/web/admin_flash.go`, `pkg/web/admin.go`, `pkg/web/admin_pair.go`,
+Source: `pkg/web/admin_flash.go`, `pkg/web/admin.go`, `pkg/web/admin_job.go`, `pkg/web/admin_pair.go`,
 `pkg/web/admin_secrets.go`, `pkg/web/admin_tenant_secrets.go`,
 `pkg/web/admin_devices_bulk.go`, `pkg/web/admin_device_delete.go`.
 
@@ -1043,9 +1047,32 @@ count on bulk), never reported as success. `serial_recovery_accepted` is
 recorded only when the override did the work: a paired device, no usable
 path, box ticked. An unpaired device passes the gate with nothing recorded.
 
+Tenant delete runs the bulk cascade over the tenant's devices with the same
+gate and the same `accept_serial_recovery` override on its form. A refused
+or failed device keeps the tenant. On every delete path, single, bulk and
+tenant, a broker client whose teardown failed is flagged
+`broker_teardown_failed: true` on that device's `device.delete` audit row
+and named on the page, because the per-device alert cascades away with its
+device. The `tenant.delete` row does not repeat it.
+
+Bulk delete and tenant delete run the per-device cascade as a job, because
+about 2 s per paired online device plus up to 30 s per broker timeout
+outlasts the edge proxy's 50 s. The POST does the checks that need the
+request (selection, cross-tenant gate, protected tenant, device list), reads
+the override, and answers 302 to `/admin/jobs/{id}`. That page refreshes
+every 2 s with done of total, and redirects to the outcome page once the job
+ends. The outcome travels as registered flash codes, never as text. Jobs
+live in the in-memory `requestStore` the device CLI uses, so a restart loses
+a running job: every device it finished stays finished, the tenant row goes
+last, and the delete can be submitted again.
+
 How enforced: `destructiveAllowed` (`pkg/web/admin_devices_bulk.go`) is the
 one gate, unit-tested for all eight input shapes; `recoveryGate` is the
-only way a single-device handler reaches it. Owner revoke is the one
+only way a single-device handler reaches it. Tenant delete, the broker
+flag and the bulk delete job are integration-tested (`TestAdminTenantDelete_*`,
+`TestAdminDeviceDelete_BrokerTeardownFailureOutlivesTheDevice`,
+`TestAdminBulkDelete_RunsAsAJob`), the job page is unit-tested
+(`TestAdminJob_*`). Owner revoke is the one
 exception, below: it never walks the device to the fallback credential.
 
 ### Owner revoke re-enrolls, it does not fall back

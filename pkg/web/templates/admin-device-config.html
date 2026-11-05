@@ -365,19 +365,17 @@
     var landed = JSON.parse(JSON.stringify(originalConfig));
     function applyLanded(obj, keyPath, value) {
       var parts = keyPath.split(".");
-      for (var j = 0; j < parts.length; j++) {
-        if (parts[j] === "__proto__" || parts[j] === "constructor" || parts[j] === "prototype") {
+      var node = obj;
+      for (var i = 0; i < parts.length; i++) {
+        var k = parts[i];
+        if (k === "__proto__" || k === "constructor" || k === "prototype") return;
+        if (i === parts.length - 1) {
+          node[k] = value;
           return;
         }
+        if (node[k] === undefined || node[k] === null) node[k] = {};
+        node = node[k];
       }
-      var node = obj;
-      for (var i = 0; i < parts.length - 1; i++) {
-        if (node[parts[i]] === undefined || node[parts[i]] === null) {
-          node[parts[i]] = {};
-        }
-        node = node[parts[i]];
-      }
-      node[parts[parts.length - 1]] = value;
     }
     var chain = Promise.resolve();
     var ok = 0;

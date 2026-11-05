@@ -150,8 +150,8 @@ func (s *Server) provisionDeviceDynsec(ctx context.Context, tenantID, deviceID, 
 // inverse of provisionDeviceDynsec. The revoke is already committed, so a
 // failed delete is retried and then raised as an alert: a revoked cert whose
 // client row survives keeps its ACL.
-// in: ctx, device, calling path (for slog). out: none.
-func (s *Server) teardownDeviceDynsec(ctx context.Context, device *service.Device, op string) {
+// in: ctx, device, calling path (for slog). out: false when the client may still be live.
+func (s *Server) teardownDeviceDynsec(ctx context.Context, device *service.Device, op string) bool {
 	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
 	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -175,6 +175,7 @@ func (s *Server) teardownDeviceDynsec(ctx context.Context, device *service.Devic
 		slog.Error("mqtt.dynsec.teardown_failed", "op", op, "step", "delete_role",
 			"device", device.ID, "role", roleName, "err", roleErr)
 	}
+	return clientErr == nil
 }
 
 // alertDynsecTeardown records that the broker client may still be present.
