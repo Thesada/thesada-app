@@ -186,6 +186,10 @@ func (c *Client) CLIRequest(ctx context.Context, topicPrefix, command, payload s
 	lock := c.cliLockFor(topicPrefix)
 	lock.Lock()
 	defer lock.Unlock()
+	// A deadline spent waiting for the lock must not still send the command.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	reqID := uuid.NewString()
 	env, err := json.Marshal(cliEnvelope{ReqID: reqID, Args: payload})
@@ -233,6 +237,10 @@ func (c *Client) CLIRequestRaw(ctx context.Context, topicPrefix, command string,
 	lock := c.cliLockFor(topicPrefix)
 	lock.Lock()
 	defer lock.Unlock()
+	// A deadline spent waiting for the lock must not still send the command.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Buffered well past any realistic page count so the non-blocking
 	// tap send below never drops an intermediate page of a paginated

@@ -81,6 +81,7 @@ var (
 	flashTenantKept           = adminFlashErr("tenant_kept", "Some devices were refused or failed, so the tenant was kept. Counts are in the log.")
 	flashTenantRaced          = adminFlashErr("tenant_raced", "A device joined the tenant during the delete, so the tenant was kept. Try again.")
 	flashTenantProtected      = adminFlashErr("tenant_protected", "That tenant cannot be deleted (default or your current tenant).")
+	flashTenantSuperAdmin     = adminFlashErr("tenant_super_admin", "That tenant holds a super-admin account, so it cannot be deleted.")
 	flashTenantDeleteFailed   = adminFlashErr("tenant_delete_failed", "Tenant delete failed. The cause is in the log.")
 	flashTenantIncomplete     = adminFlashErr("tenant_teardown_incomplete", "The broker may still accept some device certificates, or some devices cannot re-enroll yet. The device ids are in the audit log.")
 	flashTenantTargets        = adminFlashErr("target_lookup_failed", "Could not list the devices that inherit this default.")

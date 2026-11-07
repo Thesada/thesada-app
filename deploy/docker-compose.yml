@@ -29,8 +29,8 @@ services:
   app:
     image: ghcr.io/thesada/thesada-app:latest
     restart: unless-stopped
-    # Shutdown drains in-flight requests for 10s. Docker's default stop
-    # window is also 10s, so SIGKILL lands on that deadline.
+    # Shutdown drains requests for up to 15s and admin jobs for up to 18s
+    # (jobBudget in cmd/thesada-app/main.go). Keep this above both.
     stop_grace_period: 20s
     depends_on:
       timescaledb:

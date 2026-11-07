@@ -34,11 +34,11 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// authRequestTTL bounds how long a pending authorize flow stays valid. Long
+// AuthRequestTTL bounds how long a pending authorize flow stays valid. Long
 // enough for a slow user on a bad network to complete the IdP round-trip;
 // short enough to make replay attacks uninteresting. Matches Kanidm's own
 // authorize code TTL of 10 min.
-const authRequestTTL = 10 * time.Minute
+const AuthRequestTTL = 10 * time.Minute
 
 // ProviderRow mirrors an oauth_providers DB row. Services load these and
 // pass to LoadProvider; this package does not query the table itself.
@@ -142,7 +142,7 @@ func (p *Provider) Start(ctx context.Context, db *pgxpool.Pool, opts StartOpts) 
 	_, err = db.Exec(ctx, `
 		INSERT INTO oauth_auth_requests (state, provider_id, nonce, pkce_verifier, return_to, linking_user_id, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, state, p.Row.ID, nonce, verifier, returnTo, opts.LinkingUserID, time.Now().Add(authRequestTTL))
+	`, state, p.Row.ID, nonce, verifier, returnTo, opts.LinkingUserID, time.Now().Add(AuthRequestTTL))
 	if err != nil {
 		return "", fmt.Errorf("oauth: persist state: %w", err)
 	}

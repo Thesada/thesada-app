@@ -17,10 +17,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/crypto/bcrypt"
 
 	"thesada.app/app/pkg/db"
 )
@@ -81,10 +83,9 @@ func (s *AuthService) ConsumeMagicLink(token string) (*User, error) {
 	return s.consumeLinkToken(token, PurposeLogin, true)
 }
 
-// ConsumeResetLink validates a raw password-reset token without consuming it
-// (so the GET /reset page can render, then POST /reset consumes on password
-// save via MarkResetConsumed). Returns the owning user when valid.
-// in: raw token string. out: *User, token id for later marking, error.
+// ConsumeResetLink validates a raw password-reset token without consuming it,
+// so the reset form can render. ResetPassword is the consuming step.
+// in: raw token string. out: *User, token id, error.
 func (s *AuthService) ConsumeResetLink(token string) (*User, uuid.UUID, error) {
 	hash := sha256.Sum256([]byte(token))
 	const query = `
@@ -121,36 +122,28 @@ func (s *AuthService) ConsumeResetLink(token string) (*User, uuid.UUID, error) {
 	return &u, tokenID, nil
 }
 
-// MarkResetConsumed marks a previously-validated reset token as consumed.
-// Called after the new password has been stored so the same link cannot be
-// reused to set a second password.
-//
-// Atomic single-winner: WHERE consumed_at IS NULL guards against two
-// concurrent password-reset POSTs both succeeding. If rows affected is
-// zero, someone else consumed the token first - return ErrNotFound so the
-// caller (which has already stored the new password under a transaction)
-// can abort.
-// in: token id from ConsumeResetLink. out: error.
-func (s *AuthService) MarkResetConsumed(tokenID uuid.UUID) error {
+// ResetPassword consumes a reset token and stores the new password in one
+// transaction, so of two POSTs with one token exactly one sets a password.
+// in: raw token, new password. out: owning *User, or ErrNotFound / ErrExpired / ErrPasswordTooShort.
+func (s *AuthService) ResetPassword(token, password string) (*User, error) {
+	if len(password) < MinPasswordLen {
+		return nil, ErrPasswordTooShort
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
 	ctx := context.Background()
-	var affected int64
-	err := db.WithAdminAudit(ctx, s.pools.Admin, "auth.mark_reset_consumed", func(tx pgx.Tx) error {
-		tag, execErr := tx.Exec(ctx,
-			`UPDATE magic_link_tokens SET consumed_at = now()
-			  WHERE id = $1 AND consumed_at IS NULL`, tokenID)
-		if execErr != nil {
-			return execErr
+	return s.consumeLinkTokenThen(token, PurposeReset, false, func(tx pgx.Tx, u *User) error {
+		tag, err := tx.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, string(hash), u.ID)
+		if err != nil {
+			return fmt.Errorf("auth: reset password for user %s: %w", u.ID, err)
 		}
-		affected = tag.RowsAffected()
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return ErrNotFound
-	}
-	return nil
 }
 
 // consumeLinkToken is the shared validation+consume path for login-purpose tokens.
@@ -163,6 +156,12 @@ func (s *AuthService) MarkResetConsumed(tokenID uuid.UUID) error {
 // user, both succeed. Single statement closes the window.
 // in: raw token, expected purpose, whether to touch last_login_at. out: *User or error.
 func (s *AuthService) consumeLinkToken(token, expectedPurpose string, touchLogin bool) (*User, error) {
+	return s.consumeLinkTokenThen(token, expectedPurpose, touchLogin, nil)
+}
+
+// consumeLinkTokenThen is consumeLinkToken with then run in the consuming tx; a then error rolls the consume back.
+// in: raw token, purpose, touchLogin, optional then. out: *User or error.
+func (s *AuthService) consumeLinkTokenThen(token, expectedPurpose string, touchLogin bool, then func(pgx.Tx, *User) error) (*User, error) {
 	hash := sha256.Sum256([]byte(token))
 	const consumeQuery = `
 		UPDATE magic_link_tokens t
@@ -187,6 +186,9 @@ func (s *AuthService) consumeLinkToken(token, expectedPurpose string, touchLogin
 			&u.IsAdmin, &u.IsSuperAdmin, &u.CreatedAt, &u.LastLoginAt)
 		if scanErr == nil {
 			notConsumed = true
+			if then != nil {
+				return then(tx, &u)
+			}
 			return nil
 		}
 		if !errors.Is(scanErr, pgx.ErrNoRows) {

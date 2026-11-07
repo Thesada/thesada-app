@@ -163,6 +163,16 @@ func main() {
 	notifier.StartRedispatcher(rootCtx)
 	services.Alerts.StartAbsenceSweep(rootCtx)
 
+	// A delete cut off by the last shutdown, or a reassign, can leave a claim
+	// no device row backs. Clear it before announce and claim traffic starts.
+	sweepCtx, sweepCancel := context.WithTimeout(rootCtx, 30*time.Second)
+	if n, err := services.Enrollments.SweepOrphanClaims(sweepCtx); err != nil {
+		slog.Error("device.enroll.orphan_sweep_failed", "err", err)
+	} else if n > 0 {
+		slog.Warn("device.enroll.orphan_claims_cleared", "rows_deleted", n)
+	}
+	sweepCancel()
+
 	// Unclaimed enrollment rows are the one thing in this schema an
 	// unauthenticated caller can create, so they need a sweep of their own.
 	services.Enrollments.StartPruner(rootCtx, cfg.EnrollmentPruneInterval)
@@ -173,12 +183,12 @@ func main() {
 	mqttClient := mustStartMQTT(rootCtx, cfg, pool, notifier, hub, services)
 	defer mqttClient.Stop()
 
-	httpServer := buildHTTPServer(cfg, services, hub, mail, mqttClient, ca, pool)
+	httpServer, webServer := buildHTTPServer(cfg, services, hub, mail, mqttClient, ca, pool)
 	runHTTPServer(httpServer, cancel)
 
 	<-rootCtx.Done()
 	slog.Info("shutdown requested")
-	gracefulShutdown(httpServer)
+	gracefulShutdown(httpServer, webServer, httpBudget, jobBudget)
 	slog.Info("bye")
 }
 
@@ -238,7 +248,7 @@ func mustStartMQTT(ctx context.Context, cfg *config.Config, pool *db.Pool,
 // The mqtt client is passed through so the super-admin /admin/mqtt shell can
 // register taps and publish through the shared paho connection.
 // in: cfg, services bundle, ws hub, mailer, mqtt client, app db pool (health probe). out: configured *http.Server.
-func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub, mail *mailer.Mailer, mqttClient *mqtt.Client, ca *pki.CA, pool *db.Pool) *http.Server {
+func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub, mail *mailer.Mailer, mqttClient *mqtt.Client, ca *pki.CA, pool *db.Pool) (*http.Server, *web.Server) {
 	root := http.NewServeMux()
 
 	notes := notify.New(services.Auth, mail, cfg.BaseURL)
@@ -272,7 +282,7 @@ func buildHTTPServer(cfg *config.Config, services *service.Services, hub *ws.Hub
 		// WriteTimeout stays unset: a deadline would cut /ws and a long download.
 		ReadTimeout: 60 * time.Second,
 		IdleTimeout: 120 * time.Second,
-	}
+	}, web
 }
 
 // bootstrapAdmin creates the configured admin user if it does not already
@@ -334,10 +344,31 @@ func runHTTPServer(server *http.Server, cancel context.CancelFunc) {
 	}()
 }
 
-// gracefulShutdown gives the HTTP server up to 10s to drain in-flight requests.
-// in: server. out: none (errors are intentionally swallowed during shutdown).
-func gracefulShutdown(server *http.Server) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = server.Shutdown(ctx)
+// Shutdown budgets. jobBudget ends 2 s before the 20 s stop_grace_period in
+// deploy/docker-compose.yml, so MQTT and the pools close before SIGKILL.
+const (
+	httpBudget = 15 * time.Second
+	jobBudget  = 18 * time.Second
+)
+
+// gracefulShutdown drains in-flight requests and admin jobs in parallel, each
+// under its own budget. A device whose DB delete started is waited for up to
+// the job budget. Past it, the startup orphan claim sweep clears its sealed
+// enrollment rows, and its tombstone stays missing.
+// in: HTTP server, job drainer, budgets. out: none (errors are logged).
+func gracefulShutdown(server interface{ Shutdown(context.Context) error },
+	jobs interface{ DrainJobs(context.Context) error }, httpBudget, jobBudget time.Duration) {
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), httpBudget)
+	defer httpCancel()
+	httpDone := make(chan struct{})
+	go func() {
+		_ = server.Shutdown(httpCtx)
+		close(httpDone)
+	}()
+	jobCtx, jobCancel := context.WithTimeout(context.Background(), jobBudget)
+	defer jobCancel()
+	if err := jobs.DrainJobs(jobCtx); err != nil {
+		slog.Error("shutdown: admin job cut off", "err", err)
+	}
+	<-httpDone
 }

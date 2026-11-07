@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"mime"
 	"net/http"
 	"time"
 
@@ -97,12 +98,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.mux.HandleFunc("GET /readyz", s.handleReady)
 	s.mux.HandleFunc("GET /version", s.handleVersion)
-	s.mux.HandleFunc("POST /auth/login", s.handleAuthLogin)
+	s.mux.HandleFunc("POST /auth/login", requireJSON(s.handleAuthLogin))
 	s.mux.HandleFunc("POST /auth/logout", s.handleAuthLogout)
-	s.mux.HandleFunc("POST /auth/magic-link", s.handleAuthMagicLink)
-	s.mux.HandleFunc("POST /auth/magic-link/verify", s.handleAuthMagicLinkVerify)
-	s.mux.HandleFunc("POST /auth/totp", s.handleAuthTOTP)
-	s.mux.HandleFunc("POST /auth/signup", s.handleAuthSignup)
+	s.mux.HandleFunc("POST /auth/magic-link", requireJSON(s.handleAuthMagicLink))
+	s.mux.HandleFunc("POST /auth/magic-link/verify", requireJSON(s.handleAuthMagicLinkVerify))
+	s.mux.HandleFunc("POST /auth/totp", requireJSON(s.handleAuthTOTP))
+	s.mux.HandleFunc("POST /auth/signup", requireJSON(s.handleAuthSignup))
 	s.mux.HandleFunc("GET /devices", authmw.RequireAuthJSON(s.handleDeviceList))
 	s.mux.HandleFunc("GET /devices/{id}", authmw.RequireAuthJSON(s.handleDeviceGet))
 	s.mux.HandleFunc("POST /devices/{id}/pair", authmw.RequireSuperAdminJSON(s.handleDevicePair))
@@ -257,6 +258,21 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// requireJSON answers 415 unless the body is declared application/json. A
+// cross-site form cannot send that type without a CORS preflight, so the
+// unauthenticated auth endpoints cannot be driven by another site.
+// in: handler. out: wrapped handler.
+func requireJSON(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || mt != "application/json" {
+			writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "Content-Type must be application/json"})
+			return
+		}
+		next(w, r)
+	}
 }
 
 // decodeJSON decodes the request body into dst, writing a 400 JSON error on

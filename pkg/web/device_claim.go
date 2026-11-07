@@ -129,6 +129,10 @@ func (s *Server) handleDeviceClaimSubmit(w http.ResponseWriter, r *http.Request)
 			s.claimError(w, r, "that device has already been claimed")
 			return
 		}
+		if errors.Is(err, service.ErrBrokerIdentityTaken) {
+			s.claimError(w, r, "that device is still registered to another tenant")
+			return
+		}
 		slog.Error("device.enroll.claim_failed", "user", user.ID, "device_id", deviceID, "err", err)
 		s.claimError(w, r, "claim failed")
 		return

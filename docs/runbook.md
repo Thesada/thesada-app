@@ -71,10 +71,10 @@ Assume broker credentials and/or the dynsec store are untrusted.
 2. Decode `delivery_status`:
    - `pending` - retries are still running (doubling backoff from `THESADA_ALERT_RETRY_BASE`, default 1m). Check logs for `alert.delivery.retry_scheduled` and the per-channel `alert email failed` / `alert telegram failed` error to fix the channel (SMTP creds, Telegram token, chat_id).
    - `none` - no subscription matched at dispatch time (channel + `min_severity` vs the alert's severity). Not retried automatically; fix the subscription, then re-poke (below) if that alert should still go out - dispatch re-matches subscriptions on every run.
-   - `dead` - budget spent (`THESADA_ALERT_MAX_ATTEMPTS`, default 5); logs show `alert.delivery.state_change` to `dead`. Fix the channel first, then re-poke.
+   - `dead` - budget spent (`THESADA_ALERT_MAX_ATTEMPTS`, default 5), logs show `alert.delivery.state_change` to `dead`. Fix the channel first, then re-poke. If that line (or a `retry_scheduled` line) carries `reason: panic`, the dispatch itself crashes on this row: the stack is on the `goroutine.panic` line whose `site` is `alerts.redispatch` or `mqtt.alert_dispatch`. Fix the code before re-poking, or the row burns its budget again.
    - Re-poke (works for `dead` and `none`): `UPDATE device_alerts SET delivery_status='pending', delivery_attempts=0, next_attempt_at=now() WHERE id = <alert-id>;` - the sweeper (every `THESADA_ALERT_REDISPATCH_INTERVAL`, default 1m) picks it up.
    - `delivered` but nothing arrived - the send was handed off (SMTP accepted / Telegram 200); chase the provider side (spam folder, greylisting).
-3. Alert row missing entirely: search logs for `alert.ingest.dead_letter` - the insert failed after retries and the line carries the full payload for manual replay; also check the firmware side published at all.
+3. Alert row missing entirely: search logs for `alert.ingest.dead_letter` (the insert failed after retries) or for `goroutine.panic` whose `site` is `mqtt.alert_insert_retry` (the retry itself crashed). Both lines carry the full payload for manual replay. Also check the firmware side published at all.
 4. Delivery works but repeats: retained alerts are dropped and the same payload inside 10 minutes is refused (`alert dropped, duplicate within window` at debug). A repeat past that is the device publishing again; check its rule cooldown. See [`failure-modes/alerts.md`](failure-modes/alerts.md).
 
 ---
