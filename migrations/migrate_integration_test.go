@@ -22,7 +22,10 @@ import (
 
 func TestMigrations_FreshApplyThenIdempotent(t *testing.T) {
 	ctx := context.Background()
-	super, _ := servicetest.StartPostgres(t)
+	super, baseURL := servicetest.StartPostgres(t)
+	// Apply as the production migrate role: owner, NOBYPASSRLS, FORCE RLS on.
+	servicetest.BootstrapProdRoles(t, super)
+	migrator := servicetest.OpenAs(t, baseURL, "thesada_app")
 
 	// Expected count = every *.sql on disk (gatedMigrations is empty, so none
 	// are skipped on a fresh DB).
@@ -36,7 +39,7 @@ func TestMigrations_FreshApplyThenIdempotent(t *testing.T) {
 	}
 
 	// First apply: every migration runs.
-	if err := migrations.Apply(ctx, super); err != nil {
+	if err := migrations.Apply(ctx, migrator); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
 	got1 := countMigrations(t, super)
@@ -45,7 +48,7 @@ func TestMigrations_FreshApplyThenIdempotent(t *testing.T) {
 	}
 
 	// Second apply: must succeed and record nothing new.
-	if err := migrations.Apply(ctx, super); err != nil {
+	if err := migrations.Apply(ctx, migrator); err != nil {
 		t.Fatalf("second Apply (idempotency): %v", err)
 	}
 	got2 := countMigrations(t, super)

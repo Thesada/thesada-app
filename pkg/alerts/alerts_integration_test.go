@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"thesada.app/app/pkg/db"
+	"thesada.app/app/pkg/safego/safegotest"
 	"thesada.app/app/pkg/service/servicetest"
 )
 
@@ -322,6 +323,96 @@ func TestSweep_RedeliversPendingAcrossTenants(t *testing.T) {
 	n.Sweep(ctx)
 	if status, attempts, _, _, _ := deliveryRow(t, env, alertC); status != "delivered" || attempts != 1 {
 		t.Fatalf("startup redispatch: %s/%d, want delivered/1", status, attempts)
+	}
+}
+
+// panicInSender is a named frame that only a stack taken before unwinding holds.
+func panicInSender() { panic("alert text broke the sender") }
+
+func TestSweep_PanickingRowDoesNotStopThePass(t *testing.T) {
+	env := servicetest.Start(t)
+	ctx := context.Background()
+	pkA, alertA := seedAlert(t, env, "acme")
+	seedEmailSub(t, env, "acme", pkA, "ops@acme.example")
+	pkB, alertB := seedAlert(t, env, "globex")
+	seedEmailSub(t, env, "globex", pkB, "ops@globex.example")
+	seedTelegramSub(t, env, "acme", pkA, "12345")
+	makeDue(t, env, alertA)
+	makeDue(t, env, alertB)
+
+	env.Cfg.AlertMaxAttempts = 2
+	env.Cfg.AlertRetryBase = time.Hour
+	log := safegotest.Capture(t)
+	n := New(env.Cfg, env.Pools, nil)
+	// The sweep runs in id order, so acme's row panics before globex's is read.
+	// acme's first send lands and every later one panics, in either channel order.
+	var acme []string
+	send := func(channel string) {
+		acme = append(acme, channel)
+		if len(acme) > 1 {
+			panicInSender()
+		}
+	}
+	n.sendEmail = func(to, _, _, _ string) error {
+		if to == "ops@acme.example" {
+			send("email")
+		}
+		return nil
+	}
+	n.sendTG = func(_ context.Context, _, _ string) error { send("telegram"); return nil }
+	n.Sweep(ctx)
+	rec := log.Find("goroutine.panic", "alerts.redispatch")
+	if rec == nil || rec["alert_id"] != float64(alertA) {
+		t.Fatalf("panic record = %v, want alerts.redispatch for alert %d", rec, alertA)
+	}
+	if stack, _ := rec["stack"].(string); !strings.Contains(stack, "alerts.panicInSender") {
+		t.Fatalf("stack lost the panicking frame: %q", stack)
+	}
+	if status, _, _, _, _ := deliveryRow(t, env, alertB); status != "delivered" {
+		t.Fatalf("row after the panicking one: %s, want delivered", status)
+	}
+
+	// The panic counts as an attempt: backoff pushes the row out of the due
+	// set, and the channel that sent before it is kept.
+	if len(acme) != 2 {
+		t.Fatalf("acme sends %v, want one landed and one panicked", acme)
+	}
+	status, attempts, email, tg, next := deliveryRow(t, env, alertA)
+	if status != "pending" || attempts != 1 || time.Until(next) < 30*time.Minute ||
+		email != (acme[0] == "email") || tg != (acme[0] == "telegram") {
+		t.Fatalf("panicked row = %s/%d email:%v tg:%v next:%v, want pending/1, only %s kept, next an hour out",
+			status, attempts, email, tg, next, acme[0])
+	}
+	n.Sweep(ctx)
+	if len(acme) != 2 {
+		t.Fatalf("acme sends %v on a pass inside the backoff, want none", acme)
+	}
+
+	// A row that panics every time goes dead at the attempt budget, and the
+	// kept channel is not sent again.
+	makeDue(t, env, alertA)
+	n.Sweep(ctx)
+	if status, attempts, _, _, _ := deliveryRow(t, env, alertA); status != "dead" || attempts != 2 {
+		t.Fatalf("panicked row at the budget = %s/%d, want dead/2", status, attempts)
+	}
+	if len(acme) != 3 || acme[2] != acme[1] {
+		t.Fatalf("acme sends %v, want the kept %s sent once", acme, acme[0])
+	}
+}
+
+func seedTelegramSub(t *testing.T, env *servicetest.Env, tenant, devicePk, chatID string) {
+	t.Helper()
+	ctx := context.Background()
+	var userID string
+	if err := env.Super.QueryRow(ctx,
+		`INSERT INTO users (tenant_id, email, telegram_chat_id) VALUES ($1, $2, $3) RETURNING id`,
+		tenant, "tg-"+chatID+"@"+tenant+".example", chatID).Scan(&userID); err != nil {
+		t.Fatalf("seed tg user: %v", err)
+	}
+	if _, err := env.Super.Exec(ctx,
+		`INSERT INTO alert_subscriptions (user_id, device_pk, channel, min_severity)
+		 VALUES ($1, $2, 'telegram', 'warn')`, userID, devicePk); err != nil {
+		t.Fatalf("seed tg subscription: %v", err)
 	}
 }
 

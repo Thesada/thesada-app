@@ -223,6 +223,20 @@
     });
   }
 
+  /* One write from this page at a time. The server answers a second one
+     with 409, this keeps a double click from getting that far. */
+  var writeBusy = false;
+  function guardedWrite(path, content) {
+    if (writeBusy) { return Promise.reject(new Error("a save is already running")); }
+    writeBusy = true;
+    var btn = document.querySelector('[data-act="saveFile"]');
+    if (btn) { btn.disabled = true; }
+    return postWrite(path, content).finally(function() {
+      writeBusy = false;
+      if (btn) { btn.disabled = false; }
+    });
+  }
+
   function pollResult(requestID, timeoutSeconds) {
     var pollInterval = 2000;
     var deadline = Date.now() + (timeoutSeconds * 1000) + 5000; /* grace */
@@ -490,7 +504,7 @@
   window.saveFile = function() {
     var content = document.getElementById("editor-content").value;
     document.getElementById("editor-status").textContent = "Saving " + content.length + " bytes...";
-    postWrite(currentFilePath, content).then(function(resp) {
+    guardedWrite(currentFilePath, content).then(function(resp) {
       if (resp.ok) {
         document.getElementById("editor-status").textContent =
           "Saved " + resp.bytes + " bytes in " + resp.chunks + " chunk(s)";
@@ -650,13 +664,15 @@
     var s = historySnapshots[idx];
     if (!s) return;
     if (!confirm("Push this snapshot back to the device at " + s.path + "?")) return;
-    status("Restoring " + s.path + "...", true);
-    postWrite(s.path, s.content).then(function(resp) {
+    statusPending("Restoring " + s.path + "...");
+    guardedWrite(s.path, s.content).then(function(resp) {
       if (resp.ok) {
         status("Restored " + s.path + " (" + resp.bytes + " bytes)", true);
       } else {
         status("Restore failed: " + (resp.error || "unknown"), false);
       }
+    }).catch(function(e) {
+      status("Restore failed: " + ((e && e.message) || e), false);
     });
   };
 })();

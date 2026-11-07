@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"thesada.app/app/pkg/db"
+	"thesada.app/app/pkg/safego"
 )
 
 // sweepBatchLimit bounds one sweep pass. Dispatches run sequentially, so the
@@ -93,9 +94,13 @@ func (n *Notifier) Sweep(ctx context.Context) {
 		return
 	}
 	slog.Info("alert.delivery.redispatch", "due", len(batch), "batch_limit", sweepBatchLimit)
+	// Rows carry device text. A row that panics Dispatch must not stop the
+	// pass or, at the startup sweep, crash-loop the process.
 	for _, d := range batch {
-		if err := n.Dispatch(ctx, d.tenantID, d.alertID); err != nil {
-			slog.Error("alert redispatch failed", "alert_id", d.alertID, "err", err)
-		}
+		safego.Run("alerts.redispatch", func() {
+			if err := n.Dispatch(ctx, d.tenantID, d.alertID); err != nil {
+				slog.Error("alert redispatch failed", "alert_id", d.alertID, "err", err)
+			}
+		}, "tenant", d.tenantID, "alert_id", d.alertID)
 	}
 }

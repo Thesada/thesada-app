@@ -10,6 +10,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"thesada.app/app/pkg/authmw"
@@ -54,6 +55,9 @@ type Server struct {
 	claimLimits *ratelimit.Limiter
 	cliRequests *cliRequestStore
 	jobs        *requestStore[jobResult]
+	// deviceWrites holds the device ids with a staged file write in flight.
+	deviceWrites sync.Map
+	runner       jobRunner
 }
 
 // New constructs the HTMX server with all page routes wired up.

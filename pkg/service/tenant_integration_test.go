@@ -142,6 +142,35 @@ func TestTenantService(t *testing.T) {
 		if err := ten.Delete("self", "self"); !errors.Is(err, service.ErrTenantProtected) {
 			t.Errorf("delete own seat = %v, want ErrTenantProtected", err)
 		}
+		if err := ten.Delete("home", "elsewhere", "home"); !errors.Is(err, service.ErrTenantProtected) {
+			t.Errorf("delete own home while elsewhere = %v, want ErrTenantProtected", err)
+		}
+	})
+
+	t.Run("Delete_refuses_super_admin_tenant", func(t *testing.T) {
+		if _, err := ten.Create("tensuper", ""); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		u, err := env.Services.Auth.CreateUser("tensuper", "su@tensuper.test", "", true)
+		if err != nil {
+			t.Fatalf("CreateUser: %v", err)
+		}
+		// A tenant admin alone does not block the delete, a super-admin does.
+		if has, err := ten.HasSuperAdmins("tensuper"); err != nil || has {
+			t.Fatalf("HasSuperAdmins before promote = %v, %v", has, err)
+		}
+		if err := env.Services.Auth.PromoteSuperAdmin(u.ID); err != nil {
+			t.Fatalf("PromoteSuperAdmin: %v", err)
+		}
+		if has, err := ten.HasSuperAdmins("tensuper"); err != nil || !has {
+			t.Fatalf("HasSuperAdmins after promote = %v, %v", has, err)
+		}
+		if err := ten.Delete("tensuper", "other"); !errors.Is(err, service.ErrTenantHasSuperAdmins) {
+			t.Fatalf("Delete = %v, want ErrTenantHasSuperAdmins", err)
+		}
+		if _, err := ten.Get("tensuper"); err != nil {
+			t.Errorf("tenant gone after refused delete: %v", err)
+		}
 	})
 
 	// Phase 3: tenant lifecycle wires the device-config-secrets DEK. The

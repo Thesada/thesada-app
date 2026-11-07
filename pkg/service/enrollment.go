@@ -533,6 +533,19 @@ func (s *EnrollmentService) ClaimInto(ctx context.Context, deviceID, pubkeyHex, 
 		if err := quotaAllowDevice(ctx, tx, tenantID, deviceID, max); err != nil {
 			return err
 		}
+		// A row elsewhere still holds this tenant's broker identity for the id
+		// (a reassigned unit). A second claim here would be issued the same CN.
+		var taken bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM devices
+			                 WHERE device_id = $2 AND tenant_id <> $1
+			                   AND (broker_tenant_id = $1 OR $1 = ANY(broker_stale_tenants)))`,
+			tenantID, deviceID).Scan(&taken); err != nil {
+			return err
+		}
+		if taken {
+			return ErrBrokerIdentityTaken
+		}
 		// owner_user_id is written here and nowhere else on this path: the spec
 		// makes the claiming user the owner, and no later step revisits it.
 		// The prefix must be written now too. It is otherwise only ever set
@@ -580,22 +593,116 @@ func (s *EnrollmentService) ClaimedTenants(ctx context.Context, deviceID string)
 	return out, nil
 }
 
-// Reset deletes every enrollment row for a device_id so it can start over.
+// orphanClaim matches a claim its tenant no longer backs: a pending claim with
+// no device row there, or a sealed one with no device row holding a cert for
+// its key. A live cert with no stored key (before 0031) counts as backing it.
+const orphanClaim = `(e.claimed_by_tenant IS NOT NULL AND CASE
+	WHEN e.cert_delivered_at IS NULL THEN NOT EXISTS (
+		SELECT 1 FROM devices d
+		 WHERE d.tenant_id = e.claimed_by_tenant AND d.device_id = e.device_id)
+	ELSE NOT EXISTS (
+		SELECT 1 FROM devices d JOIN device_certificates c ON c.device_pk = d.id
+		 WHERE d.tenant_id = e.claimed_by_tenant AND d.device_id = e.device_id
+		   AND (c.pubkey_hex = e.pubkey_hex OR (c.pubkey_hex IS NULL AND NOT c.revoked)))
+	END)`
+
+// seesAllTenants reports whether the transaction's role bypasses RLS. Under
+// RLS the devices subquery sees nothing, and every claim reads as an orphan.
+// in: ctx, tx. out: true for a superuser or BYPASSRLS role, error.
+func seesAllTenants(ctx context.Context, tx pgx.Tx) (bool, error) {
+	var ok bool
+	err := tx.QueryRow(ctx,
+		`SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user`).Scan(&ok)
+	return ok, err
+}
+
+// Reset deletes a device_id's unclaimed rows, the rows tenantID claimed, and
+// orphan claims, so the unit can start over. A claim another tenant backs is
+// kept, because device_id is unique per tenant only.
 //
 // Without it a revoked device is bricked: cert_delivered_at stays set, so the
 // row stays sealed and the device can never prove itself again. The spec
 // requires the opposite - "next POST starts a fresh cycle". It also clears any
 // squatter rows that accumulated under the same id.
-// in: ctx, device id. out: rows removed, error.
-func (s *EnrollmentService) Reset(ctx context.Context, deviceID string) (int64, error) {
+// in: ctx, device id, tenant the device row belongs to. out: rows removed, error.
+func (s *EnrollmentService) Reset(ctx context.Context, deviceID, tenantID string) (int64, error) {
 	var removed int64
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment reset", func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `DELETE FROM device_enrollments WHERE device_id = $1`, deviceID)
+		// Lock first: the DELETEs then run on a snapshot that holds any claim
+		// committed meanwhile, with its device row.
+		if _, err := tx.Exec(ctx,
+			`SELECT 1 FROM device_enrollments WHERE device_id = $1 ORDER BY pubkey_hex FOR UPDATE`, deviceID); err != nil {
+			return err
+		}
+		all, err := seesAllTenants(ctx, tx)
 		if err != nil {
 			return err
 		}
-		removed = tag.RowsAffected()
+		if all {
+			// Its own statement: a row unclaimed in this snapshot never matches,
+			// so no recheck runs the NOT EXISTS against a stale snapshot.
+			tag, err := tx.Exec(ctx,
+				`DELETE FROM device_enrollments e
+				  WHERE e.device_id = $1 AND e.claimed_by_tenant <> $2 AND `+orphanClaim, deviceID, tenantID)
+			if err != nil {
+				return err
+			}
+			removed += tag.RowsAffected()
+		} else {
+			slog.Warn("device.enroll.reset_orphans_skipped", "device_id", deviceID, "reason", "admin pool does not bypass RLS")
+		}
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM device_enrollments
+			  WHERE device_id = $1 AND (claimed_by_tenant IS NULL OR claimed_by_tenant = $2)`, deviceID, tenantID)
+		if err != nil {
+			return err
+		}
+		removed += tag.RowsAffected()
 		return nil
+	})
+	return removed, err
+}
+
+// ErrEnrollPoolSeesOneTenant means the admin pool does not bypass RLS, so the
+// orphan sweep cannot tell a live claim from an orphan and does nothing.
+var ErrEnrollPoolSeesOneTenant = errors.New("enrollment: admin pool does not bypass RLS, orphan sweep skipped")
+
+// SweepOrphanClaims deletes every orphan claim, so a delete cut off between
+// the device row and its reset, or a reassign, does not leave the unit stuck.
+// Bounded by lock and statement timeouts, because it runs at boot.
+// in: ctx. out: rows removed, error.
+func (s *EnrollmentService) SweepOrphanClaims(ctx context.Context) (int64, error) {
+	var removed int64
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "device enrollment orphan claim sweep", func(tx pgx.Tx) error {
+		all, err := seesAllTenants(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if !all {
+			return ErrEnrollPoolSeesOneTenant
+		}
+		for _, q := range []string{`SET LOCAL lock_timeout = '5s'`, `SET LOCAL statement_timeout = '20s'`} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+		rows, err := tx.Query(ctx,
+			`DELETE FROM device_enrollments e WHERE `+orphanClaim+`
+			 RETURNING device_id, claimed_by_tenant, cert_delivered_at IS NOT NULL`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var deviceID, tenant string
+			var sealed bool
+			if err := rows.Scan(&deviceID, &tenant, &sealed); err != nil {
+				return err
+			}
+			slog.Warn("device.enroll.orphan_claim_cleared", "device_id", deviceID, "tenant", tenant, "sealed", sealed)
+			removed++
+		}
+		return rows.Err()
 	})
 	return removed, err
 }

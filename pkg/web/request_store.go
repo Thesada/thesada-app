@@ -117,6 +117,19 @@ func (s *requestStore[T]) markError(id uuid.UUID, status requestStatus, msg stri
 	}
 }
 
+// failPending marks an entry error only while it is still pending, so a
+// late failure cannot overwrite a request that already finished.
+// in: receiver, request id, message. out: none.
+func (s *requestStore[T]) failPending(id uuid.UUID, msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.entries[id]; ok && e.Status == reqStatusPending {
+		e.Status = reqStatusError
+		e.ErrorMsg = msg
+		e.FinishedAt = time.Now()
+	}
+}
+
 // get returns a snapshot of the entry, or nil if not found.
 // Terminal entries (done / timeout / error) are dropped after the caller
 // reads them - the frontend only polls until it sees a terminal state, and

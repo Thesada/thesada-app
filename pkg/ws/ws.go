@@ -15,6 +15,7 @@ import (
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/config"
 	"thesada.app/app/pkg/httpsec"
+	"thesada.app/app/pkg/safego"
 )
 
 // writeTimeout is the deadline for a single frame write.
@@ -100,8 +101,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cn := &conn{ws: socket, send: make(chan []byte, sendBuffer), tenant: authmw.EffectiveTenantID(r)}
 	h.register(cn)
 	slog.Info("ws client connected", "tenant", cn.tenant, "user", u.Email)
-	go h.writePump(cn)
-	go h.readPump(cn)
+	safego.Go("ws.write_pump", func() { h.writePump(cn) }, "tenant", cn.tenant)
+	safego.Go("ws.read_pump", func() { h.readPump(cn) }, "tenant", cn.tenant)
 }
 
 // Publish marshals event to JSON and queues it on every connection that

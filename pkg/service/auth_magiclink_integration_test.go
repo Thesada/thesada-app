@@ -23,7 +23,7 @@ import (
 )
 
 // TestAuthMagicLink drives CreateMagicLink / CreateResetLink / ConsumeMagicLink
-// / ConsumeResetLink / MarkResetConsumed end to end.
+// / ConsumeResetLink / ResetPassword end to end.
 //
 // in:  a migrated testcontainer env, one seeded tenant + user.
 // out: asserts login single-use consume, reset validate->mark lifecycle,
@@ -89,7 +89,7 @@ func TestAuthMagicLink(t *testing.T) {
 		}
 	})
 
-	t.Run("reset_validate_then_mark", func(t *testing.T) {
+	t.Run("reset_validate_then_reset", func(t *testing.T) {
 		token, expires, err := auth.CreateResetLink(user.ID)
 		if err != nil {
 			t.Fatalf("CreateResetLink: %v", err)
@@ -98,7 +98,7 @@ func TestAuthMagicLink(t *testing.T) {
 			t.Errorf("reset token expiry in %v, want ~30m", d)
 		}
 		// ConsumeResetLink does NOT consume - it may be called twice (GET
-		// render then POST save) before MarkResetConsumed.
+		// render then POST save) before ResetPassword.
 		u, tokenID, err := auth.ConsumeResetLink(token)
 		if err != nil {
 			t.Fatalf("ConsumeResetLink: %v", err)
@@ -107,18 +107,18 @@ func TestAuthMagicLink(t *testing.T) {
 			t.Errorf("ConsumeResetLink = user %v token %v, want %v non-nil", u, tokenID, user.ID)
 		}
 		if _, _, err := auth.ConsumeResetLink(token); err != nil {
-			t.Errorf("second ConsumeResetLink (pre-mark) = %v, want nil", err)
+			t.Errorf("second ConsumeResetLink (pre-reset) = %v, want nil", err)
 		}
-		// Mark consumed: now the link is spent.
-		if err := auth.MarkResetConsumed(tokenID); err != nil {
-			t.Fatalf("MarkResetConsumed: %v", err)
+		// Reset: now the link is spent.
+		if got, err := auth.ResetPassword(token, "magiclink-reset-pw"); err != nil || got.ID != user.ID {
+			t.Fatalf("ResetPassword = %v, %v", got, err)
 		}
 		if _, _, err := auth.ConsumeResetLink(token); !errors.Is(err, service.ErrNotFound) {
 			t.Errorf("ConsumeResetLink(consumed) = %v, want ErrNotFound", err)
 		}
-		// Single-winner: a second mark on the same id loses.
-		if err := auth.MarkResetConsumed(tokenID); !errors.Is(err, service.ErrNotFound) {
-			t.Errorf("second MarkResetConsumed = %v, want ErrNotFound", err)
+		// Single-winner: a second reset with the same token loses.
+		if _, err := auth.ResetPassword(token, "magiclink-reset-pw2"); !errors.Is(err, service.ErrNotFound) {
+			t.Errorf("second ResetPassword = %v, want ErrNotFound", err)
 		}
 	})
 

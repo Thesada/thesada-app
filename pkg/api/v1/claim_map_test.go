@@ -21,6 +21,10 @@ func TestClaimIntoHTTP(t *testing.T) {
 	if code != http.StatusConflict || msg != "this tenant is at its device cap" {
 		t.Fatalf("device cap: got %d %q", code, msg)
 	}
+	code, msg = claimIntoHTTP(service.ErrBrokerIdentityTaken)
+	if code != http.StatusConflict || msg != "that device is still registered to another tenant" {
+		t.Fatalf("identity held: got %d %q", code, msg)
+	}
 	code, msg = claimIntoHTTP(errors.New("db down"))
 	if code != http.StatusInternalServerError || msg != "claim failed" {
 		t.Fatalf("other: got %d %q", code, msg)

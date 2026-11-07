@@ -2,16 +2,46 @@ package web
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/google/uuid"
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/oauth"
 	"thesada.app/app/pkg/service"
 )
+
+// oidcStateCookie binds an OIDC flow's state to the browser that started it.
+const oidcStateCookie = "thesada_oidc_state"
+
+// oidcStatePath scopes the state cookie to the OIDC routes.
+const oidcStatePath = "/auth/oidc/"
+
+// setOIDCState stores state for the callback. Lax, so the IdP's top-level redirect carries it.
+// in: writer, request, state (empty clears). out: none.
+func (s *Server) setOIDCState(w http.ResponseWriter, r *http.Request, state string) {
+	c := &http.Cookie{
+		Name: oidcStateCookie, Value: state, Path: oidcStatePath,
+		MaxAge: int(oauth.AuthRequestTTL.Seconds()), HttpOnly: true,
+		Secure: httpsec.RequestIsSecure(r, s.cfg.TrustedProxies), SameSite: http.SameSiteLaxMode,
+	}
+	if state == "" {
+		c.MaxAge = -1
+	}
+	http.SetCookie(w, c)
+}
+
+// oidcStateMatches reports whether the request carries the state cookie set at /start.
+// in: request, state from the query. out: bool.
+func oidcStateMatches(r *http.Request, state string) bool {
+	c, err := r.Cookie(oidcStateCookie)
+	return err == nil && c.Value != "" && subtle.ConstantTimeCompare([]byte(c.Value), []byte(state)) == 1
+}
 
 // loadCtx is a short-lived request-scoped context. Callback exchange talks to
 // the IdP and should not hang the request indefinitely.
@@ -67,6 +97,13 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "oidc start failed", http.StatusInternalServerError)
 		return
 	}
+	u, err := url.Parse(authURL)
+	if err != nil || u.Query().Get("state") == "" {
+		slog.Error("oidc start: no state in authorize url", "slug", slug, "err", err)
+		http.Error(w, "oidc start failed", http.StatusInternalServerError)
+		return
+	}
+	s.setOIDCState(w, r, u.Query().Get("state"))
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -89,6 +126,16 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing code or state", http.StatusBadRequest)
 		return
 	}
+
+	// A state this browser did not start is a login CSRF, so it never reaches LookupState.
+	if !oidcStateMatches(r, state) {
+		slog.Warn("oidc state not bound to this browser", "slug", slug)
+		s.render(w, r, "login.html", map[string]interface{}{
+			"Error": "Sign-in link expired, try again.",
+		})
+		return
+	}
+	s.setOIDCState(w, r, "")
 
 	ctx, cancel := loadCtx(r)
 	defer cancel()
