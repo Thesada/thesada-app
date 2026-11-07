@@ -11,13 +11,14 @@ import (
 )
 
 // deviceSendSites is every function in this package that talks to the broker
-// (an <x>.mqtt.<Method> call), with the admin_audit action that records it or
+// (an <x>.mqtt.<Method> call, or <x>.mqtt handed to a helper), with the
+// admin_audit action that records it or
 // why it needs none. TestDeviceSendSitesAreAudited forces that decision for a
 // new site; it does not prove the row is written. That is checked by
 // TestAdminAuditTrail, TestAdminMqttShell and the service audit tests.
 var deviceSendSites = map[string]string{
 	"runCLICmd":                  "device.command, written at enqueue in handleAdminDeviceConfigCmd",
-	"runCLIWrite":                "device.config_write, written at enqueue in handleAdminDeviceConfigWrite",
+	"runCLIWrite":                "device.config_write, written at enqueue in handleAdminDeviceConfigWrite (sends via stagedWrite)",
 	"handleAdminMqttWS":          "mqtt.shell_publish / mqtt.shell_subscribe, one row per session",
 	"handleAdminDeviceDelete":    "device.delete",
 	"cascadeDeleteOne":           "device.delete (bulk)",
@@ -27,8 +28,8 @@ var deviceSendSites = map[string]string{
 	"pushCertPart":               "step of cert.issue",
 	"runCLI":                     "step of cert.issue",
 	"pushSecret":                 "device_secret.provision / tenant_secret.provision / step of cert.issue",
-	"provisionDeviceDynsec":      "broker ACL, step of cert.issue or a claim (device_enrollments row)",
-	"teardownDeviceDynsec":       "broker ACL, step of cert.revoke / device.delete",
+	"writeDeviceDynsec":          "broker ACL, step of cert.issue or a claim (device_enrollments row)",
+	"deleteDynsecIdentity":       "broker ACL, step of cert.revoke / device.delete / a re-provision",
 	"ownerCertClear":             "cert.revoke",
 	"deviceSecretState":          "read only (secret.info presence)",
 	"recoveryPath":               "read only (dynsec client state)",
@@ -60,6 +61,11 @@ func TestDeviceSendSitesAreAudited(t *testing.T) {
 				}
 				if sel, ok := c.Fun.(*ast.SelectorExpr); ok {
 					if inner, ok := sel.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "mqtt" {
+						found[fd.Name.Name] = true
+					}
+				}
+				for _, a := range c.Args {
+					if sel, ok := a.(*ast.SelectorExpr); ok && sel.Sel.Name == "mqtt" {
 						found[fd.Name.Name] = true
 					}
 				}

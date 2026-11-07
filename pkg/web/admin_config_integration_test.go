@@ -11,11 +11,15 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/alerts"
 	"thesada.app/app/pkg/authmw"
@@ -101,10 +105,83 @@ func TestAdminConfigCmd_SnapshotsRead(t *testing.T) {
 	}
 }
 
-// TestAdminConfigWrite_ChunksAndSnapshots drives runCLIWrite: content over
-// one chunk boundary goes out as fs.write + fs.append, lands as a "write"
-// snapshot; a device error on a later chunk marks the entry failed and must
-// NOT store a snapshot.
+// deviceFS serves fs.write, fs.append, fs.mv and fs.rm on fd from an in-memory
+// file map with the firmware's reply texts. failAppend makes fs.append refuse.
+type deviceFS struct {
+	mu         sync.Mutex
+	files      map[string]string
+	failAppend bool
+}
+
+func serveDeviceFS(fd *mqtttest.FakeDevice, files map[string]string) *deviceFS {
+	d := &deviceFS{files: files}
+	write := func(appendMode bool) mqtttest.Handler {
+		return func(_ string, raw []byte) []mqtttest.Response {
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			path, content, ok := strings.Cut(string(raw), "\n")
+			if !ok {
+				return []mqtttest.Response{{OK: false, Output: []string{"Usage: payload = <path>\\n<content>"}}}
+			}
+			if appendMode && d.failAppend {
+				return []mqtttest.Response{{OK: false, Output: []string{"Failed to open file"}}}
+			}
+			if appendMode {
+				d.files[path] += content
+				return mqtttest.OK(fmt.Sprintf("Appended %d bytes to %s", len(content), path))
+			}
+			d.files[path] = content
+			return mqtttest.OK(fmt.Sprintf("Wrote %d bytes to %s", len(content), path))
+		}
+	}
+	fd.Handle("fs.write", write(false))
+	fd.Handle("fs.append", write(true))
+	fd.Handle("fs.mv", func(args string, _ []byte) []mqtttest.Response {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		src, dst, _ := strings.Cut(args, " ")
+		body, ok := d.files[src]
+		if !ok {
+			return mqtttest.OK("Failed to rename")
+		}
+		d.files[dst] = body
+		delete(d.files, src)
+		return mqtttest.OK("Renamed " + src + " -> " + dst)
+	})
+	fd.Handle("fs.cat", func(args string, _ []byte) []mqtttest.Response {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		path, _, _ := strings.Cut(args, " ")
+		body, ok := d.files[path]
+		if !ok {
+			return []mqtttest.Response{{OK: false, Output: []string{"File not found"}}}
+		}
+		total := len(body)
+		return []mqtttest.Response{{OK: true, Total: &total}}
+	})
+	fd.Handle("fs.rm", func(args string, _ []byte) []mqtttest.Response {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if _, ok := d.files[args]; !ok {
+			return mqtttest.OK("Failed to remove (file not found or directory)")
+		}
+		delete(d.files, args)
+		return mqtttest.OK("Removed " + args)
+	})
+	return d
+}
+
+func (d *deviceFS) file(path string) (string, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	body, ok := d.files[path]
+	return body, ok
+}
+
+// TestAdminConfigWrite_ChunksAndSnapshots drives runCLIWrite over the broker:
+// content over one chunk boundary is staged in <path>.new and renamed into
+// place, then stored as a "write" snapshot. A device error on a later chunk
+// leaves the live file as it was, removes the staging file and stores nothing.
 func TestAdminConfigWrite_ChunksAndSnapshots(t *testing.T) {
 	env := servicetest.Start(t)
 	broker := mqtttest.StartMosquitto(t)
@@ -124,23 +201,24 @@ func TestAdminConfigWrite_ChunksAndSnapshots(t *testing.T) {
 		t.Fatalf("fetch device: %v", err)
 	}
 
+	const oldConfig = `{"wifi":{"ssid":"old"}}`
 	fd := mqtttest.NewFakeDevice(t, broker, prefix)
+	dfs := serveDeviceFS(fd, map[string]string{"/config.json": oldConfig})
+	calls := func() [5]int {
+		return [5]int{fd.Calls("fs.write"), fd.Calls("fs.append"), fd.Calls("fs.cat"), fd.Calls("fs.mv"), fd.Calls("fs.rm")}
+	}
+	delta := func(a, b [5]int) [5]int {
+		var d [5]int
+		for i := range d {
+			d[i] = b[i] - a[i]
+		}
+		return d
+	}
 
-	t.Run("two-chunk write stored with source write", func(t *testing.T) {
+	t.Run("two-chunk write renamed into place and stored", func(t *testing.T) {
 		// > 3900 bytes forces fs.write then fs.append.
 		content := strings.Repeat("A", 3900) + strings.Repeat("B", 100)
-		var got strings.Builder
-		writeHandler := func(_ string, raw []byte) []mqtttest.Response {
-			// raw = "path\nchunk"
-			parts := strings.SplitN(string(raw), "\n", 2)
-			if len(parts) != 2 || parts[0] != "/scripts/pushed.lua" {
-				return []mqtttest.Response{{OK: false, Output: []string{"bad payload"}}}
-			}
-			got.WriteString(parts[1])
-			return mqtttest.OK("written")
-		}
-		fd.Handle("fs.write", writeHandler)
-		fd.Handle("fs.append", writeHandler)
+		before := calls()
 
 		reqID := s.cliRequests.enqueue()
 		s.runCLIWrite(ctx, reqID, device, prefix, "/scripts/pushed.lua", content, nil)
@@ -149,12 +227,14 @@ func TestAdminConfigWrite_ChunksAndSnapshots(t *testing.T) {
 		if entry == nil || entry.Status != reqStatusDone {
 			t.Fatalf("store entry = %+v, want done", entry)
 		}
-		if fd.Calls("fs.write") != 1 || fd.Calls("fs.append") != 1 {
-			t.Errorf("chunk calls write=%d append=%d, want 1/1",
-				fd.Calls("fs.write"), fd.Calls("fs.append"))
+		if d := delta(before, calls()); d != [5]int{1, 1, 1, 1, 0} {
+			t.Errorf("write/append/cat/mv/rm calls = %v, want [1 1 1 1 0]", d)
 		}
-		if got.String() != content {
-			t.Errorf("device received %d bytes, want %d (content mismatch)", got.Len(), len(content))
+		if got, _ := dfs.file("/scripts/pushed.lua"); got != content {
+			t.Errorf("device file holds %d bytes, want %d", len(got), len(content))
+		}
+		if _, left := dfs.file("/scripts/pushed.lua.new"); left {
+			t.Error("staging file left on the device")
 		}
 		snap, err := env.Services.DeviceFiles.Latest(ctx, tenant, pk, "/scripts/pushed.lua")
 		if err != nil || snap == nil || snap.Content != content || snap.Source != "write" {
@@ -162,27 +242,141 @@ func TestAdminConfigWrite_ChunksAndSnapshots(t *testing.T) {
 		}
 	})
 
-	t.Run("device error mid-write stores nothing", func(t *testing.T) {
+	t.Run("device error mid-write keeps the live config", func(t *testing.T) {
 		content := strings.Repeat("C", 4000) // two chunks
-		fd.Handle("fs.write", func(string, []byte) []mqtttest.Response {
-			return mqtttest.OK("written")
-		})
-		fd.Handle("fs.append", func(string, []byte) []mqtttest.Response {
-			return []mqtttest.Response{{OK: false, Output: []string{"disk full"}}}
-		})
+		dfs.mu.Lock()
+		dfs.failAppend = true
+		dfs.mu.Unlock()
+		before := calls()
 
 		reqID := s.cliRequests.enqueue()
-		s.runCLIWrite(ctx, reqID, device, prefix, "/scripts/fail.lua", content, nil)
+		s.runCLIWrite(ctx, reqID, device, prefix, "/config.json", content, nil)
 
 		entry := s.cliRequests.get(reqID)
-		if entry == nil || entry.Status != reqStatusError {
-			t.Fatalf("store entry = %+v, want error", entry)
+		if entry == nil || entry.Status != reqStatusError || !strings.Contains(entry.ErrorMsg, "chunk 2/2 device error") {
+			t.Fatalf("store entry = %+v, want chunk 2/2 error", entry)
 		}
-		snap, err := env.Services.DeviceFiles.Latest(ctx, tenant, pk, "/scripts/fail.lua")
+		if d := delta(before, calls()); d != [5]int{1, 1, 0, 0, 1} {
+			t.Errorf("write/append/cat/mv/rm calls = %v, want [1 1 0 0 1]", d)
+		}
+		if got, _ := dfs.file("/config.json"); got != oldConfig {
+			t.Errorf("/config.json holds %d bytes, want the old %d untouched", len(got), len(oldConfig))
+		}
+		if _, left := dfs.file("/config.json.new"); left {
+			t.Error("staging file left on the device")
+		}
+		snap, err := env.Services.DeviceFiles.Latest(ctx, tenant, pk, "/config.json")
 		if err != nil || snap != nil {
-			t.Fatalf("Latest(fail.lua) = %+v err=%v, want no snapshot after failed push", snap, err)
+			t.Fatalf("Latest(config.json) = %+v err=%v, want no snapshot after failed push", snap, err)
 		}
 	})
+}
+
+// TestAdminConfigWrite_SecondWriteToTheDeviceIs409 posts a second write while
+// the first is still on the device: it is refused before anything is sent,
+// and the device takes writes again once the first one finished.
+func TestAdminConfigWrite_SecondWriteToTheDeviceIs409(t *testing.T) {
+	env := servicetest.Start(t)
+	broker := mqtttest.StartMosquitto(t)
+	s := startWebBrokerServer(t, env, broker)
+
+	const tenant = "webcfg4"
+	env.SeedTenant(t, tenant)
+	prefix := "thesada/" + tenant + "/dev4"
+	pk, err := env.Services.Devices.Upsert(tenant, "dev4", "", "", "", prefix)
+	if err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	user, err := env.Services.Auth.CreateUser(tenant, "op4@example.com", "Op", false)
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	token, _, err := env.Services.Auth.CreateSession(tenant, user.ID, "magic_link", "go-test", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	fd := mqtttest.NewFakeDevice(t, broker, prefix)
+	dfs := serveDeviceFS(fd, map[string]string{})
+	// Hold the first fs.write on the device until the test lets it go.
+	gate := make(chan struct{})
+	var held, released sync.Once
+	release := func() { released.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	write := func(_ string, raw []byte) []mqtttest.Response {
+		held.Do(func() { <-gate })
+		path, content, _ := strings.Cut(string(raw), "\n")
+		dfs.mu.Lock()
+		dfs.files[path] = content
+		dfs.mu.Unlock()
+		return mqtttest.OK(fmt.Sprintf("Wrote %d bytes to %s", len(content), path))
+	}
+	fd.Handle("fs.write", write)
+
+	chain := authmw.Middleware(env.Services.Auth, nil)(http.HandlerFunc(s.handleAdminDeviceConfigWrite))
+	post := func(content string) *httptest.ResponseRecorder {
+		body, err := json.Marshal(map[string]string{"path": "/config.json", "content": content})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
+		req.SetPathValue("id", pk.String())
+		req.AddCookie(&http.Cookie{Name: authmw.CookieName, Value: token})
+		rec := httptest.NewRecorder()
+		chain.ServeHTTP(rec, req)
+		return rec
+	}
+	waitDone := func(rec *httptest.ResponseRecorder) {
+		t.Helper()
+		var enq cliEnqueueResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &enq); err != nil {
+			t.Fatalf("enqueue body %q: %v", rec.Body.String(), err)
+		}
+		id, err := uuid.Parse(enq.RequestID)
+		if err != nil {
+			t.Fatalf("request id: %v", err)
+		}
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if e := s.cliRequests.get(id); e != nil && e.Status != reqStatusPending {
+				if e.Status != reqStatusDone {
+					t.Fatalf("write ended %s: %s", e.Status, e.ErrorMsg)
+				}
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Fatal("write never finished")
+	}
+
+	first := post(`{"a":1}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first write = %d %s", first.Code, first.Body.String())
+	}
+	for i := 0; fd.Calls("fs.write") == 0; i++ {
+		if i > 200 {
+			t.Fatal("first write never reached the device")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	second := post(`{"b":2}`)
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second write while the first runs = %d, want 409", second.Code)
+	}
+	release()
+	waitDone(first)
+	if fd.Calls("fs.write") != 1 {
+		t.Fatalf("device saw %d fs.write, the refused write must send nothing", fd.Calls("fs.write"))
+	}
+
+	third := post(`{"c":3}`)
+	if third.Code != http.StatusOK {
+		t.Fatalf("write after the first finished = %d %s", third.Code, third.Body.String())
+	}
+	waitDone(third)
+	if got, _ := dfs.file("/config.json"); got != `{"c":3}` {
+		t.Fatalf("/config.json = %q, want the third write", got)
+	}
 }
 
 // TestAdminConfigSnapshotEndpoint drives the HTTP handler through the session

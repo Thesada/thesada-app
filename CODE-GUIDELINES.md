@@ -4,7 +4,7 @@ How to write code in this repo. Reference material for PR review.
 Sibling to [docs/invariants.md](docs/invariants.md) (the load-bearing
 rules).
 
-Dated 2026-06-22. Bump on every edit.
+Dated 2026-11-05. Bump on every edit.
 
 ---
 
@@ -320,7 +320,8 @@ compile from user data).
 
 If a goroutine can be triggered by user input (eg HTTP handler spawns
 work), guard the entry against panic so a malformed request cannot
-crash the binary.
+crash the binary. Start it with `safego.Go` (`pkg/safego`), which logs the
+panic as `goroutine.panic` with its stack.
 
 ### Context everywhere
 

@@ -1,6 +1,7 @@
 // Device config and script management. Super-admin only.
 // Reads/writes device files and config via MQTT CLI commands, using the
-// chunked fs.cat/fs.write/fs.append protocol.
+// chunked fs.cat/fs.write/fs.append protocol. Writes stage to <path>.new and
+// fs.mv it over the target once every chunk acked.
 //
 // CLI commands and chunked writes run async: the POST
 // endpoints enqueue a request, kick off a goroutine that handles the MQTT
@@ -15,16 +16,21 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/mqtt"
+	"thesada.app/app/pkg/safego"
 	"thesada.app/app/pkg/service"
 )
 
@@ -158,13 +164,31 @@ func (s *Server) handleAdminDeviceConfigCmd(w http.ResponseWriter, r *http.Reque
 	// its way out, but the proxy must keep running (bounded by
 	// cfg.CLIRequestTimeout, applied inside runCLICmd). WithoutCancel keeps
 	// the request's context values while shedding its cancellation.
-	go s.runCLICmd(context.WithoutCancel(r.Context()), reqID, device, topicPrefix, req.Command, req.Payload, &user.ID)
+	cliCtx := context.WithoutCancel(r.Context())
+	s.goCLI(reqID, "web.cli_cmd", device.DeviceID, func() {
+		s.runCLICmd(cliCtx, reqID, device, topicPrefix, req.Command, req.Payload, &user.ID)
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(cliEnqueueResponse{
 		RequestID:      reqID.String(),
 		TimeoutSeconds: int(s.cfg.CLIRequestTimeout.Seconds()),
 	})
+}
+
+// goCLI runs an enqueued CLI request body on its own goroutine under guardCLI.
+// in: request id, site name, device id, body. out: none.
+func (s *Server) goCLI(reqID uuid.UUID, site, deviceID string, body func()) {
+	go s.guardCLI(reqID, site, deviceID, body)
+}
+
+// guardCLI runs body and fails a still-pending request on a panic, or it
+// would never be pruned. A request body already marked done stays done.
+// in: request id, site name, device id, body. out: none.
+func (s *Server) guardCLI(reqID uuid.UUID, site, deviceID string, body func()) {
+	if safego.Run(site, body, "device", deviceID, "request_id", reqID) {
+		s.cliRequests.failPending(reqID, "internal error, the cause is in the app log")
+	}
 }
 
 // runCLICmd is the goroutine body for an enqueued CLI request. Bounded by
@@ -279,9 +303,9 @@ type cliWriteRequest struct {
 }
 
 // handleAdminDeviceConfigWrite enqueues a chunked async file write. The
-// goroutine runs the full fs.write + fs.append chain bounded by
-// cfg.CLIRequestTimeout per chunk; final summary lands in the store as a
-// synthetic CLIResponse with output lines "<bytes> bytes in <n> chunk(s)".
+// goroutine runs stagedWrite, each step bounded by cfg.CLIRequestTimeout.
+// The final summary lands in the store as a synthetic CLIResponse with output
+// lines "<bytes> bytes in <n> chunk(s)".
 // in: writer, request (JSON body with path + content). out: JSON enqueue ack.
 func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
@@ -314,6 +338,12 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Two writes would share <path>.new and interleave their chunks on the device.
+	if !s.claimDeviceWrite(device.ID) {
+		http.Error(w, "a write to this device is already running", http.StatusConflict)
+		return
+	}
+
 	topicPrefix := s.deviceTopicPrefix(device)
 	user := authmw.CurrentUser(r)
 	slog.Info("admin config write enqueue",
@@ -329,83 +359,224 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 	reqID := s.cliRequests.enqueue()
 	// Detached goroutine - same rationale as runCLICmd above: the async CLI
 	// proxy outlives the HTTP request, so WithoutCancel sheds r.Context()
-	// cancellation while keeping its values; runCLIWrite applies the
-	// CLIRequestTimeout deadline per chunk.
-	go s.runCLIWrite(context.WithoutCancel(r.Context()), reqID, device, topicPrefix, req.Path, req.Content, &user.ID)
+	// cancellation while keeping its values. stagedWrite applies the
+	// CLIRequestTimeout deadline per step.
+	cliCtx := context.WithoutCancel(r.Context())
+	s.goCLI(reqID, "web.cli_write", device.DeviceID, func() {
+		s.runCLIWrite(cliCtx, reqID, device, topicPrefix, req.Path, req.Content, &user.ID)
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(cliEnqueueResponse{
 		RequestID:      reqID.String(),
-		TimeoutSeconds: int(s.cfg.CLIRequestTimeout.Seconds()),
+		TimeoutSeconds: int(s.cfg.CLIRequestTimeout.Seconds()) * writeSteps(len(req.Content)),
 	})
 }
 
-// runCLIWrite is the goroutine body for an enqueued chunked write. Each
-// chunk is bounded by cfg.CLIRequestTimeout independently. On any chunk
-// failure the entry is marked error and the chain stops. On success the
-// snapshot row is upserted and the entry is marked done with a summary.
+// runCLIWrite is the goroutine body for an enqueued chunked write. On
+// success the snapshot row is upserted and the entry is marked done with a
+// summary. On failure the entry carries the stagedWrite status and message.
 // in: request id, device, topic prefix, path, content, user id. out: none (writes to store).
 // parentCtx: request-derived non-cancellable context (see runCLICmd).
+// snapshotUpsertTimeout bounds the snapshot row write that runs while the device write claim is held.
+const snapshotUpsertTimeout = 10 * time.Second
+
 func (s *Server) runCLIWrite(parentCtx context.Context, reqID uuid.UUID, device *service.Device, topicPrefix, path, content string, userID *uuid.UUID) {
-	// Chunk size: leave room for path + newline in the MQTT payload.
-	// Device buffer_in is typically 4096; path overhead ~64 bytes max.
-	const chunkSize = 3900
-
+	defer s.releaseDeviceWrite(device.ID)
 	contentBytes := []byte(content)
-	totalChunks := (len(contentBytes) + chunkSize - 1) / chunkSize
-
-	for i := 0; i < totalChunks; i++ {
-		start := i * chunkSize
-		end := start + chunkSize
-		if end > len(contentBytes) {
-			end = len(contentBytes)
+	if err := stagedWrite(parentCtx, s.mqtt, s.cfg.CLIRequestTimeout, topicPrefix, path, contentBytes); err != nil {
+		// Release before the entry turns terminal, so a write posted on 'done' is not a 409.
+		s.releaseDeviceWrite(device.ID)
+		var f *writeFailure
+		if errors.As(err, &f) {
+			s.cliRequests.markError(reqID, f.status, f.msg)
+		} else {
+			s.cliRequests.markError(reqID, reqStatusError, err.Error())
 		}
-		chunk := contentBytes[start:end]
-
-		cmd := "fs.write"
-		if i > 0 {
-			cmd = "fs.append"
-		}
-
-		payload := make([]byte, 0, len(path)+1+len(chunk))
-		payload = append(payload, []byte(path)...)
-		payload = append(payload, '\n')
-		payload = append(payload, chunk...)
-
-		ctx, cancel := context.WithTimeout(parentCtx, s.cfg.CLIRequestTimeout)
-		resp, err := s.mqtt.CLIRequestRaw(ctx, topicPrefix, cmd, payload)
-		cancel()
-
-		if err != nil {
-			if ctx.Err() == context.DeadlineExceeded {
-				s.cliRequests.markError(reqID, reqStatusTimeout,
-					fmt.Sprintf("chunk %d/%d timed out after %s", i+1, totalChunks, s.cfg.CLIRequestTimeout))
-			} else {
-				s.cliRequests.markError(reqID, reqStatusError,
-					fmt.Sprintf("chunk %d/%d failed: %v", i+1, totalChunks, err))
-			}
-			return
-		}
-		if !resp.OK {
-			s.cliRequests.markError(reqID, reqStatusError,
-				fmt.Sprintf("chunk %d/%d device error: %v", i+1, totalChunks, resp.Output))
-			return
-		}
+		return
 	}
 
 	h := sha256.Sum256(contentBytes)
 	hashHex := hex.EncodeToString(h[:])
-	if err := s.services.DeviceFiles.Upsert(parentCtx, device.TenantID, device.ID, path, content, hashHex, "write", userID); err != nil {
+	uctx, cancel := context.WithTimeout(parentCtx, snapshotUpsertTimeout)
+	if err := s.services.DeviceFiles.Upsert(uctx, device.TenantID, device.ID, path, content, hashHex, "write", userID); err != nil {
 		slog.Error("write device_file upsert failed", "path", path, "err", err)
 	}
+	cancel()
+	s.releaseDeviceWrite(device.ID)
 
 	s.cliRequests.markDone(reqID, &mqtt.CLIResponse{
 		Cmd: "fs.write",
 		OK:  true,
 		Output: []string{
-			fmt.Sprintf("%d bytes in %d chunk(s)", len(contentBytes), totalChunks),
+			fmt.Sprintf("%d bytes in %d chunk(s)", len(contentBytes), writeChunkCount(len(contentBytes))),
 		},
 	})
+}
+
+// claimDeviceWrite marks a write to the device as running. out: false if one already is.
+func (s *Server) claimDeviceWrite(id uuid.UUID) bool {
+	_, busy := s.deviceWrites.LoadOrStore(id, struct{}{})
+	return !busy
+}
+
+// releaseDeviceWrite ends the write claimDeviceWrite started.
+func (s *Server) releaseDeviceWrite(id uuid.UUID) { s.deviceWrites.Delete(id) }
+
+// cliSender is the part of *mqtt.Client that stagedWrite drives.
+type cliSender interface {
+	CLIRequest(ctx context.Context, topicPrefix, command, payload string) (*mqtt.CLIResponse, error)
+	CLIRequestRaw(ctx context.Context, topicPrefix, command string, rawPayload []byte) (*mqtt.CLIResponse, error)
+}
+
+const (
+	// Leaves room for path + newline under the device buffer_in (4096).
+	writeChunkSize = 3900
+	// Not .tmp: the firmware stages its own config saves there.
+	stagedSuffix = ".new"
+)
+
+// writeChunkCount is how many fs.write/fs.append chunks n bytes take.
+func writeChunkCount(n int) int { return (n + writeChunkSize - 1) / writeChunkSize }
+
+// writeSteps is the CLI round trips a write may take: chunks, fs.cat, fs.mv, fs.rm.
+func writeSteps(n int) int { return writeChunkCount(n) + 3 }
+
+// writeFailure is a failed stagedWrite: the request store status plus the UI message.
+type writeFailure struct {
+	status requestStatus
+	msg    string
+}
+
+func (f *writeFailure) Error() string { return f.msg }
+
+// ackBytesRE reads the byte count and path out of the firmware fs.write/fs.append ack.
+var ackBytesRE = regexp.MustCompile(`^(?:Wrote|Appended) (\d+) bytes to (.+)$`)
+
+// stagedWrite sends content to path+".new" in chunks and renames it over path
+// only after every chunk acked its full length, so a failure leaves path as it was.
+// in: ctx, sender, per-step timeout, topic prefix, path, content. out: nil or *writeFailure.
+func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration, topicPrefix, path string, content []byte) error {
+	// The shell splits fs.mv and fs.rm args on blanks and globs * and ?.
+	if strings.ContainsAny(path, " \t\r\n*?") {
+		return &writeFailure{reqStatusError, "path must not contain whitespace, * or ?"}
+	}
+	// FAT rename refuses an existing target, so /sd has no atomic replace.
+	if path == "/sd" || strings.HasPrefix(path, "/sd/") {
+		return &writeFailure{reqStatusError, "files on /sd cannot be replaced atomically, the FAT rename refuses an existing file"}
+	}
+	staged := path + stagedSuffix
+	total := writeChunkCount(len(content))
+
+	step := func(label string, send func(context.Context) (*mqtt.CLIResponse, error)) (*mqtt.CLIResponse, *writeFailure) {
+		ctx, cancel := context.WithTimeout(parentCtx, timeout)
+		defer cancel()
+		resp, err := send(ctx)
+		switch {
+		case err != nil && ctx.Err() == context.DeadlineExceeded:
+			return nil, &writeFailure{reqStatusTimeout, fmt.Sprintf("%s timed out after %s", label, timeout)}
+		case err != nil:
+			return nil, &writeFailure{reqStatusError, fmt.Sprintf("%s failed: %v", label, err)}
+		case !resp.OK:
+			return resp, &writeFailure{reqStatusError, fmt.Sprintf("%s device error: %v", label, resp.Output)}
+		}
+		return resp, nil
+	}
+	// The live file was never touched. Drop the staging copy, best effort.
+	cleanup := func(f *writeFailure) error {
+		resp, _ := step("remove "+staged, func(ctx context.Context) (*mqtt.CLIResponse, error) {
+			return cli.CLIRequest(ctx, topicPrefix, "fs.rm", staged)
+		})
+		if resp == nil || !outputHasPrefix(resp.Output, "Removed ") {
+			f.msg += fmt.Sprintf(" (%s may remain on the device, the next save overwrites it)", staged)
+		}
+		return f
+	}
+
+	for i := 0; i < total; i++ {
+		start := i * writeChunkSize
+		end := min(start+writeChunkSize, len(content))
+		chunk := content[start:end]
+
+		cmd := "fs.write"
+		if i > 0 {
+			cmd = "fs.append"
+		}
+		payload := make([]byte, 0, len(staged)+1+len(chunk))
+		payload = append(payload, staged...)
+		payload = append(payload, '\n')
+		payload = append(payload, chunk...)
+
+		label := fmt.Sprintf("chunk %d/%d", i+1, total)
+		resp, f := step(label, func(ctx context.Context) (*mqtt.CLIResponse, error) {
+			return cli.CLIRequestRaw(ctx, topicPrefix, cmd, payload)
+		})
+		if f != nil {
+			// A first chunk the device refused created nothing to clean up.
+			if i == 0 && resp != nil {
+				return f
+			}
+			return cleanup(f)
+		}
+		if n, ok := ackedBytes(resp.Output, staged); !ok || n != len(chunk) {
+			return cleanup(&writeFailure{reqStatusError,
+				fmt.Sprintf("%s short write: device replied %q for %d bytes", label, strings.Join(resp.Output, " "), len(chunk))})
+		}
+	}
+
+	// The ack counts bytes before f.close, which can still fail on a full LittleFS.
+	label := "size check of " + staged
+	resp, f := step(label, func(ctx context.Context) (*mqtt.CLIResponse, error) {
+		// Offset at the expected end: the reply carries total and no data.
+		return cli.CLIRequest(ctx, topicPrefix, "fs.cat", fmt.Sprintf("%s %d 1", staged, len(content)))
+	})
+	if f != nil {
+		return cleanup(f)
+	}
+	if resp.Total == nil || *resp.Total != len(content) {
+		got := "no size"
+		if resp.Total != nil {
+			got = strconv.Itoa(*resp.Total) + " bytes"
+		}
+		return cleanup(&writeFailure{reqStatusError, fmt.Sprintf("%s: device holds %s, want %d", label, got, len(content))})
+	}
+
+	label = "rename " + staged + " to " + path
+	resp, f = step(label, func(ctx context.Context) (*mqtt.CLIResponse, error) {
+		return cli.CLIRequest(ctx, topicPrefix, "fs.mv", staged+" "+path)
+	})
+	if f != nil {
+		return cleanup(f)
+	}
+	// fs.mv prints its failure with ok:true, so only the Renamed line counts.
+	if !outputHasPrefix(resp.Output, "Renamed ") {
+		return cleanup(&writeFailure{reqStatusError, fmt.Sprintf("%s failed: %s", label, strings.Join(resp.Output, " "))})
+	}
+	return nil
+}
+
+// ackedBytes parses the byte count of an fs.write/fs.append ack for staged.
+// The firmware cuts the ack at 64 bytes, so its path need only prefix staged.
+func ackedBytes(output []string, staged string) (int, bool) {
+	if len(output) == 0 {
+		return 0, false
+	}
+	m := ackBytesRE.FindStringSubmatch(output[0])
+	if m == nil || !strings.HasPrefix(staged, m[2]) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	return n, err == nil
+}
+
+// outputHasPrefix reports whether any output line starts with prefix.
+func outputHasPrefix(output []string, prefix string) bool {
+	for _, l := range output {
+		if strings.HasPrefix(l, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // cliSnapshotRequest is the JSON body for the /admin/devices/{id}/config/snapshot endpoint.

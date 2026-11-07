@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"thesada.app/app/pkg/safego"
 	"thesada.app/app/pkg/service"
 )
 
@@ -120,6 +121,25 @@ func (c *Client) upsertDevice(tenant, device, displayName, fwVersion, hardwareTy
 	return c.services.Devices.Upsert(tenant, device, displayName, fwVersion, hardwareType, topicPrefix)
 }
 
+// errAlertSeverity: the alert is JSON but its severity misses the db CHECK.
+var errAlertSeverity = errors.New("bad or missing severity")
+
+// parseAlert reads the device alert contract: JSON with severity info, warn or crit.
+// in: raw payload. out: severity, code, message, or a decode error or errAlertSeverity.
+func parseAlert(payload []byte) (severity, code, message string, err error) {
+	var alert map[string]interface{}
+	if err := json.Unmarshal(payload, &alert); err != nil {
+		return "", "", "", err
+	}
+	severity, _ = alert["severity"].(string)
+	code, _ = alert["code"].(string)
+	message, _ = alert["message"].(string)
+	if severity != "info" && severity != "warn" && severity != "crit" {
+		return severity, "", "", errAlertSeverity
+	}
+	return severity, code, message, nil
+}
+
 // handleAlert persists a device alert and triggers the notifier fan-out.
 // Accepts only full-shape JSON alerts with a valid severity. Messages that
 // are plain-text or missing fields are dropped at warn level - this is a
@@ -133,23 +153,16 @@ func (c *Client) handleAlert(tenant, device string, payload []byte, retained boo
 		slog.Debug("alert ignored, retained replay", "tenant", tenant, "device", device)
 		return
 	}
-	var alert map[string]interface{}
-	if err := json.Unmarshal(payload, &alert); err != nil {
-		slog.Warn("alert parse failed (non-JSON payload - firmware contract mismatch)",
-			"tenant", tenant, "device", device, "payload", string(payload), "err", err)
-		return
-	}
-
-	severity, _ := alert["severity"].(string)
-	code, _ := alert["code"].(string)
-	message, _ := alert["message"].(string)
-
-	// Severity must match the db CHECK constraint. Anything else is dropped
-	// with a log line so the firmware author can fix the publisher.
-	if severity != "info" && severity != "warn" && severity != "crit" {
+	severity, code, message, err := parseAlert(payload)
+	if errors.Is(err, errAlertSeverity) {
 		slog.Warn("alert dropped: bad or missing severity",
 			"tenant", tenant, "device", device, "severity", severity,
 			"payload", string(payload))
+		return
+	}
+	if err != nil {
+		slog.Warn("alert parse failed (non-JSON payload - firmware contract mismatch)",
+			"tenant", tenant, "device", device, "payload", string(payload), "err", err)
 		return
 	}
 
@@ -184,8 +197,11 @@ func (c *Client) handleAlert(tenant, device string, payload []byte, retained boo
 const (
 	alertInsertRetrySlots = 64
 	alertInsertRetries    = 3
-	alertInsertRetryDelay = 5 * time.Second
 )
+
+// alertInsertRetryDelay is the first retry wait, tripled per attempt. A var
+// so a test can reach the retry body without sleeping.
+var alertInsertRetryDelay = 5 * time.Second
 
 // retryAlertInsert retries a failed alert insert in the background, then
 // dead-letters to the log with the full payload so an operator can replay it.
@@ -203,7 +219,8 @@ func (c *Client) retryAlertInsert(tenant, device string, devicePk uuid.UUID, sev
 	}
 	slog.Warn("alert insert failed, retrying in background",
 		"tenant", tenant, "device", device, "device_pk", devicePk, "err", firstErr)
-	go func() {
+	// A panic loses the alert, so the panic line carries the dead-letter fields.
+	safego.Go("mqtt.alert_insert_retry", func() {
 		defer func() { <-c.insertRetrySlots }()
 		delay := alertInsertRetryDelay
 		for attempt := 1; attempt <= alertInsertRetries; attempt++ {
@@ -228,7 +245,7 @@ func (c *Client) retryAlertInsert(tenant, device string, devicePk uuid.UUID, sev
 		slog.Error("alert.ingest.dead_letter",
 			"reason", "insert retries exhausted", "tenant", tenant, "device", device,
 			"severity", severity, "code", code, "payload", string(payload))
-	}()
+	}, "tenant", tenant, "device", device, "severity", severity, "code", code, "payload", string(payload))
 }
 
 // finishAlert runs the post-insert fan-out: ws hub broadcast + notifier dispatch.
@@ -238,11 +255,11 @@ func (c *Client) finishAlert(tenant, device string, devicePk uuid.UUID, alertID 
 	slog.Debug("alert processed", "tenant", tenant, "device", device, "device_pk", devicePk, "alert_id", alertID)
 
 	if c.notifier != nil {
-		go func() {
+		safego.Go("mqtt.alert_dispatch", func() {
 			if err := c.notifier.Dispatch(context.Background(), tenant, alertID); err != nil {
 				slog.Error("alert dispatch failed", "alert_id", alertID, "err", err)
 			}
-		}()
+		}, "tenant", tenant, "device", device, "alert_id", alertID)
 	}
 }
 
@@ -250,12 +267,17 @@ func (c *Client) finishAlert(tenant, device string, devicePk uuid.UUID, alertID 
 // Accepts either a bare JSON number or an object like {"value": 23.5, "unit": "C"}.
 // in: tenant id, device id, metric name, raw payload, retained flag. out: none (logs on error).
 func (c *Client) handleSensor(tenant, device, metric string, payload []byte, retained bool) {
+	// Retained = a broker replay at subscribe, not a reading. Acting on it
+	// would bump last_seen_at and clear absence for a dead device.
+	if retained {
+		slog.Debug("sensor ignored, retained replay", "tenant", tenant, "device", device, "metric", metric)
+		return
+	}
 	value, text, ok := parseSensorPayload(payload)
 	if !ok {
 		slog.Error("sensor parse failed", "tenant", tenant, "device", device, "metric", metric, "payload", string(payload))
 		return
 	}
-	_ = retained
 
 	devicePk, found, err := c.services.Devices.BumpSeenIfExists(tenant, device)
 	if err != nil {
@@ -332,9 +354,6 @@ func (c *Client) handleInfo(tenant, device, topicPrefix string, payload []byte, 
 		hashMap["/scripts/rules.lua"] = h
 	}
 
-	// Collect paths that need pulling, then process sequentially in one
-	// goroutine. Running concurrent CLIRequests against the same device
-	// causes response cross-contamination (all taps match cli_response).
 	var driftPaths []string
 	for path, deviceHash := range hashMap {
 		if deviceHash == "" {
@@ -349,15 +368,21 @@ func (c *Client) handleInfo(tenant, device, topicPrefix string, payload []byte, 
 		driftPaths = append(driftPaths, path)
 	}
 	if len(driftPaths) > 0 {
-		go func() {
-			for _, p := range driftPaths {
-				c.pullAndSnapshot(tenant, devicePk, topicPrefix, p, "drift", hashMap[p])
-			}
-			// Discover additional scripts not covered by firmware hashes.
-			// fs.ls /scripts returns lines like "  3858  alerts.lua".
-			c.discoverAndSnapshotScripts(tenant, devicePk, topicPrefix)
-		}()
+		c.pullDrift(tenant, devicePk, topicPrefix, driftPaths, hashMap)
 	}
+}
+
+// pullDrift snapshots each drifted path, then any script the firmware hashes
+// do not cover, in order on one guarded goroutine. Concurrent CLIRequests to
+// one device cross-contaminate responses (all taps match cli_response).
+// in: tenant id, device pk, topic prefix, drifted paths, device hashes. out: none.
+func (c *Client) pullDrift(tenant string, devicePk uuid.UUID, topicPrefix string, paths []string, hashes map[string]string) {
+	safego.Go("mqtt.drift_pull", func() {
+		for _, p := range paths {
+			c.pullAndSnapshot(tenant, devicePk, topicPrefix, p, "drift", hashes[p])
+		}
+		c.discoverAndSnapshotScripts(tenant, devicePk, topicPrefix)
+	}, "tenant", tenant, "device_pk", devicePk)
 }
 
 // parseSensorPayload accepts bare number, bare JSON string, JSON object with

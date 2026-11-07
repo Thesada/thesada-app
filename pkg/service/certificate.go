@@ -50,6 +50,10 @@ const (
 // the cert was already finalized, revoked, or superseded by a newer Issue.
 var ErrCertNotPending = errors.New("certificate: no pending row to flip")
 
+// ErrCertCNLive means another device row holds an unrevoked cert with this
+// CN, so issuing would hand a second party the same broker identity.
+var ErrCertCNLive = errors.New("cert issue: CN held by a live cert on another device")
+
 // issueTx supersedes any prior unrevoked cert for the device and inserts
 // the new row in the given status, all on the caller's tx. The revoke-prior
 // guard is what keeps "one live cert per device" an invariant instead of a
@@ -83,6 +87,9 @@ func issueTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, serialHex, cn s
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 RETURNING id`,
 		devicePk, serialHex, cn, notBefore, notAfter, certPEM, status, pubkey).Scan(&id)
+	if violates(err, "device_certificates_live_cn_uniq") {
+		return 0, ErrCertCNLive
+	}
 	return id, err
 }
 

@@ -128,6 +128,45 @@ func ensureDynsecRole(ctx context.Context, w dynsecRoleWriter, name string, acls
 // in: ctx, tenant id, device id, topic prefix, TLS CN.
 // out: failing step name (for the caller's error path), error.
 func (s *Server) provisionDeviceDynsec(ctx context.Context, tenantID, deviceID, topicPrefix, cn string) (string, error) {
+	// Reserve before any broker write, so a second row for the same identity
+	// cannot rewrite the live unit's role. A refused reserve touches nothing.
+	id, err := s.services.Devices.ReserveBrokerIdentity(ctx, tenantID, deviceID)
+	if err != nil {
+		return "broker_identity_reserve", err
+	}
+	if step, err := s.writeDeviceDynsec(ctx, tenantID, deviceID, topicPrefix, cn); err != nil {
+		return step, err
+	}
+	// Identities from before a reassign go once the new one exists. Each stays
+	// recorded until its delete succeeds.
+	device := &service.Device{ID: id.DevicePk, TenantID: tenantID, DeviceID: deviceID}
+	if !s.deleteStaleIdentities(context.WithoutCancel(ctx), device, id.Stale, "re_provision") {
+		s.alertDynsecTeardown(ctx, device, "re_provision")
+	}
+	return "", nil
+}
+
+// deleteStaleIdentities deletes each listed identity and forgets the ones
+// that went. in: ctx, device, identity tenants, calling path. out: false when
+// a client may still be live.
+func (s *Server) deleteStaleIdentities(ctx context.Context, device *service.Device, tenants []string, op string) bool {
+	clean := true
+	for _, t := range tenants {
+		if !s.deleteDynsecIdentity(ctx, t, device.DeviceID, op) {
+			slog.Error("mqtt.dynsec.identity_left", "op", op, "device", device.ID, "identity_tenant", t)
+			clean = false
+			continue
+		}
+		if err := s.services.Devices.ForgetBrokerIdentity(context.WithoutCancel(ctx), device.TenantID, device.ID, t); err != nil {
+			slog.Error("mqtt.dynsec.identity_forget_failed", "op", op, "device", device.ID, "identity_tenant", t, "err", err)
+		}
+	}
+	return clean
+}
+
+// writeDeviceDynsec is the broker half of provisionDeviceDynsec: role, then
+// client. in: ctx, tenant id, device id, topic prefix, TLS CN. out: failing step, error.
+func (s *Server) writeDeviceDynsec(ctx context.Context, tenantID, deviceID, topicPrefix, cn string) (string, error) {
 	roleName := dynsecDeviceRoleName(tenantID, deviceID)
 	// Per-tenant broad-read policy. Default ON for "default" (homelab with
 	// legacy 3-tier topics where dashboards read across all devices), OFF for
@@ -146,23 +185,55 @@ func (s *Server) provisionDeviceDynsec(ctx context.Context, tenantID, deviceID, 
 	return "", nil
 }
 
-// teardownDeviceDynsec removes the device's broker client and role, the
-// inverse of provisionDeviceDynsec. The revoke is already committed, so a
-// failed delete is retried and then raised as an alert: a revoked cert whose
-// client row survives keeps its ACL.
-// in: ctx, device, calling path (for slog). out: false when the client may still be live.
+// teardownDeviceDynsec removes the device's broker clients and roles, the
+// inverse of provisionDeviceDynsec, under every tenant the row's identities
+// were issued in, which a reassign does not change. The revoke is already
+// committed, so a failed delete is retried and then raised as an alert: a
+// revoked cert whose client row survives keeps its ACL. A failed lookup
+// deletes nothing and is raised the same way.
+// in: ctx, device, calling path (for slog). out: false when a client may still be live.
 func (s *Server) teardownDeviceDynsec(ctx context.Context, device *service.Device, op string) bool {
-	cn := service.DeviceCertCN(device.TenantID, device.DeviceID)
-	roleName := dynsecDeviceRoleName(device.TenantID, device.DeviceID)
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	if s.services != nil && s.services.Devices != nil {
+		id, err := s.services.Devices.BrokerIdentityOf(ctx, device)
+		if err != nil {
+			slog.Error("mqtt.dynsec.identity_lookup_failed", "op", op, "device", device.ID, "err", err)
+			s.alertDynsecTeardown(ctx, device, op)
+			return false
+		}
+		tenants := id.Tenants()
+		if len(tenants) == 0 {
+			// Another row holds this tenant's identity for the id: this row has none.
+			slog.Warn("mqtt.dynsec.teardown_skipped", "op", op, "device", device.ID,
+				"reason", "identity held by another device row")
+			return true
+		}
+		if !s.deleteStaleIdentities(ctx, device, tenants, op) {
+			s.alertDynsecTeardown(ctx, device, op)
+			return false
+		}
+		return true
+	}
+	if !s.deleteDynsecIdentity(ctx, device.TenantID, device.DeviceID, op) {
+		s.alertDynsecTeardown(ctx, device, op)
+		return false
+	}
+	return true
+}
+
+// deleteDynsecIdentity deletes the client and role issued under tenant for
+// deviceID, each with its own retry window.
+// in: ctx, issuing tenant, device id, calling path. out: false when the client may still be live.
+func (s *Server) deleteDynsecIdentity(ctx context.Context, tenant, deviceID, op string) bool {
+	cn := service.DeviceCertCN(tenant, deviceID)
+	roleName := dynsecDeviceRoleName(tenant, deviceID)
+	clientCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	clientErr := mqtt.RetryDynsecDelete(ctx, func(ctx context.Context) error {
+	clientErr := mqtt.RetryDynsecDelete(clientCtx, func(ctx context.Context) error {
 		return s.mqtt.DeleteDynsecClient(ctx, cn)
 	})
 	if clientErr != nil {
 		slog.Error("mqtt.dynsec.teardown_failed", "op", op, "step", "delete_client",
-			"device", device.ID, "cn", cn, "err", clientErr)
-		s.alertDynsecTeardown(ctx, device, op)
+			"device_id", deviceID, "cn", cn, "err", clientErr)
 	}
 	// The client attempts can burn the whole deadline. The role delete still
 	// has to run, so it gets its own window.
@@ -173,7 +244,7 @@ func (s *Server) teardownDeviceDynsec(ctx context.Context, device *service.Devic
 	})
 	if roleErr != nil {
 		slog.Error("mqtt.dynsec.teardown_failed", "op", op, "step", "delete_role",
-			"device", device.ID, "role", roleName, "err", roleErr)
+			"device_id", deviceID, "role", roleName, "err", roleErr)
 	}
 	return clientErr == nil
 }
@@ -197,7 +268,8 @@ func (s *Server) alertDynsecTeardown(ctx context.Context, device *service.Device
 	}
 }
 
-// resetDeviceEnrollment clears every device_enrollments row for a device_id.
+// resetDeviceEnrollment clears a device's enrollment rows, keeping a live claim
+// another tenant holds on the same device_id.
 //
 // Revoking tears down the certificate and the broker client but leaves the
 // enrollment row sealed - cert_delivered_at stays set, so the device can never
@@ -207,17 +279,17 @@ func (s *Server) alertDynsecTeardown(ctx context.Context, device *service.Device
 // the revoke itself is already committed and must not be undone by a failure
 // here. It runs free of request cancellation: the caller's commit has already
 // happened, so a browser that disconnects now must not leave the rows sealed.
-// in: ctx, device id, calling path (for slog). out: error when the rows may
+// in: ctx, device, calling path (for slog). out: error when the rows may
 // still be sealed, for the caller to surface.
-func (s *Server) resetDeviceEnrollment(ctx context.Context, deviceID, op string) error {
+func (s *Server) resetDeviceEnrollment(ctx context.Context, device *service.Device, op string) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	n, err := s.services.Enrollments.Reset(ctx, deviceID)
+	n, err := s.services.Enrollments.Reset(ctx, device.DeviceID, device.TenantID)
 	if err != nil {
-		slog.Error("device.enroll.reset_failed", "op", op, "device_id", deviceID, "err", err)
+		slog.Error("device.enroll.reset_failed", "op", op, "device_id", device.DeviceID, "tenant", device.TenantID, "err", err)
 		return err
 	}
-	slog.Info("device.enroll.reset", "op", op, "device_id", deviceID, "rows_deleted", n)
+	slog.Info("device.enroll.reset", "op", op, "device_id", device.DeviceID, "tenant", device.TenantID, "rows_deleted", n)
 	return nil
 }
 
@@ -715,7 +787,7 @@ func (s *Server) handleAdminDevicePairRevoke(w http.ResponseWriter, r *http.Requ
 	}
 	// Re-enrollment gate. Without this the device is revoked AND sealed, and
 	// a success message would be a lie.
-	if err := s.resetDeviceEnrollment(ctx, device.DeviceID, "revoke"); err != nil {
+	if err := s.resetDeviceEnrollment(ctx, device, "revoke"); err != nil {
 		http.Redirect(w, r, flashPairEnrollReset.on("/admin/devices/pair"), http.StatusFound)
 		return
 	}

@@ -1,6 +1,8 @@
 package web
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -66,5 +68,88 @@ func TestRequestStore_PruneKeepsPendingWork(t *testing.T) {
 	}
 	if s.get(uuid.New()) != nil {
 		t.Fatal("unknown id returned an entry")
+	}
+}
+
+// postTestJob posts to startJob with work and returns the recorder.
+func postTestJob(s *Server, work func(ctx context.Context, progress func(int)) string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	s.startJob(rec, httptest.NewRequest(http.MethodPost, "/", nil), 1, "/admin", work)
+	return rec
+}
+
+func TestDrainJobs_CancelsAndWaitsForRunningJobs(t *testing.T) {
+	s := &Server{jobs: newRequestStore[jobResult](time.Minute)}
+	started, finished := make(chan struct{}), make(chan struct{})
+	rec := postTestJob(s, func(ctx context.Context, _ func(int)) string {
+		close(started)
+		<-ctx.Done()
+		time.Sleep(50 * time.Millisecond)
+		close(finished)
+		return "/admin"
+	})
+	if rec.Code != http.StatusFound {
+		t.Fatalf("startJob = %d, want 302", rec.Code)
+	}
+	<-started
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.DrainJobs(ctx); err != nil {
+		t.Fatalf("DrainJobs = %v, want nil", err)
+	}
+	select {
+	case <-finished:
+	default:
+		t.Fatal("DrainJobs returned before the job did")
+	}
+	if rec := postTestJob(s, func(context.Context, func(int)) string { return "" }); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("startJob after drain = %d, want 503", rec.Code)
+	}
+}
+
+func TestDrainJobs_GivesUpAtTheDeadline(t *testing.T) {
+	s := &Server{jobs: newRequestStore[jobResult](time.Minute)}
+	release := make(chan struct{})
+	defer close(release)
+	postTestJob(s, func(context.Context, func(int)) string {
+		<-release
+		return ""
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := s.DrainJobs(ctx); !errors.Is(err, errJobsDrained) {
+		t.Fatalf("DrainJobs = %v, want errJobsDrained", err)
+	}
+}
+
+func TestDrainJobs_NoJobsReturnsAtOnce(t *testing.T) {
+	s := &Server{}
+	if err := s.DrainJobs(context.Background()); err != nil {
+		t.Fatalf("DrainJobs with no jobs = %v", err)
+	}
+}
+
+func TestJobRunner_NearDeadlineOnlyWhileDrainingCloseToIt(t *testing.T) {
+	var j jobRunner
+	if j.nearDeadline(time.Hour) {
+		t.Fatal("near the deadline before any drain")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := j.drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !j.nearDeadline(3 * time.Second) {
+		t.Fatal("1 s left, margin 3 s: want near")
+	}
+	if j.nearDeadline(100 * time.Millisecond) {
+		t.Fatal("1 s left, margin 100 ms: want not near")
+	}
+	var open jobRunner
+	if err := open.drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if open.nearDeadline(time.Hour) {
+		t.Fatal("a drain with no deadline is never near it")
 	}
 }
