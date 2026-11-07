@@ -148,7 +148,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 
 	// Step 5: clear the enrollment rows so the hardware can enroll again. A
 	// deleted device that stays sealed is a device that needs manual SQL.
-	enrollErr := s.resetDeviceEnrollment(ctx, device.DeviceID, "device delete")
+	enrollErr := s.resetDeviceEnrollment(ctx, device, "device delete")
 
 	// Step 6: tombstone. Records the (tenant, device, prefix)
 	// so the MQTT ingest path drops retained replays at next app restart

@@ -121,7 +121,7 @@ func (s *Server) handleDeviceClaim(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// claimIntoHTTP maps a failed ClaimInto. Cap and already-claimed are conflicts.
+// claimIntoHTTP maps a failed ClaimInto. Cap, already-claimed and a held broker identity are conflicts.
 // in: ClaimInto error. out: status, message.
 func claimIntoHTTP(err error) (int, string) {
 	if errors.Is(err, service.ErrQuotaDevices) {
@@ -129,6 +129,9 @@ func claimIntoHTTP(err error) (int, string) {
 	}
 	if errors.Is(err, service.ErrEnrollNotReady) {
 		return http.StatusConflict, "that device has already been claimed"
+	}
+	if errors.Is(err, service.ErrBrokerIdentityTaken) {
+		return http.StatusConflict, "that device is still registered to another tenant"
 	}
 	return http.StatusInternalServerError, "claim failed"
 }

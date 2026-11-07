@@ -228,7 +228,7 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 	for i, p := range resolved {
 		devices[i] = p.device
 	}
-	s.startJob(w, r, len(devices), func(ctx context.Context, progress func(int)) string {
+	s.startJob(w, r, len(devices), flashAdminDeleteFailed.on("/admin/devices"), func(ctx context.Context, progress func(int)) string {
 		return s.bulkDeleteRun(ctx, user, devices, len(tenants), lookupFailed, len(ids), override, progress)
 	})
 }
@@ -240,9 +240,16 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 // override, progress. out: redirect target with registered flash codes.
 func (s *Server) bulkDeleteRun(ctx context.Context, user *service.User, devices []*service.Device, tenants, lookupFailed, total int, override bool, progress func(int)) string {
 	v := s.recoveryPath(ctx)
-	var ok, failed, refused, sealed, brokerLive int
+	var ok, failed, refused, sealed, brokerLive, notStarted int
+	var revokedKept []string
 	failed = lookupFailed
 	for i, device := range devices {
+		if ctx.Err() != nil {
+			failed += len(devices) - i
+			notStarted = len(devices) - i
+			slog.Warn("admin bulk delete: stopped for shutdown", "user", user.Email, "not_started", len(devices)-i)
+			break
+		}
 		progress(i)
 		verdict, brokerClean := s.cascadeDeleteOne(ctx, "bulk delete", user.Email, device, v, override)
 		if !brokerClean {
@@ -252,13 +259,16 @@ func (s *Server) bulkDeleteRun(ctx context.Context, user *service.User, devices 
 		case cascadeRefused:
 			refused++
 			continue
-		case cascadeFailed:
+		case cascadeFailed, cascadeStopped:
 			failed++
+			if verdict == cascadeStopped {
+				revokedKept = append(revokedKept, device.DeviceID)
+			}
 			continue
 		case cascadeOKSealed:
 			sealed++
 		}
-		rowCtx, rowCancel := context.WithTimeout(ctx, auditTimeout)
+		rowCtx, rowCancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
 		s.audit(rowCtx, user, authz.DeviceDelete, service.AuditEntry{
 			TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
 			Detail: deviceDeleteDetail(map[string]any{"device_id": device.DeviceID, "bulk": true},
@@ -268,6 +278,13 @@ func (s *Server) bulkDeleteRun(ctx context.Context, user *service.User, devices 
 		ok++
 	}
 	progress(len(devices))
+	if notStarted > 0 || len(revokedKept) > 0 {
+		s.auditStoppedJob(ctx, user, authz.DeviceDelete, service.AuditEntry{
+			TargetType: "devices",
+			Detail: map[string]any{"ok": ok, "total": total,
+				"not_started": notStarted, "revoked_not_deleted": revokedKept},
+		})
+	}
 	slog.Info("admin bulk delete dispatched",
 		"user", user.Email,
 		"tenants", tenants,
@@ -493,6 +510,20 @@ func preemptiveCertClear(ctx context.Context, s *Server, device *service.Device,
 	}
 }
 
+// auditStoppedJob records a delete job that shutdown stopped, so the audit log
+// the job page points to after a restart says so.
+// in: job ctx, operator, action, entry. out: none.
+func (s *Server) auditStoppedJob(ctx context.Context, user *service.User, action authz.Action, e service.AuditEntry) {
+	e.Detail["stopped_for_shutdown"] = true
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	s.audit(auditCtx, user, action, e)
+}
+
+// stopMargin is the drain time a device's DB delete, reset, tombstone and
+// audit row need. With less left, the cascade stops before the DB delete.
+const stopMargin = 3 * time.Second
+
 // cascadeVerdict is the outcome of one cascadeDeleteOne.
 type cascadeVerdict int
 
@@ -501,14 +532,17 @@ const (
 	cascadeOKSealed                // deleted, but the enrollment rows may still be sealed
 	cascadeRefused                 // recovery gate, nothing touched
 	cascadeFailed                  // revoke or DB delete failed
+	cascadeStopped                 // shutdown landed before the DB delete, row kept for a retry
 )
 
 // cascadeDeleteOne gates, revokes, tears down dynsec and cascades the DB row
-// for one device; everything after the committed revoke ignores request
-// cancellation. Mirrors handleAdminDeviceDelete minus the confirm gate.
-// in: ctx, caller ("bulk delete"|"tenant delete"), operator email, device,
+// for one device. Every step ignores jobCtx's cancellation. A drain about to
+// give up stops it before the DB delete, leaving the revoked row for a retry.
+// Mirrors handleAdminDeviceDelete minus the confirm gate.
+// in: job ctx, caller ("bulk delete"|"tenant delete"), operator email, device,
 // probe verdict, operator override. out: verdict, false when the broker client may still be live.
-func (s *Server) cascadeDeleteOne(ctx context.Context, op, opEmail string, device *service.Device, v recoveryVerdict, override bool) (cascadeVerdict, bool) {
+func (s *Server) cascadeDeleteOne(jobCtx context.Context, op, opEmail string, device *service.Device, v recoveryVerdict, override bool) (cascadeVerdict, bool) {
+	ctx := context.WithoutCancel(jobCtx)
 	reason := strings.ReplaceAll(op, " ", "_")
 	paired := device.PairedAt != nil
 	if !destructiveAllowed(paired, v.usable, override) {
@@ -527,7 +561,6 @@ func (s *Server) cascadeDeleteOne(ctx context.Context, op, opEmail string, devic
 			"user", opEmail, "device", device.ID, "err", err)
 		return cascadeFailed, true
 	}
-	ctx = context.WithoutCancel(ctx)
 	if device.PairedAt != nil {
 		logPairStateChange(device, "paired", "revoked", opEmail, reason)
 	}
@@ -555,6 +588,12 @@ func (s *Server) cascadeDeleteOne(ctx context.Context, op, opEmail string, devic
 			"device", device.ID, "device_id", device.DeviceID)
 	}
 
+	// Past this point a cut leaves no tombstone, and the claim sealed until the boot sweep.
+	if jobCtx.Err() != nil && s.runner.nearDeadline(stopMargin) {
+		slog.Warn(op+": stopped for shutdown before DB delete",
+			"user", opEmail, "device", device.ID, "device_id", device.DeviceID)
+		return cascadeStopped, brokerClean
+	}
 	dbCtx, dbCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer dbCancel()
 	if err := s.services.Devices.DeleteByID(dbCtx, device.TenantID, device.ID); err != nil {
@@ -562,7 +601,7 @@ func (s *Server) cascadeDeleteOne(ctx context.Context, op, opEmail string, devic
 			"user", opEmail, "device", device.ID, "err", err)
 		return cascadeFailed, brokerClean
 	}
-	enrollErr := s.resetDeviceEnrollment(ctx, device.DeviceID, op)
+	enrollErr := s.resetDeviceEnrollment(ctx, device, op)
 
 	tombPrefix := ""
 	if device.MQTTTopicPrefix != nil {

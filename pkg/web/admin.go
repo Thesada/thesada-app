@@ -153,7 +153,7 @@ func (s *Server) handleAdminTenantDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	override := acceptSerialRecovery(r)
-	s.startJob(w, r, len(devices), func(ctx context.Context, progress func(int)) string {
+	s.startJob(w, r, len(devices), flashTenantDeleteFailed.on("/admin/tenants"), func(ctx context.Context, progress func(int)) string {
 		return s.deleteTenant(ctx, user, slug, effective, devices, override, progress)
 	})
 }
@@ -166,8 +166,16 @@ func (s *Server) deleteTenant(ctx context.Context, user *service.User, slug, eff
 	if res.notDeleted > 0 {
 		slog.Warn("admin tenant delete: kept, devices left", "slug", slug,
 			"devices", len(devices), "not_deleted", res.notDeleted)
+		if res.notStarted > 0 || len(res.revokedKept) > 0 {
+			s.auditStoppedJob(ctx, user, authz.TenantDelete, service.AuditEntry{
+				TargetType: "tenant", TargetID: slug, TenantID: slug,
+				Detail: map[string]any{"kept": true, "not_deleted": res.notDeleted,
+					"not_started": res.notStarted, "revoked_not_deleted": res.revokedKept},
+			})
+		}
 		return flashTenantKept.on("/admin/tenants")
 	}
+	ctx = context.WithoutCancel(ctx)
 	if err := s.services.Tenants.Delete(slug, effective, user.TenantID); err != nil {
 		switch {
 		case errors.Is(err, service.ErrTenantProtected):
@@ -205,9 +213,11 @@ const tenantSuperAdminMsg = "That tenant holds a super-admin account, so it cann
 
 // tenantDeviceResult is what the per-device cascade left behind.
 type tenantDeviceResult struct {
-	notDeleted int      // refused by the recovery gate, or revoke or DB delete failed
-	brokerLive []string // device ids whose broker client may still be live
-	sealed     []string // device ids whose enrollment reset failed
+	notDeleted  int      // refused by the recovery gate, revoke or DB delete failed, or stopped
+	notStarted  int      // never started, shutdown came first
+	revokedKept []string // device ids revoked, then stopped before the DB delete
+	brokerLive  []string // device ids whose broker client may still be live
+	sealed      []string // device ids whose enrollment reset failed
 }
 
 // deleteTenantDevices runs cascadeDeleteOne per device, the bulk delete loop
@@ -220,6 +230,12 @@ func (s *Server) deleteTenantDevices(ctx context.Context, user *service.User, de
 	}
 	v := s.recoveryPath(ctx)
 	for i := range devices {
+		if ctx.Err() != nil {
+			res.notDeleted += len(devices) - i
+			res.notStarted = len(devices) - i
+			slog.Warn("admin tenant delete: stopped for shutdown", "user", user.Email, "not_started", len(devices)-i)
+			break
+		}
 		d := &devices[i]
 		progress(i)
 		verdict, brokerClean := s.cascadeDeleteOne(ctx, "tenant delete", user.Email, d, v, override)
@@ -230,10 +246,14 @@ func (s *Server) deleteTenantDevices(ctx context.Context, user *service.User, de
 		case cascadeRefused, cascadeFailed:
 			res.notDeleted++
 			continue
+		case cascadeStopped:
+			res.notDeleted++
+			res.revokedKept = append(res.revokedKept, d.DeviceID)
+			continue
 		case cascadeOKSealed:
 			res.sealed = append(res.sealed, d.DeviceID)
 		}
-		rowCtx, rowCancel := context.WithTimeout(ctx, auditTimeout)
+		rowCtx, rowCancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
 		s.audit(rowCtx, user, authz.DeviceDelete, service.AuditEntry{
 			TargetType: "device", TargetID: d.ID.String(), TenantID: d.TenantID,
 			Detail: deviceDeleteDetail(map[string]any{"device_id": d.DeviceID, "tenant_delete": true},

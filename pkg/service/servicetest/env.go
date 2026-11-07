@@ -38,9 +38,14 @@ func Start(t *testing.T) *Env {
 
 	super, baseURL := StartPostgres(t)
 
-	if err := migrations.Apply(ctx, super); err != nil {
-		t.Fatalf("apply migrations: %v", err)
+	// Migrate as the production migrate role, so a migration that only works
+	// for a superuser (RLS-blind backfills, say) fails here first.
+	BootstrapProdRoles(t, super)
+	migrator := OpenAs(t, baseURL, "thesada_app")
+	if err := migrations.Apply(ctx, migrator); err != nil {
+		t.Fatalf("apply migrations as thesada_app: %v", err)
 	}
+	migrator.Close()
 
 	// 0013 created thesada_app_admin / thesada_app_mqtt as NOLOGIN. Grant LOGIN
 	// + password so the test can open pools as them, and give the app role

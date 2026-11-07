@@ -54,6 +54,47 @@ func StartMosquitto(t *testing.T) string {
 	return fmt.Sprintf("tcp://%s:%s", host, port.Port())
 }
 
+// DynsecAdmin is the admin login StartMosquittoDynsec seeds.
+const (
+	DynsecAdminUser     = "admin"
+	DynsecAdminPassword = "dynsec-test"
+)
+
+// StartMosquittoDynsec brings up mosquitto with the dynamic security plugin
+// and anonymous access off, seeded with DynsecAdminUser, so tests can see
+// which clients and roles the app really leaves on the broker.
+// in: testing.T. out: broker URL.
+func StartMosquittoDynsec(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	script := "mosquitto_ctrl dynsec init /mosquitto/data/dynsec.json " + DynsecAdminUser + " " + DynsecAdminPassword +
+		" >/dev/null && chown mosquitto /mosquitto/data/dynsec.json" +
+		` && printf 'listener 1883\nallow_anonymous false\nplugin /usr/lib/mosquitto_dynamic_security.so\nplugin_opt_config_file /mosquitto/data/dynsec.json\n' > /tmp/m.conf` +
+		" && exec mosquitto -c /tmp/m.conf"
+	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        "eclipse-mosquitto:2",
+			ExposedPorts: []string{"1883/tcp"},
+			Entrypoint:   []string{"sh", "-c", script},
+			WaitingFor:   wait.ForListeningPort("1883/tcp"),
+		},
+		Started: true,
+	})
+	if err != nil {
+		t.Fatalf("start mosquitto with dynsec: %v", err)
+	}
+	t.Cleanup(func() { _ = ctr.Terminate(context.Background()) })
+	host, err := ctr.Host(ctx)
+	if err != nil {
+		t.Fatalf("mosquitto host: %v", err)
+	}
+	port, err := ctr.MappedPort(ctx, "1883/tcp")
+	if err != nil {
+		t.Fatalf("mosquitto port: %v", err)
+	}
+	return fmt.Sprintf("tcp://%s:%s", host, port.Port())
+}
+
 // Response is one cli_response message a Handler wants published. Fields
 // mirror the firmware's CLIResponse JSON; zero-value fields are omitted.
 type Response struct {

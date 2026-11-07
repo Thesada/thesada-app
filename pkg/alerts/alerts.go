@@ -218,6 +218,20 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 		}
 	}
 
+	// A panic while rendering or sending counts as an attempt and keeps the
+	// channels that already sent, so the row backs off and can go dead.
+	var emailOK, tgOK, hookOK bool
+	sending := true
+	defer func() {
+		if !sending {
+			return
+		}
+		if rec := recover(); rec != nil {
+			n.recordPanic(ctx, tenantID, alertID, row, deliveryFlags{email: emailOK, telegram: tgOK})
+			panic(rec)
+		}
+	}()
+
 	subject, body, htmlBody := renderAlert(row)
 	var hookBody []byte
 	if needHook {
@@ -227,7 +241,6 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 			return fmt.Errorf("webhook payload: %w", err)
 		}
 	}
-	var emailOK, tgOK, hookOK bool
 	for _, r := range recipients {
 		switch r.channel {
 		case "email":
@@ -274,6 +287,7 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 			sentHooks[r.subID] = struct{}{}
 		}
 	}
+	sending = false
 	hookTargets, hookDoneN := 0, 0
 	for _, r := range recipients {
 		if r.channel != "webhook" {
@@ -321,6 +335,26 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 			"next_attempt_at", next.Format(time.RFC3339))
 	}
 	return nil
+}
+
+// recordPanic counts a dispatch that panicked mid-send as one failed attempt:
+// pending with backoff, or dead once the budget is spent.
+// in: ctx, tenant id, alert id, loaded row, channels sent before it. out: none.
+func (n *Notifier) recordPanic(ctx context.Context, tenantID string, alertID int64, row *alertRow, sent deliveryFlags) {
+	attempts := row.attempts + 1
+	if attempts >= n.maxAttempts() {
+		if n.recordOutcome(ctx, tenantID, alertID, sent, "dead", attempts, time.Time{}) == nil {
+			slog.Error("alert.delivery.state_change", "from", "pending", "to", "dead",
+				"alert_id", alertID, "attempts", attempts, "reason", "panic")
+		}
+		return
+	}
+	next := time.Now().Add(retryBackoff(n.retryBase(), attempts))
+	if n.recordOutcome(ctx, tenantID, alertID, sent, "pending", attempts, next) == nil {
+		slog.Warn("alert.delivery.retry_scheduled",
+			"alert_id", alertID, "attempt", attempts, "max", n.maxAttempts(),
+			"next_attempt_at", next.Format(time.RFC3339), "reason", "panic")
+	}
 }
 
 // maxAttempts returns the configured dispatch budget with a sane floor.

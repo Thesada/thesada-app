@@ -18,6 +18,7 @@ import (
 	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/ratelimit"
+	"thesada.app/app/pkg/safego"
 	"thesada.app/app/pkg/service"
 	"thesada.app/app/pkg/ws"
 )
@@ -198,7 +199,7 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 
 	// Writer goroutine: drains out channel onto the websocket. Closes when
 	// ctx cancels or a write fails; cancel releases a reader blocked on send.
-	go func() {
+	safego.Go("web.mqtt_shell_writer", func() {
 		defer func() { _ = conn.Close() }()
 		defer cancel()
 		ticker := time.NewTicker(15 * time.Second)
@@ -236,7 +237,7 @@ func (s *Server) handleAdminMqttWS(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-	}()
+	}, "user", user.Email)
 
 	// Per-socket publish limiter: 20 publishes / 10s. Keyed by remote
 	// addr so a browser that opens two tabs gets two independent buckets.

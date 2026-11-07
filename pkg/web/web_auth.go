@@ -9,6 +9,7 @@ import (
 
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/httpsec"
+	"thesada.app/app/pkg/safego"
 	"thesada.app/app/pkg/service"
 )
 
@@ -187,7 +188,7 @@ func (s *Server) notifyAdminWaitlist(email, note, ip string) {
 	if !s.waitlistNotify.Allow(key) {
 		return
 	}
-	go func() {
+	safego.Go("web.waitlist_notify", func() {
 		body := "New waitlist signup on thesada-app\r\n\r\n" +
 			"email: " + email + "\r\n"
 		if note != "" {
@@ -200,7 +201,7 @@ func (s *Server) notifyAdminWaitlist(email, note, ip string) {
 		if err := s.mailer.Send(s.cfg.AdminEmail, "thesada: new waitlist signup - "+email, body); err != nil {
 			slog.Warn("waitlist admin notify send failed", "admin", s.cfg.AdminEmail, "err", err)
 		}
-	}()
+	})
 }
 
 // handleForgotForm renders the "enter your email" password-reset request page.

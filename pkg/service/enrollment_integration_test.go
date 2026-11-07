@@ -14,12 +14,14 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
+	"thesada.app/app/pkg/db"
 	"thesada.app/app/pkg/service"
 	"thesada.app/app/pkg/service/servicetest"
 )
@@ -652,7 +654,7 @@ func TestEnrollmentResetStartsAFreshCycle(t *testing.T) {
 
 	// The revoke paths call this. It clears every row under the id, squatter
 	// litter included.
-	n, err := enroll.Reset(ctx, enrollDeviceID)
+	n, err := enroll.Reset(ctx, enrollDeviceID, tenant)
 	if err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
@@ -670,8 +672,225 @@ func TestEnrollmentResetStartsAFreshCycle(t *testing.T) {
 
 	// Reset on an id with no rows is a no-op, not an error - the revoke paths
 	// call it for every device, enrolled or not.
-	if n, err := enroll.Reset(ctx, "thesada-000000000000"); err != nil || n != 0 {
+	if n, err := enroll.Reset(ctx, "thesada-000000000000", tenant); err != nil || n != 0 {
 		t.Fatalf("Reset of an unknown id = %d, %v; want 0, nil", n, err)
+	}
+}
+
+// seedEnrollRows inserts one row per (pubkey letter, tenant, sealed) for
+// deviceID. An empty tenant is an unclaimed row.
+func seedEnrollRows(t *testing.T, env *servicetest.Env, deviceID string, rows ...enrollSeed) {
+	t.Helper()
+	for _, r := range rows {
+		var tenant any
+		if r.tenant != "" {
+			tenant = r.tenant
+		}
+		if _, err := env.Super.Exec(context.Background(),
+			`INSERT INTO device_enrollments (device_id, pubkey_hex, claim_token_hash, verified_at,
+			                                claimed_by_tenant, claimed_at, cert_delivered_at)
+			 VALUES ($1, repeat($2, 64), 'x', now(), $3::text,
+			         CASE WHEN $3::text IS NULL THEN NULL ELSE now() END,
+			         CASE WHEN $4 THEN now() END)`,
+			deviceID, r.key, tenant, r.sealed); err != nil {
+			t.Fatalf("seed enrollment row %s: %v", r.key, err)
+		}
+	}
+}
+
+// enrollSeed is one seeded enrollment row.
+type enrollSeed struct {
+	key    string // one hex digit, repeated into the pubkey
+	tenant string
+	sealed bool
+}
+
+// enrollKeysLeft lists the pubkey digits still stored for deviceID, sorted.
+func enrollKeysLeft(t *testing.T, env *servicetest.Env, deviceID string) string {
+	t.Helper()
+	var keys string
+	if err := env.Super.QueryRow(context.Background(),
+		`SELECT coalesce(string_agg(left(pubkey_hex, 1), '' ORDER BY pubkey_hex), '')
+		   FROM device_enrollments WHERE device_id = $1`, deviceID).Scan(&keys); err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	return keys
+}
+
+// seedBackedDevice gives tenant a device row for deviceID holding a cert for
+// the key letter, which is what backs a sealed claim. An empty key seeds the
+// row with no cert (a phantom).
+func seedBackedDevice(t *testing.T, env *servicetest.Env, tenant, deviceID, key string) {
+	t.Helper()
+	pk, err := env.Services.Devices.Upsert(tenant, deviceID, "", "", "", "")
+	if err != nil {
+		t.Fatalf("seed device %s/%s: %v", tenant, deviceID, err)
+	}
+	if key == "" {
+		return
+	}
+	now := time.Now()
+	if err := env.Services.Certificates.IssueWithIdentity(context.Background(), tenant, pk, "1"+key, "cn-"+key,
+		now.Add(-time.Hour), now.Add(time.Hour), "pem", strings.Repeat(key, 64)); err != nil {
+		t.Fatalf("issue cert for %s: %v", key, err)
+	}
+}
+
+// seedLegacyBackedDevice gives tenant a device row for deviceID whose live cert
+// has no stored key, as certs issued before 0031 or by admin pairing do.
+func seedLegacyBackedDevice(t *testing.T, env *servicetest.Env, tenant, deviceID string) {
+	t.Helper()
+	pk, err := env.Services.Devices.Upsert(tenant, deviceID, "", "", "", "")
+	if err != nil {
+		t.Fatalf("seed device %s/%s: %v", tenant, deviceID, err)
+	}
+	now := time.Now()
+	if err := env.Services.Certificates.Issue(context.Background(), tenant, pk, "9"+tenant[len(tenant)-1:], "cn-legacy-"+tenant,
+		now.Add(-time.Hour), now.Add(time.Hour), "pem"); err != nil {
+		t.Fatalf("issue legacy cert for %s: %v", tenant, err)
+	}
+}
+
+// TestEnrollmentReset_KeepsAnotherTenantsClaim - device_id is unique per
+// tenant only, so an admin delete in one tenant must not clear a claim another
+// tenant backs. Orphan claims, pending or sealed, go.
+func TestEnrollmentReset_KeepsAnotherTenantsClaim(t *testing.T) {
+	env := servicetest.Start(t)
+	enroll := env.Services.Enrollments
+	ctx := context.Background()
+
+	const deleting, holder, left, phantom, legacy = "enroll-deleting", "enroll-holding", "enroll-left", "enroll-phantom", "enroll-legacy1"
+	for _, tn := range []string{deleting, holder, left, phantom, legacy} {
+		env.SeedTenant(t, tn)
+	}
+	seedBackedDevice(t, env, holder, enrollDeviceID, "b")
+	seedBackedDevice(t, env, phantom, enrollDeviceID, "")
+	seedLegacyBackedDevice(t, env, legacy, enrollDeviceID)
+	seedEnrollRows(t, env, enrollDeviceID,
+		enrollSeed{"a", deleting, true}, // own claim: goes
+		enrollSeed{"b", holder, true},   // sealed, backed by a cert for its key: stays
+		enrollSeed{"c", left, true},     // sealed, no device row: goes
+		enrollSeed{"d", left, false},    // pending, no device row: goes
+		enrollSeed{"e", "", false},      // squatter: goes
+		enrollSeed{"f", phantom, true},  // sealed, device row without its key: goes
+		enrollSeed{"7", holder, false},  // pending, device row there: stays
+		enrollSeed{"8", legacy, true},   // sealed, live cert with no stored key: stays
+	)
+
+	n, err := enroll.Reset(ctx, enrollDeviceID, deleting)
+	if err != nil || n != 5 {
+		t.Fatalf("Reset = %d, %v, want 5 rows removed", n, err)
+	}
+	if got := enrollKeysLeft(t, env, enrollDeviceID); got != "78b" {
+		t.Fatalf("rows left = %q, want the three backed claims (78b)", got)
+	}
+}
+
+// misconfiguredEnrollments is an EnrollmentService whose admin pool is the
+// tenant-scoped role, as a deploy that lost THESADA_DATABASE_URL_ADMIN would be.
+func misconfiguredEnrollments(t *testing.T, env *servicetest.Env) *service.EnrollmentService {
+	t.Helper()
+	svc, err := service.New(env.Cfg, db.Pools{App: env.Pools.App, Admin: env.Pools.App})
+	if err != nil {
+		t.Fatalf("build services: %v", err)
+	}
+	return svc.Enrollments
+}
+
+// TestEnrollmentReset_RLSPoolKeepsOrphans - under RLS every claim reads as an
+// orphan, so Reset clears only its own and unclaimed rows.
+func TestEnrollmentReset_RLSPoolKeepsOrphans(t *testing.T) {
+	env := servicetest.Start(t)
+	const deleting, left = "enroll-rls-deleting", "enroll-rls-left"
+	env.SeedTenant(t, deleting)
+	env.SeedTenant(t, left)
+	seedEnrollRows(t, env, enrollDeviceID,
+		enrollSeed{"a", deleting, true},
+		enrollSeed{"c", left, true},
+		enrollSeed{"e", "", false},
+	)
+	n, err := misconfiguredEnrollments(t, env).Reset(context.Background(), enrollDeviceID, deleting)
+	if err != nil || n != 2 {
+		t.Fatalf("Reset = %d, %v, want 2 rows removed", n, err)
+	}
+	if got := enrollKeysLeft(t, env, enrollDeviceID); got != "c" {
+		t.Fatalf("rows left = %q, want the other tenant's claim (c)", got)
+	}
+}
+
+// TestEnrollmentSweepOrphanClaims - a delete cut off after its device row went,
+// or a reassign, leaves a claim nothing backs. The boot sweep clears exactly those.
+func TestEnrollmentSweepOrphanClaims(t *testing.T) {
+	env := servicetest.Start(t)
+	enroll := env.Services.Enrollments
+	ctx := context.Background()
+
+	const live, gone, legacy = "enroll-sweep-live", "enroll-sweep-gone", "enroll-legacy2"
+	env.SeedTenant(t, live)
+	env.SeedTenant(t, gone)
+	env.SeedTenant(t, legacy)
+	seedBackedDevice(t, env, live, enrollDeviceID, "a")
+	seedLegacyBackedDevice(t, env, legacy, enrollDeviceID)
+	seedEnrollRows(t, env, enrollDeviceID,
+		enrollSeed{"a", live, true},   // backed: stays
+		enrollSeed{"b", gone, true},   // sealed, no device row: goes
+		enrollSeed{"c", gone, false},  // pending, no device row: goes
+		enrollSeed{"d", "", false},    // unclaimed: Prune's job, stays
+		enrollSeed{"e", live, true},   // sealed, device row has no cert for this key: goes
+		enrollSeed{"f", live, false},  // pending, device row there: stays
+		enrollSeed{"8", legacy, true}, // sealed, live cert with no stored key: stays
+	)
+
+	n, err := enroll.SweepOrphanClaims(ctx)
+	if err != nil || n != 3 {
+		t.Fatalf("SweepOrphanClaims = %d, %v, want 3 rows removed", n, err)
+	}
+	if got := enrollKeysLeft(t, env, enrollDeviceID); got != "8adf" {
+		t.Fatalf("rows left = %q, want 8adf", got)
+	}
+	if n, err := enroll.SweepOrphanClaims(ctx); err != nil || n != 0 {
+		t.Fatalf("second sweep = %d, %v, want 0", n, err)
+	}
+}
+
+// TestEnrollmentSweepOrphanClaims_RefusesAnRLSPool - a pool that does not
+// bypass RLS sees no device rows, so the sweep must refuse, not mass-delete.
+func TestEnrollmentSweepOrphanClaims_RefusesAnRLSPool(t *testing.T) {
+	env := servicetest.Start(t)
+	const live = "enroll-sweep-rls"
+	env.SeedTenant(t, live)
+	seedBackedDevice(t, env, live, enrollDeviceID, "a")
+	seedEnrollRows(t, env, enrollDeviceID, enrollSeed{"a", live, true})
+	if _, err := misconfiguredEnrollments(t, env).SweepOrphanClaims(context.Background()); !errors.Is(err, service.ErrEnrollPoolSeesOneTenant) {
+		t.Fatalf("sweep on an RLS pool = %v, want ErrEnrollPoolSeesOneTenant", err)
+	}
+	if got := enrollKeysLeft(t, env, enrollDeviceID); got != "a" {
+		t.Fatalf("rows left = %q, want a", got)
+	}
+}
+
+// TestEnrollmentSweepOrphanClaims_GivesUpOnAHeldLock - boot must not wait on a
+// lock some other session holds.
+func TestEnrollmentSweepOrphanClaims_GivesUpOnAHeldLock(t *testing.T) {
+	env := servicetest.Start(t)
+	ctx := context.Background()
+	const gone = "enroll-sweep-lock"
+	env.SeedTenant(t, gone)
+	seedEnrollRows(t, env, enrollDeviceID, enrollSeed{"b", gone, true})
+	hold, err := env.Super.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hold.Rollback(ctx) }()
+	if _, err := hold.Exec(ctx, `SELECT 1 FROM device_enrollments FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, err := env.Services.Enrollments.SweepOrphanClaims(ctx); err == nil {
+		t.Fatal("sweep under a held lock succeeded, want a lock timeout")
+	}
+	if d := time.Since(start); d > 15*time.Second {
+		t.Fatalf("sweep waited %v on the held lock", d)
 	}
 }
 

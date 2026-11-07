@@ -319,3 +319,265 @@ func TestAdminTenantDelete_KeepsSuperAdminTenants(t *testing.T) {
 		}
 	})
 }
+
+// seedOtherClaim gives a second tenant its own device row, a cert for its key
+// and a sealed claim on tdDevID, which device_id's per-tenant uniqueness allows.
+// in: t, fixture. out: the other tenant.
+func seedOtherClaim(t *testing.T, f tdFixture) string {
+	t.Helper()
+	const other = "td-other"
+	f.env.SeedTenant(t, other)
+	pk, err := f.env.Services.Devices.Upsert(other, tdDevID, "", "", "", "thesada/"+other+"/"+tdDevID)
+	if err != nil {
+		t.Fatalf("seed other device: %v", err)
+	}
+	now := time.Now()
+	if err := f.env.Services.Certificates.IssueWithIdentity(context.Background(), other, pk, "ef01", "cn-other",
+		now.Add(-time.Hour), now.Add(time.Hour), "pem", strings.Repeat("f", 64)); err != nil {
+		t.Fatalf("issue other cert: %v", err)
+	}
+	if _, err := f.env.Super.Exec(context.Background(),
+		`INSERT INTO device_enrollments (device_id, pubkey_hex, claim_token_hash, verified_at, claimed_by_tenant, claimed_at, cert_delivered_at)
+		 VALUES ($1, $2, 'z', now(), $3, now(), now())`, tdDevID, strings.Repeat("f", 64), other); err != nil {
+		t.Fatalf("seed other claim: %v", err)
+	}
+	return other
+}
+
+// Every admin path that resets enrollment clears the acting device's rows and
+// keeps the claim another tenant holds on the same device_id.
+func TestAdminDelete_KeepsAnotherTenantsClaim(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(f tdFixture)
+	}{
+		{"single", func(f tdFixture) {
+			serveAsOperator(t, f, http.MethodPost, f.s.handleAdminDeviceDelete, "id", f.device.String(), url.Values{
+				"confirm_device_id": {tdDevID}, "accept_serial_recovery": {"true"}})
+		}},
+		{"bulk", func(f tdFixture) {
+			followJob(t, f, serveAsOperator(t, f, http.MethodPost, f.s.handleAdminDevicesBulk, "", "", url.Values{
+				"action": {"delete"}, "device_ids": {f.device.String()}, "accept_serial_recovery": {"true"}}))
+		}},
+		{"tenant", func(f tdFixture) { postTenantDelete(t, f, url.Values{"accept_serial_recovery": {"true"}}) }},
+		{"revoke", func(f tdFixture) {
+			serveAsOperator(t, f, http.MethodPost, f.s.handleAdminDevicePairRevoke, "id", f.device.String(), url.Values{
+				"accept_serial_recovery": {"true"}})
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := seedTenantDelete(t)
+			other := seedOtherClaim(t, f)
+			c.run(f)
+			if n := count(t, f, `SELECT count(*) FROM device_enrollments
+				WHERE device_id = $1 AND claimed_by_tenant IS DISTINCT FROM $2`, tdDevID, other); n != 0 {
+				t.Fatalf("acting tenant's enrollment rows left = %d, want 0", n)
+			}
+			if n := count(t, f, `SELECT count(*) FROM device_enrollments
+				WHERE device_id = $1 AND claimed_by_tenant = $2`, tdDevID, other); n != 1 {
+				t.Fatalf("other tenant's claim rows = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// A claim the reassign left on the old tenant is the device's own, sealed or
+// pending. Deleting or revoking the device in its new tenant clears it.
+func TestAdminDelete_ClearsClaimLeftByReassign(t *testing.T) {
+	paths := []struct {
+		name string
+		run  func(f tdFixture)
+	}{
+		{"delete", func(f tdFixture) {
+			serveAsOperator(t, f, http.MethodPost, f.s.handleAdminDeviceDelete, "id", f.device.String(), url.Values{
+				"confirm_device_id": {tdDevID}, "accept_serial_recovery": {"true"}})
+		}},
+		{"revoke", func(f tdFixture) {
+			serveAsOperator(t, f, http.MethodPost, f.s.handleAdminDevicePairRevoke, "id", f.device.String(), url.Values{
+				"accept_serial_recovery": {"true"}})
+		}},
+	}
+	for _, sealed := range []bool{true, false} {
+		for _, p := range paths {
+			name := p.name + "_pending"
+			if sealed {
+				name = p.name + "_sealed"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := seedTenantDelete(t)
+				if !sealed {
+					if _, err := f.env.Super.Exec(context.Background(),
+						`UPDATE device_enrollments SET cert_delivered_at = NULL WHERE device_id = $1`, tdDevID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := f.env.Services.Devices.Reassign(context.Background(), f.device, tdHome); err != nil {
+					t.Fatalf("reassign: %v", err)
+				}
+				p.run(f)
+				if n := count(t, f, `SELECT count(*) FROM device_enrollments WHERE device_id = $1`, tdDevID); n != 0 {
+					t.Fatalf("enrollment rows left = %d, want 0", n)
+				}
+			})
+		}
+	}
+}
+
+const (
+	td2DevID  = "thesada-0a0b0c0d0e10"
+	td2Pub    = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	td2Serial = "cd34"
+)
+
+// seedSecondDevice adds a second paired, sealed device to tdGone.
+// in: t, fixture. out: none.
+func seedSecondDevice(t *testing.T, f tdFixture) {
+	t.Helper()
+	ctx := context.Background()
+	pk, err := f.env.Services.Devices.Upsert(tdGone, td2DevID, "", "", "", "thesada/"+tdGone+"/"+td2DevID)
+	if err != nil {
+		t.Fatalf("seed second device: %v", err)
+	}
+	now := time.Now()
+	if err := f.env.Services.Certificates.IssueWithIdentity(ctx, tdGone, pk, td2Serial, "cn2",
+		now.Add(-time.Hour), now.Add(time.Hour), "pem", td2Pub); err != nil {
+		t.Fatalf("issue second cert: %v", err)
+	}
+	if _, err := f.env.Super.Exec(ctx,
+		`INSERT INTO device_enrollments (device_id, pubkey_hex, claim_token_hash, verified_at, claimed_by_tenant, claimed_at, cert_delivered_at)
+		 VALUES ($1, $2, 'w', now(), $3, now(), now())`, td2DevID, td2Pub, tdGone); err != nil {
+		t.Fatalf("seed second enrollment: %v", err)
+	}
+}
+
+// shutdownRun is one delete job body, run on ctx with a progress hook.
+type shutdownRun struct {
+	name string
+	run  func(t *testing.T, f tdFixture, ctx context.Context, devices []service.Device, progress func(int))
+}
+
+// shutdownRuns drives the tenant and bulk job bodies and checks each one's
+// own outcome: the tenant is kept, or the bulk flash is the mixed one.
+var shutdownRuns = []shutdownRun{
+	{"tenant", func(t *testing.T, f tdFixture, ctx context.Context, devices []service.Device, progress func(int)) {
+		loc := f.s.deleteTenant(ctx, &service.User{Email: "op@example.com"}, tdGone, tdHome, devices, true, progress)
+		if !strings.Contains(loc, flashTenantKept.query()) {
+			t.Errorf("stopped tenant job sent the operator to %q, want kept", loc)
+		}
+	}},
+	{"bulk", func(t *testing.T, f tdFixture, ctx context.Context, devices []service.Device, progress func(int)) {
+		loc := f.s.bulkDeleteRun(ctx, &service.User{Email: "op@example.com"},
+			[]*service.Device{&devices[0], &devices[1]}, 1, 0, 2, true, progress)
+		if !strings.HasPrefix(loc, flashAdminBulkDeletedMix.on("/admin/devices")) {
+			t.Errorf("stopped bulk job sent the operator to %q, want the mixed flash", loc)
+		}
+	}},
+}
+
+// assertUntouched checks a device the job never reached: row, live cert and
+// sealed enrollment all still there.
+func assertUntouched(t *testing.T, f tdFixture, d service.Device) {
+	t.Helper()
+	if n := count(t, f, `SELECT count(*) FROM device_certificates WHERE device_pk = $1 AND NOT revoked`, d.ID); n != 1 {
+		t.Errorf("%s live certs = %d, want 1", d.DeviceID, n)
+	}
+	if n := count(t, f, `SELECT count(*) FROM device_enrollments
+		WHERE device_id = $1 AND cert_delivered_at IS NOT NULL`, d.DeviceID); n != 1 {
+		t.Errorf("%s sealed enrollment rows = %d, want 1", d.DeviceID, n)
+	}
+}
+
+// stoppedAudit counts stopped-for-shutdown rows that report notStarted
+// devices and name revokedKept (empty: none named).
+func stoppedAudit(t *testing.T, f tdFixture, notStarted int, revokedKept string) int {
+	t.Helper()
+	if revokedKept == "" {
+		return count(t, f, `SELECT count(*) FROM admin_audit
+			WHERE detail->>'stopped_for_shutdown' = 'true' AND (detail->>'not_started')::int = $1
+			  AND jsonb_typeof(detail->'revoked_not_deleted') = 'null'`, notStarted)
+	}
+	return count(t, f, `SELECT count(*) FROM admin_audit
+		WHERE detail->>'stopped_for_shutdown' = 'true' AND (detail->>'not_started')::int = $1
+		  AND detail->'revoked_not_deleted' = jsonb_build_array($2::text)`, notStarted, revokedKept)
+}
+
+// tenantDevices lists tdGone's two devices in job order.
+func tenantDevices(t *testing.T, f tdFixture) []service.Device {
+	t.Helper()
+	devices, err := f.env.Services.Devices.ListByTenant(tdGone)
+	if err != nil || len(devices) != 2 {
+		t.Fatalf("list devices = %d, %v, want 2", len(devices), err)
+	}
+	return devices
+}
+
+// A drain about to give up stops the device in progress before its DB delete:
+// the row stays, revoked, for a retry, and the stop audit row names it.
+func TestAdminDeleteJobs_ShutdownNearTheDeadlineStopsBeforeTheDBDelete(t *testing.T) {
+	for _, r := range shutdownRuns {
+		t.Run(r.name, func(t *testing.T) {
+			f := seedTenantDelete(t)
+			seedSecondDevice(t, f)
+			devices := tenantDevices(t, f)
+			drainCtx, drainCancel := context.WithTimeout(context.Background(), time.Second)
+			defer drainCancel()
+			if err := f.s.DrainJobs(drainCtx); err != nil {
+				t.Fatalf("drain with no jobs: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r.run(t, f, ctx, devices, func(done int) {
+				if done == 0 {
+					cancel()
+				}
+			})
+			if n := count(t, f, `SELECT count(*) FROM devices WHERE tenant_id = $1`, tdGone); n != 2 {
+				t.Fatalf("devices left = %d, want 2", n)
+			}
+			if n := count(t, f, `SELECT count(*) FROM device_certificates WHERE device_pk = $1 AND NOT revoked`, devices[0].ID); n != 0 {
+				t.Errorf("stopped device still has %d live certs, want it revoked", n)
+			}
+			assertUntouched(t, f, devices[1])
+			if n := stoppedAudit(t, f, 1, devices[0].DeviceID); n != 1 {
+				t.Errorf("stop audit rows naming %s = %d, want 1", devices[0].DeviceID, n)
+			}
+		})
+	}
+}
+
+// Shutdown with time left lets the device in progress finish: delete,
+// enrollment reset, tombstone and audit row. The next device is never started.
+func TestAdminDeleteJobs_ShutdownFinishesTheDeviceInProgress(t *testing.T) {
+	for _, r := range shutdownRuns {
+		t.Run(r.name, func(t *testing.T) {
+			f := seedTenantDelete(t)
+			seedSecondDevice(t, f)
+			devices := tenantDevices(t, f)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r.run(t, f, ctx, devices, func(done int) {
+				if done == 0 {
+					cancel()
+				}
+			})
+			if n := count(t, f, `SELECT count(*) FROM devices WHERE id = $1`, devices[0].ID); n != 0 {
+				t.Fatal("device in progress survived")
+			}
+			if n := count(t, f, `SELECT count(*) FROM device_enrollments WHERE device_id = $1`, devices[0].DeviceID); n != 0 {
+				t.Errorf("finished device enrollment rows = %d, want 0", n)
+			}
+			if n := count(t, f, `SELECT count(*) FROM deleted_device_tombstones WHERE device_id = $1`, devices[0].DeviceID); n != 1 {
+				t.Errorf("finished device tombstones = %d, want 1", n)
+			}
+			if n := count(t, f, `SELECT count(*) FROM admin_audit WHERE action = 'device.delete' AND target_id = $1`,
+				devices[0].ID.String()); n != 1 {
+				t.Errorf("finished device.delete audit rows = %d, want 1", n)
+			}
+			assertUntouched(t, f, devices[1])
+			if n := stoppedAudit(t, f, 1, ""); n != 1 {
+				t.Errorf("stop audit rows with one not started = %d, want 1", n)
+			}
+		})
+	}
+}

@@ -8,7 +8,7 @@ var ThesadaRules = (function () {
     "",
     'Log.info("rules.lua loaded")',
     "",
-    'local prefix = Config.get("mqtt.topic_prefix")',
+    'local prefix = Config.get("mqtt.topic_prefix") or "thesada/node"',
     'local unit   = Config.get("temperature.unit") or "C"',
     "",
     "local sustain = {}",
@@ -30,13 +30,39 @@ var ThesadaRules = (function () {
     "  cooldown[key] = Node.uptime()",
     "end",
     "",
+    "-- Method calls only: string, table and math are not tables in the device Lua.",
+    "-- 255 B fits the device MQTT offline queue slot.",
+    "local ALERT_MAX = 255",
+    "local CODE_MAX = 64",
+    "",
+    "-- JSON string body of s in at most max bytes, whole characters. NUL is dropped.",
+    "local function json_body(s, max)",
+    "  local used, full = 0, false",
+    '  return (tostring(s):gsub(".[\\128-\\191]*", function(ch)',
+    "    local b, e = ch:byte(), ch",
+    '    if b == 0 then e = ch:sub(2)',
+    '    elseif b == 34 or b == 92 then e = "\\\\" .. ch',
+    "    elseif b < 32 or b == 127 then e = ([[\\u%04x]]):format(b) .. ch:sub(2) end",
+    '    if full or used + #e > max then full = true return "" end',
+    "    used = used + #e",
+    "    return e",
+    "  end))",
+    "end",
+    "",
+    "local function alert_json(key, msg)",
+    '  local fmt = [[{"severity":"warn","code":"%s","message":"%s"}]]',
+    "  local code = json_body(key, CODE_MAX)",
+    '  local room = ALERT_MAX - #(fmt:format(code, ""))',
+    "  return fmt:format(code, json_body(msg, room))",
+    "end",
+    "",
     "local function notify(msg, key)",
     "  Log.warn(msg)",
     "  local ok = true",
     "  if Telegram and Telegram.broadcast then",
     "    ok = Telegram.broadcast(msg)",
     "  end",
-    '  MQTT.publish(prefix .. "/alert", msg)',
+    '  MQTT.publish(prefix .. "/alert", alert_json(key, msg))',
     "  if ok then set_cooldown(key) end",
     "end",
     "",
@@ -58,6 +84,23 @@ var ThesadaRules = (function () {
     "local function temp_clear(key)",
     "  sustain[key] = 0",
     "  temp_sustain_start[key] = nil",
+    "end",
+    "",
+    "-- One reading of a sustained rule. Below threshold or stale ends the streak,",
+    "-- and so does a silent gap past 5 min or 3 of the shortest gaps seen.",
+    "local temp_seen, temp_gap = {}, {}",
+    "local function temp_streak(key, over)",
+    "  local now, last = Node.uptime(), temp_seen[key]",
+    "  if last then",
+    "    local g, limit = now - last, TEMP_SUSTAIN_MS",
+    "    if temp_gap[key] and 3 * temp_gap[key] > limit then limit = 3 * temp_gap[key] end",
+    "    if g > limit then temp_clear(key) end",
+    "    if not temp_gap[key] or g < temp_gap[key] then temp_gap[key] = g end",
+    "  end",
+    "  temp_seen[key] = now",
+    "  if over then return temp_sustained(key) end",
+    "  temp_clear(key)",
+    "  return false",
     "end",
     "",
   ].join("\n");
@@ -147,7 +190,9 @@ var ThesadaRules = (function () {
         this.setPreviousStatement(true, "ThesadaCondition");
         this.setNextStatement(true, "ThesadaCondition");
         this.setColour(210);
-        this.setTooltip("Named temperature threshold; optional sustain + clear");
+        this.setTooltip(
+          "Named temperature threshold. Sustain fires after 5 readings or 5 min over it. A stale or lower reading, or a long gap with no reading, restarts the count"
+        );
       },
     };
     Blockly.Lua["thesada_if_temp"] = function (block) {
@@ -166,18 +211,12 @@ var ThesadaRules = (function () {
           '    local key = "' +
           keyLit +
           '"\n' +
-          "    if s.temp_c == nil then\n" +
-          "      -- stale probe: hold the streak, neither count nor clear\n" +
-          "    elseif s.temp_c " +
+          "    if temp_streak(key, s.temp_c ~= nil and s.temp_c " +
           op +
           " " +
           thresh +
-          " then\n" +
-          "      if temp_sustained(key) then\n" +
+          ") then\n" +
           branch +
-          "      end\n" +
-          "    else\n" +
-          "      temp_clear(key)\n" +
           "    end\n" +
           "  end\n" +
           "end\n"
