@@ -124,9 +124,9 @@ type magicLinkRequest struct {
 	Email string `json:"email"`
 }
 
-// handleAuthMagicLink emails a one-time sign-in link. The answer is always
-// "sent" when the address is unknown or rate-limited.
-// in: writer, POST /auth/magic-link {email}. out: 200 {"status":"sent"} / 400 / 500.
+// handleAuthMagicLink emails a one-time sign-in link off the request path.
+// The answer is "sent" whether the address is known, unknown or rate-limited.
+// in: writer, POST /auth/magic-link {email}. out: 200 {"status":"sent"} / 400 / 500 (no mailer).
 func (s *Server) handleAuthMagicLink(w http.ResponseWriter, r *http.Request) {
 	if s.notes == nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mailer not configured"})
@@ -141,11 +141,7 @@ func (s *Server) handleAuthMagicLink(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "email is required"})
 		return
 	}
-	if err := s.notes.RequestLoginLink(email, s.clientIP(r)); err != nil {
-		slog.Error("api magic link failed", "email", email, "err", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
-		return
-	}
+	s.notes.RequestLoginLinkAsync(email, s.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 }
 

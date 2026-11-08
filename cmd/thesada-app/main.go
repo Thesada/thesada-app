@@ -165,13 +165,7 @@ func main() {
 
 	// A delete cut off by the last shutdown, or a reassign, can leave a claim
 	// no device row backs. Clear it before announce and claim traffic starts.
-	sweepCtx, sweepCancel := context.WithTimeout(rootCtx, 30*time.Second)
-	if n, err := services.Enrollments.SweepOrphanClaims(sweepCtx); err != nil {
-		slog.Error("device.enroll.orphan_sweep_failed", "err", err)
-	} else if n > 0 {
-		slog.Warn("device.enroll.orphan_claims_cleared", "rows_deleted", n)
-	}
-	sweepCancel()
+	sweepOrphanClaims(rootCtx, services.Enrollments.SweepOrphanClaims, time.Second, orphanSweepBudget)
 
 	// Unclaimed enrollment rows are the one thing in this schema an
 	// unauthenticated caller can create, so they need a sweep of their own.
@@ -190,6 +184,41 @@ func main() {
 	slog.Info("shutdown requested")
 	gracefulShutdown(httpServer, webServer, httpBudget, jobBudget)
 	slog.Info("bye")
+}
+
+// orphanSweepAttempts bounds the boot sweep's retries, orphanSweepBudget its
+// total time across every attempt and backoff.
+const (
+	orphanSweepAttempts = 4
+	orphanSweepBudget   = 30 * time.Second
+)
+
+// sweepOrphanClaims runs the boot orphan claim sweep, retrying a failure with
+// doubling backoff from base, sequentially so attempts never overlap.
+// in: ctx, sweep, first backoff, overall budget. out: none (logs the outcome).
+func sweepOrphanClaims(ctx context.Context, sweep func(context.Context) (int64, error), base, budget time.Duration) {
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	wait := base
+	for attempt := 1; ; attempt++ {
+		n, err := sweep(ctx)
+		if err == nil {
+			if n > 0 {
+				slog.Warn("device.enroll.orphan_claims_cleared", "rows_deleted", n, "attempt", attempt)
+			}
+			return
+		}
+		slog.Error("device.enroll.orphan_sweep_failed", "attempt", attempt, "max", orphanSweepAttempts, "err", err)
+		if attempt == orphanSweepAttempts {
+			return
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return
+		}
+		wait *= 2
+	}
 }
 
 // setupLogger installs a JSON slog handler as the process default.

@@ -339,7 +339,8 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 	}
 
 	// Two writes would share <path>.new and interleave their chunks on the device.
-	if !s.claimDeviceWrite(device.ID) {
+	claim, ok := s.claimDeviceWrite(device.ID, writeClaimTTL(s.cfg.CLIRequestTimeout, len(req.Content)))
+	if !ok {
 		http.Error(w, "a write to this device is already running", http.StatusConflict)
 		return
 	}
@@ -363,7 +364,7 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 	// CLIRequestTimeout deadline per step.
 	cliCtx := context.WithoutCancel(r.Context())
 	s.goCLI(reqID, "web.cli_write", device.DeviceID, func() {
-		s.runCLIWrite(cliCtx, reqID, device, topicPrefix, req.Path, req.Content, &user.ID)
+		s.runCLIWrite(cliCtx, reqID, claim, device, topicPrefix, req.Path, req.Content, &user.ID)
 	})
 
 	w.Header().Set("Content-Type", "application/json")
@@ -376,17 +377,22 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 // runCLIWrite is the goroutine body for an enqueued chunked write. On
 // success the snapshot row is upserted and the entry is marked done with a
 // summary. On failure the entry carries the stagedWrite status and message.
-// in: request id, device, topic prefix, path, content, user id. out: none (writes to store).
+// in: request id, claim token, device, topic prefix, path, content, user id. out: none (writes to store).
 // parentCtx: request-derived non-cancellable context (see runCLICmd).
 // snapshotUpsertTimeout bounds the snapshot row write that runs while the device write claim is held.
 const snapshotUpsertTimeout = 10 * time.Second
 
-func (s *Server) runCLIWrite(parentCtx context.Context, reqID uuid.UUID, device *service.Device, topicPrefix, path, content string, userID *uuid.UUID) {
-	defer s.releaseDeviceWrite(device.ID)
+func (s *Server) runCLIWrite(parentCtx context.Context, reqID, claim uuid.UUID, device *service.Device, topicPrefix, path, content string, userID *uuid.UUID) {
+	defer s.releaseDeviceWrite(device.ID, claim)
+	// A stall between claim and here (the audit write) may have let another write take over.
+	if !s.renewDeviceWrite(device.ID, claim, writeClaimTTL(s.cfg.CLIRequestTimeout, len(content))) {
+		s.cliRequests.markError(reqID, reqStatusError, "another write took over this device, nothing was sent")
+		return
+	}
 	contentBytes := []byte(content)
 	if err := stagedWrite(parentCtx, s.mqtt, s.cfg.CLIRequestTimeout, topicPrefix, path, contentBytes); err != nil {
 		// Release before the entry turns terminal, so a write posted on 'done' is not a 409.
-		s.releaseDeviceWrite(device.ID)
+		s.releaseDeviceWrite(device.ID, claim)
 		var f *writeFailure
 		if errors.As(err, &f) {
 			s.cliRequests.markError(reqID, f.status, f.msg)
@@ -403,7 +409,7 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID uuid.UUID, device 
 		slog.Error("write device_file upsert failed", "path", path, "err", err)
 	}
 	cancel()
-	s.releaseDeviceWrite(device.ID)
+	s.releaseDeviceWrite(device.ID, claim)
 
 	s.cliRequests.markDone(reqID, &mqtt.CLIResponse{
 		Cmd: "fs.write",
@@ -414,14 +420,61 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID uuid.UUID, device 
 	})
 }
 
-// claimDeviceWrite marks a write to the device as running. out: false if one already is.
-func (s *Server) claimDeviceWrite(id uuid.UUID) bool {
-	_, busy := s.deviceWrites.LoadOrStore(id, struct{}{})
-	return !busy
+// writeClaim is one running write: the token its owner releases with, and
+// when a claim its owner never released stops blocking the device.
+type writeClaim struct {
+	token   uuid.UUID
+	expires time.Time
 }
 
-// releaseDeviceWrite ends the write claimDeviceWrite started.
-func (s *Server) releaseDeviceWrite(id uuid.UUID) { s.deviceWrites.Delete(id) }
+// writeClaimTTL outlasts every bounded step of an n-byte write plus the snapshot upsert.
+// in: per-step timeout, content bytes. out: claim lifetime.
+func writeClaimTTL(step time.Duration, n int) time.Duration {
+	return time.Duration(writeSteps(n))*step + snapshotUpsertTimeout + time.Minute
+}
+
+// claimDeviceWrite marks a write to the device as running. A claim past its
+// expiry is taken over. in: device id, ttl. out: token, false if a live claim exists.
+func (s *Server) claimDeviceWrite(id uuid.UUID, ttl time.Duration) (uuid.UUID, bool) {
+	c := writeClaim{token: uuid.New(), expires: time.Now().Add(ttl)}
+	for {
+		old, busy := s.deviceWrites.LoadOrStore(id, c)
+		if !busy {
+			return c.token, true
+		}
+		if time.Now().Before(old.(writeClaim).expires) {
+			return uuid.Nil, false
+		}
+		if s.deviceWrites.CompareAndSwap(id, old, c) {
+			slog.Warn("device.write_claim.expired_taken", "device", id)
+			return c.token, true
+		}
+	}
+}
+
+// renewDeviceWrite restarts the claim token holds at ttl from now, so the
+// worker gets the whole lifetime. in: device id, token, ttl. out: false if
+// another write took the claim over.
+func (s *Server) renewDeviceWrite(id, token uuid.UUID, ttl time.Duration) bool {
+	for {
+		old, ok := s.deviceWrites.Load(id)
+		if !ok || old.(writeClaim).token != token {
+			return false
+		}
+		if s.deviceWrites.CompareAndSwap(id, old, writeClaim{token: token, expires: time.Now().Add(ttl)}) {
+			return true
+		}
+	}
+}
+
+// releaseDeviceWrite ends the claim token holds. A second release, or one
+// after another write took over the device, is a no-op.
+// in: device id, token. out: none.
+func (s *Server) releaseDeviceWrite(id, token uuid.UUID) {
+	if v, ok := s.deviceWrites.Load(id); ok && v.(writeClaim).token == token {
+		s.deviceWrites.CompareAndDelete(id, v)
+	}
+}
 
 // cliSender is the part of *mqtt.Client that stagedWrite drives.
 type cliSender interface {
@@ -434,13 +487,21 @@ const (
 	writeChunkSize = 3900
 	// Not .tmp: the firmware stages its own config saves there.
 	stagedSuffix = ".new"
+	// The firmware's fs.write path buffer, NUL included (kPathCap).
+	fwPathCap = 64
 )
 
 // writeChunkCount is how many fs.write/fs.append chunks n bytes take.
 func writeChunkCount(n int) int { return (n + writeChunkSize - 1) / writeChunkSize }
 
-// writeSteps is the CLI round trips a write may take: chunks, fs.cat, fs.mv, fs.rm.
-func writeSteps(n int) int { return writeChunkCount(n) + 3 }
+// readbackChunkSize is one fs.cat read when a timed-out rename is checked.
+const readbackChunkSize = 2048
+
+// writeSteps is the CLI round trips a write may take: chunks, fs.cat, fs.mv,
+// the staging check, then fs.rm or a full readback of the destination.
+func writeSteps(n int) int {
+	return writeChunkCount(n) + 3 + max(1, (n+readbackChunkSize-1)/readbackChunkSize)
+}
 
 // writeFailure is a failed stagedWrite: the request store status plus the UI message.
 type writeFailure struct {
@@ -466,6 +527,10 @@ func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration
 		return &writeFailure{reqStatusError, "files on /sd cannot be replaced atomically, the FAT rename refuses an existing file"}
 	}
 	staged := path + stagedSuffix
+	if len(staged) >= fwPathCap {
+		return &writeFailure{reqStatusError, fmt.Sprintf("path too long: the device takes paths up to %d bytes, and the staging copy adds %d",
+			fwPathCap-1-len(stagedSuffix), len(stagedSuffix))}
+	}
 	total := writeChunkCount(len(content))
 
 	step := func(label string, send func(context.Context) (*mqtt.CLIResponse, error)) (*mqtt.CLIResponse, *writeFailure) {
@@ -545,6 +610,9 @@ func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration
 	resp, f = step(label, func(ctx context.Context) (*mqtt.CLIResponse, error) {
 		return cli.CLIRequest(ctx, topicPrefix, "fs.mv", staged+" "+path)
 	})
+	if f != nil && f.status == reqStatusTimeout {
+		return renameReadback(f, step, cleanup, cli, topicPrefix, staged, path, content)
+	}
 	if f != nil {
 		return cleanup(f)
 	}
@@ -552,6 +620,43 @@ func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration
 	if !outputHasPrefix(resp.Output, "Renamed ") {
 		return cleanup(&writeFailure{reqStatusError, fmt.Sprintf("%s failed: %s", label, strings.Join(resp.Output, " "))})
 	}
+	return nil
+}
+
+// writeStep is stagedWrite's bounded CLI round trip.
+type writeStep func(label string, send func(context.Context) (*mqtt.CLIResponse, error)) (*mqtt.CLIResponse, *writeFailure)
+
+// renameReadback settles an fs.mv that timed out: the staging copy still there
+// means no rename, gone with path holding exactly content means it landed, else unknown.
+// in: the timeout, step, cleanup, sender, topic prefix, staged, path, content. out: nil or *writeFailure.
+func renameReadback(timedOut *writeFailure, step writeStep, cleanup func(*writeFailure) error, cli cliSender, topicPrefix, staged, path string, content []byte) error {
+	read := func(p string, off, n int) (*mqtt.CLIResponse, *writeFailure) {
+		return step("read back "+p, func(ctx context.Context) (*mqtt.CLIResponse, error) {
+			return cli.CLIRequest(ctx, topicPrefix, "fs.cat", fmt.Sprintf("%s %d %d", p, off, n))
+		})
+	}
+	unknown := &writeFailure{reqStatusTimeout, timedOut.msg + ", the rename outcome is unknown. Reload the file to check it"}
+	size := len(content)
+	resp, f := read(staged, size, 1)
+	switch {
+	case f == nil && resp.Total != nil && *resp.Total == size:
+		return cleanup(timedOut)
+	case f == nil || resp == nil || !outputHasPrefix(resp.Output, "File not found"):
+		return unknown
+	}
+	// A size match alone could be another file, so the bytes must match too.
+	for off := 0; off < size; {
+		resp, f = read(path, off, readbackChunkSize)
+		if f != nil || resp.Total == nil || *resp.Total != size || resp.Data == nil {
+			return unknown
+		}
+		end := off + len(*resp.Data)
+		if end == off || end > size || *resp.Data != string(content[off:end]) {
+			return unknown
+		}
+		off = end
+	}
+	slog.Warn("device.file_write.rename_confirmed", "path", path, "reason", "fs.mv reply timed out")
 	return nil
 }
 

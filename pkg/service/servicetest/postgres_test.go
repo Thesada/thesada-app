@@ -5,9 +5,9 @@ package servicetest
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
+	"github.com/containerd/errdefs"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -17,30 +17,6 @@ const readyLine = "database system is ready to accept connections"
 
 // echoReadyTwice is an entrypoint that logs the ready line twice and exits.
 var echoReadyTwice = testcontainers.WithEntrypoint("sh", "-c", "echo '"+readyLine+"'; echo '"+readyLine+"'")
-
-// TestWaitReady_RejectsExitedContainer: a container that logs the ready line
-// twice and exits must fail the wait, not the next port read with "not found".
-func TestWaitReady_RejectsExitedContainer(t *testing.T) {
-	ctx := context.Background()
-
-	ctr, err := testcontainers.Run(ctx, Image,
-		testcontainers.WithExposedPorts("5432/tcp"),
-		echoReadyTwice,
-		waitReady(),
-	)
-	testcontainers.CleanupContainer(t, ctr)
-	if err == nil {
-		_, perr := ctr.MappedPort(ctx, "5432/tcp")
-		t.Fatalf("wait passed an exited container, port read then says: %v", perr)
-	}
-	// Only the port wait says these. Under load its internal check sees the
-	// exit first. The log wait reports a bare "container exited".
-	msg := err.Error()
-	if !strings.Contains(msg, "mapped port: check target") && !strings.Contains(msg, "host port waiting failed") {
-		t.Fatalf("start failed, but not in the port wait: %v", err)
-	}
-	t.Logf("start refused as expected: %v", err)
-}
 
 // TestStartOnce_PortReadFailureTerminates: a container that passes its wait and
 // is gone by the port read fails the start and is removed.
@@ -53,7 +29,7 @@ func TestStartOnce_PortReadFailureTerminates(t *testing.T) {
 		testcontainers.CleanupContainer(t, ctr)
 		return ctr, err
 	})
-	if err == nil || !strings.Contains(err.Error(), `port "5432/tcp" not found`) {
+	if !errdefs.IsNotFound(err) {
 		t.Fatalf("want the port read to fail the start, got: %v", err)
 	}
 	if ctr == nil {

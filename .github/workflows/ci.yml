@@ -57,7 +57,9 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Run unit tests
-        run: make test
+        env:
+          THESADA_REQUIRE_NODE: "1"
+        run: make node-cli && make test
 
   # 80%+ floor on csrf, oauth, pki, authmw + the file pkg/service/auth.go.
   # Runs -tags integration; testcontainers uses ubuntu-latest's Docker daemon.

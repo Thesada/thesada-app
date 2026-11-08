@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -208,5 +209,33 @@ func TestRequestLoginLink_ParallelBurstDoesNotSpendAddress(t *testing.T) {
 	}
 	if mail.sends != maxPerIP*2 {
 		t.Fatalf("sends = %d, want %d", mail.sends, maxPerIP*2)
+	}
+}
+
+func TestAsync_BoundsInFlightAndDrains(t *testing.T) {
+	m := New(&fakeAccounts{}, &fakeMail{}, "https://app.example")
+	release := make(chan struct{})
+	var mu sync.Mutex
+	started := 0
+	for i := 0; i < maxInFlight+5; i++ {
+		m.async("login_link", "a@example.com", func() error {
+			mu.Lock()
+			started++
+			mu.Unlock()
+			<-release
+			return nil
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := m.Drain(ctx); err == nil {
+		t.Fatal("Drain returned while sends were still blocked")
+	}
+	close(release)
+	if err := m.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if started != maxInFlight {
+		t.Fatalf("started %d sends, want the %d cap", started, maxInFlight)
 	}
 }

@@ -12,8 +12,8 @@ import (
 
 func TestSanitizeConfig_MasksSensitiveKeys(t *testing.T) {
 	type oauthBlock struct {
-		KanidmClientID     string
-		KanidmClientSecret string
+		SSOClientID     string
+		SSOClientSecret string
 	}
 	type mqttBlock struct {
 		Broker string
@@ -29,7 +29,7 @@ func TestSanitizeConfig_MasksSensitiveKeys(t *testing.T) {
 	f := fixture{
 		DBPassword: "should-be-masked-1",
 		MQTT:       mqttBlock{Broker: "mqtt.thesada.app", Token: "should-be-masked-2"},
-		OAuth:      oauthBlock{KanidmClientID: "client-id-public", KanidmClientSecret: "should-be-masked-3"},
+		OAuth:      oauthBlock{SSOClientID: "client-id-public", SSOClientSecret: "should-be-masked-3"},
 		Hostname:   "host.example.com",
 		PublicURL:  "https://app.thesada.io",
 	}
@@ -40,7 +40,7 @@ func TestSanitizeConfig_MasksSensitiveKeys(t *testing.T) {
 		got[r.Key] = r.Value
 	}
 
-	mustMasked := []string{"DBPassword", "MQTT.Token", "OAuth.KanidmClientSecret"}
+	mustMasked := []string{"DBPassword", "MQTT.Token", "OAuth.SSOClientSecret"}
 	for _, k := range mustMasked {
 		v, ok := got[k]
 		if !ok {
@@ -52,10 +52,10 @@ func TestSanitizeConfig_MasksSensitiveKeys(t *testing.T) {
 	}
 
 	mustPlain := map[string]string{
-		"MQTT.Broker":          "mqtt.thesada.app",
-		"OAuth.KanidmClientID": "client-id-public",
-		"Hostname":             "host.example.com",
-		"PublicURL":            "https://app.thesada.io",
+		"MQTT.Broker":       "mqtt.thesada.app",
+		"OAuth.SSOClientID": "client-id-public",
+		"Hostname":          "host.example.com",
+		"PublicURL":         "https://app.thesada.io",
 	}
 	for k, want := range mustPlain {
 		if got[k] != want {

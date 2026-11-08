@@ -59,8 +59,8 @@ func startWebBrokerServer(t *testing.T, env *servicetest.Env, brokerURL string) 
 		cfg:         cfg,
 		services:    env.Services,
 		mqtt:        client,
-		cliRequests: newCLIRequestStore(time.Minute),
-		jobs:        newRequestStore[jobResult](time.Minute),
+		cliRequests: newCLIRequestStore(time.Minute, t.Context().Done()),
+		jobs:        newRequestStore[jobResult](time.Minute, t.Context().Done()),
 	}
 }
 
@@ -221,7 +221,8 @@ func TestAdminConfigWrite_ChunksAndSnapshots(t *testing.T) {
 		before := calls()
 
 		reqID := s.cliRequests.enqueue()
-		s.runCLIWrite(ctx, reqID, device, prefix, "/scripts/pushed.lua", content, nil)
+		claim, _ := s.claimDeviceWrite(device.ID, time.Minute)
+		s.runCLIWrite(ctx, reqID, claim, device, prefix, "/scripts/pushed.lua", content, nil)
 
 		entry := s.cliRequests.get(reqID)
 		if entry == nil || entry.Status != reqStatusDone {
@@ -250,7 +251,8 @@ func TestAdminConfigWrite_ChunksAndSnapshots(t *testing.T) {
 		before := calls()
 
 		reqID := s.cliRequests.enqueue()
-		s.runCLIWrite(ctx, reqID, device, prefix, "/config.json", content, nil)
+		claim, _ := s.claimDeviceWrite(device.ID, time.Minute)
+		s.runCLIWrite(ctx, reqID, claim, device, prefix, "/config.json", content, nil)
 
 		entry := s.cliRequests.get(reqID)
 		if entry == nil || entry.Status != reqStatusError || !strings.Contains(entry.ErrorMsg, "chunk 2/2 device error") {

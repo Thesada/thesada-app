@@ -16,8 +16,8 @@ import (
 	"thesada.app/app/pkg/safego/safegotest"
 )
 
-// waitTerminal polls a store until the entry leaves pending. get drops a
-// terminal entry, so the returned snapshot is the only read.
+// waitTerminal polls a store until the entry leaves pending and returns
+// that snapshot.
 func waitTerminal[T any](t *testing.T, s *requestStore[T], id uuid.UUID) *requestEntry[T] {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -33,7 +33,7 @@ func waitTerminal[T any](t *testing.T, s *requestStore[T], id uuid.UUID) *reques
 
 func TestGoCLI_PanicMarksTheRequestFailed(t *testing.T) {
 	log := safegotest.Capture(t)
-	s := &Server{cliRequests: newCLIRequestStore(time.Minute)}
+	s := &Server{cliRequests: newCLIRequestStore(time.Minute, t.Context().Done())}
 	id := s.cliRequests.enqueue()
 	s.goCLI(id, "web.cli_cmd", "dev1", func() { panic("device output broke the parser") })
 
@@ -48,7 +48,7 @@ func TestGoCLI_PanicMarksTheRequestFailed(t *testing.T) {
 
 func TestGoCLI_PanicAfterDoneKeepsTheResult(t *testing.T) {
 	log := safegotest.Capture(t)
-	s := &Server{cliRequests: newCLIRequestStore(time.Minute)}
+	s := &Server{cliRequests: newCLIRequestStore(time.Minute, t.Context().Done())}
 	id := s.cliRequests.enqueue()
 	resp := &mqtt.CLIResponse{OK: true}
 	s.guardCLI(id, "web.cli_cmd", "dev1", func() {
@@ -75,7 +75,7 @@ func startTestJob(t *testing.T, s *Server, fail string, work func(context.Contex
 
 func TestStartJob_PanicFinishesAtTheFailTarget(t *testing.T) {
 	log := safegotest.Capture(t)
-	s := &Server{jobs: newRequestStore[jobResult](time.Minute)}
+	s := &Server{jobs: newRequestStore[jobResult](time.Minute, t.Context().Done())}
 	fail := flashAdminDeleteFailed.on("/admin/devices")
 	id := startTestJob(t, s, fail, func(context.Context, func(int)) string { panic("cascade blew up") })
 
@@ -86,7 +86,7 @@ func TestStartJob_PanicFinishesAtTheFailTarget(t *testing.T) {
 }
 
 func TestStartJob_CleanRunFinishesAtTheWorkTarget(t *testing.T) {
-	s := &Server{jobs: newRequestStore[jobResult](time.Minute)}
+	s := &Server{jobs: newRequestStore[jobResult](time.Minute, t.Context().Done())}
 	ok := flashAdminBulkDeleted.on("/admin/devices")
 	id := startTestJob(t, s, flashAdminDeleteFailed.on("/admin/devices"),
 		func(context.Context, func(int)) string { return ok })

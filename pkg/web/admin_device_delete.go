@@ -48,6 +48,10 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 		http.NotFound(w, r)
 		return
 	}
+	// Same serialization with reassignment as cascadeDeleteOne.
+	owner := s.deviceOwner(id)
+	owner.Lock()
+	defer owner.Unlock()
 	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
 	if err != nil {
 		// A real backend error must not masquerade as 404 (AGENTS.md: fail loud).
@@ -171,7 +175,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	defer auditCancel()
 	s.audit(auditCtx, user, authz.DeviceDelete, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
-		Detail: deviceDeleteDetail(map[string]any{"device_id": device.DeviceID}, accepted, brokerClean),
+		Detail: deviceDeleteDetail(map[string]any{"device_id": device.DeviceID}, accepted, brokerClean, enrollErr != nil),
 	})
 
 	// A sealed enrollment or a surviving broker client is said on the page,

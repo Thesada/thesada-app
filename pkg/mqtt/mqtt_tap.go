@@ -131,12 +131,21 @@ func (c *Client) fanoutTaps(topic string, payload []byte, retained bool, qos byt
 // PublishRaw forwards a publish through the shared paho client without any
 // topic validation - that's the caller's responsibility (the /admin/mqtt
 // handler enforces the tenant prefix guard and the audit log).
-// in: topic, payload, qos, retain. out: error from paho.
+// in: topic, payload, qos, retain. out: error from paho, or a timeout error.
 func (c *Client) PublishRaw(topic string, payload []byte, qos byte, retain bool) error {
 	if c.c == nil || !c.c.IsConnected() {
 		return errors.New("mqtt client not connected")
 	}
 	t := c.c.Publish(topic, qos, retain, payload)
-	t.WaitTimeout(5 * time.Second)
+	if !t.WaitTimeout(publishTimeout) {
+		return fmt.Errorf("mqtt publish to %s: %w after %s", topic, ErrPublishTimeout, publishTimeout)
+	}
 	return t.Error()
 }
+
+// publishTimeout bounds PublishRaw's wait for the broker.
+const publishTimeout = 5 * time.Second
+
+// ErrPublishTimeout means the publish was not confirmed in time. Paho may
+// still send it, so the outcome is unknown, not a failure.
+var ErrPublishTimeout = errors.New("publish not confirmed")

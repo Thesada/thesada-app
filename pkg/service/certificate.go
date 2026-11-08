@@ -214,7 +214,7 @@ func (s *CertificateService) MarkFailed(ctx context.Context, tenantID string, ce
 // (including pending/failed leftovers) and clears the paired_at timestamp.
 // Tenant-scoped through WithTenant; both updates run atomically under the
 // app.tenant_id GUC.
-// in: ctx, tenant_id, device pk. out: error.
+// in: ctx, tenant_id, device pk. out: error, ErrDeviceNotInTenant when no row matched.
 func (s *CertificateService) Revoke(ctx context.Context, tenantID string, devicePk uuid.UUID) error {
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
@@ -222,8 +222,12 @@ func (s *CertificateService) Revoke(ctx context.Context, tenantID string, device
 			 WHERE device_pk = $1 AND revoked = false`, devicePk); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx,
+		tag, err := tx.Exec(ctx,
 			`UPDATE devices SET paired_at = NULL WHERE id = $1`, devicePk)
+		if err == nil && tag.RowsAffected() == 0 {
+			// Rolls back the cert revoke too: the device is not in this tenant.
+			return ErrDeviceNotInTenant
+		}
 		return err
 	})
 }

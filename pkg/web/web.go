@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/config"
 	"thesada.app/app/pkg/csrf"
@@ -57,7 +58,16 @@ type Server struct {
 	jobs        *requestStore[jobResult]
 	// deviceWrites holds the device ids with a staged file write in flight.
 	deviceWrites sync.Map
+	// deviceOwners serializes a delete's ownership check and commands with a
+	// reassignment of the same device, one *sync.Mutex per device id.
+	deviceOwners sync.Map
 	runner       jobRunner
+}
+
+// deviceOwner returns the lock that serializes delete and reassign for id.
+func (s *Server) deviceOwner(id uuid.UUID) *sync.Mutex {
+	mu, _ := s.deviceOwners.LoadOrStore(id, &sync.Mutex{})
+	return mu.(*sync.Mutex)
 }
 
 // New constructs the HTMX server with all page routes wired up.
@@ -75,12 +85,12 @@ func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mq
 		mux:            http.NewServeMux(),
 		waitlistNotify: ratelimit.New(24*time.Hour, 1),
 		claimLimits:    newClaimLimiter(cfg),
-		cliRequests:    newCLIRequestStore(cfg.CLIRequestTimeout + 60*time.Second),
-		jobs:           newRequestStore[jobResult](10 * time.Minute),
+		cliRequests:    newCLIRequestStore(cfg.CLIRequestTimeout+60*time.Second, nil),
+		jobs:           newRequestStore[jobResult](10*time.Minute, nil),
 	}
 	s.parseTemplates()
 	s.routes()
-	s.handler = csrf.Middleware([]byte(cfg.CookieSecret), cfg.TrustedProxies)(authmw.Middleware(services.Auth, cfg.TrustedProxies)(s.mux))
+	s.handler = limitFormBody(csrf.Middleware([]byte(cfg.CookieSecret), cfg.TrustedProxies)(authmw.Middleware(services.Auth, cfg.TrustedProxies)(s.mux)))
 
 	// Sweep residual keys left by expired windows; without this the maps grow
 	// unbounded. context.Background: sweepers live for the process lifetime.

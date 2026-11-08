@@ -10,13 +10,13 @@ One write per device runs at a time. It goes to `<path>.new` as `fs.write` plus 
 | A chunk ack with the wrong byte count or for another file | `chunk i/n short write: device replied ...` | **Automatic:** same cleanup |
 | LittleFS full: the firmware acks `f.write` before `f.close`, whose failure it drops | `size check of <path>.new: device holds N bytes, want M` | **Automatic:** same cleanup. The staged write needs room for both copies, check `fs.df` |
 | Rename refused (`Failed to rename`, the file is open elsewhere, firmware without `fs.mv`) | `rename <path>.new to <path> failed: ...` or `... device error: ...` | **Automatic:** same cleanup, the live file is untouched. Retry |
-| A second write to the same device while one runs (double click, a second tab, restore or rules push) | HTTP 409 `a write to this device is already running`, nothing is sent | Wait for the first write to finish. The config page also disables Save while its write runs |
-| A step waits out its deadline behind other CLI traffic to the device | `... timed out after ...`, and the command is never sent | **Automatic:** same cleanup. Retry when the device is idle |
+| A second write to the same device while one runs (double click, a second tab, restore or rules push) | HTTP 409 `a write to this device is already running`, nothing is sent | Wait for the first write to finish. The config page also disables Save while its write runs. A claim its write never released expires after every step's deadline plus a minute (`device.write_claim.expired_taken`) |
+| A step waits out its deadline behind other CLI traffic to the device | `... timed out after ...`, and the command is never sent. The wait for the device lock ends at the step deadline | **Automatic:** same cleanup. Retry when the device is idle |
 | Cleanup `fs.rm` fails too | The message ends `(<path>.new may remain on the device, the next save overwrites it)` | Harmless leftover. The next save truncates it, or run `fs.rm <path>.new` |
-| The rename answer is lost after the device applied it | `rename ... timed out` while the device already holds the new file | Read the file back with the editor before saving again |
+| The rename answer is lost (`fs.mv` timed out) | The app reads back with `fs.cat`: `<path>.new` still at full size means no rename (cleanup, `timed out`). Gone, with `<path>` at the new size, means it landed (success, `device.file_write.rename_confirmed`) | Anything else ends `the rename outcome is unknown. Reload the file to check it` |
 | Path with whitespace, `*` or `?` | `path must not contain whitespace, * or ?`, nothing is sent | None. The device shell splits and globs those characters in `fs.mv` and `fs.rm` |
 | Path on `/sd` | `files on /sd cannot be replaced atomically, the FAT rename refuses an existing file`, nothing is sent | None from the editor. FAT rename does not replace a file, so no atomic path exists. A plain `fs.write` from the MQTT shell page writes it in place, without that guarantee |
-| Path within 4 bytes of the 64-byte device path cap | First chunk `device error: [Path too long]`, nothing written | Use a shorter path. The `.new` suffix takes 4 bytes |
+| Path over 59 bytes (the `.new` copy would pass the firmware's 64-byte path buffer) | `path too long: ...`, nothing is sent | Use a shorter path. The `.new` suffix takes 4 bytes |
 
 ## Gaps
 
