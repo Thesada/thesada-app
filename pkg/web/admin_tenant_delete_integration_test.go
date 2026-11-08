@@ -9,6 +9,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -78,7 +79,7 @@ func seedTenantDelete(t *testing.T) tdFixture {
 		t.Fatalf("seed enrollment: %v", err)
 	}
 	// A disconnected broker client: every dynsec call fails fast.
-	s := &Server{cfg: env.Cfg, services: env.Services, mqtt: &mqtt.Client{}, jobs: newRequestStore[jobResult](time.Minute)}
+	s := &Server{cfg: env.Cfg, services: env.Services, mqtt: &mqtt.Client{}, jobs: newRequestStore[jobResult](time.Minute, t.Context().Done())}
 	s.parseTemplates()
 	return tdFixture{env: env, s: s, token: tok, device: pk}
 }
@@ -451,6 +452,16 @@ func seedSecondDevice(t *testing.T, f tdFixture) {
 	}
 }
 
+// goneUUID is tdGone's tenant uuid, the identity a delete job carries.
+func goneUUID(t *testing.T, f tdFixture) uuid.UUID {
+	t.Helper()
+	tn, err := f.env.Services.Tenants.Get(tdGone)
+	if err != nil {
+		t.Fatalf("get %s: %v", tdGone, err)
+	}
+	return tn.UUID
+}
+
 // shutdownRun is one delete job body, run on ctx with a progress hook.
 type shutdownRun struct {
 	name string
@@ -461,7 +472,7 @@ type shutdownRun struct {
 // own outcome: the tenant is kept, or the bulk flash is the mixed one.
 var shutdownRuns = []shutdownRun{
 	{"tenant", func(t *testing.T, f tdFixture, ctx context.Context, devices []service.Device, progress func(int)) {
-		loc := f.s.deleteTenant(ctx, &service.User{Email: "op@example.com"}, tdGone, tdHome, devices, true, progress)
+		loc := f.s.deleteTenant(ctx, &service.User{Email: "op@example.com"}, goneUUID(t, f), tdGone, tdHome, devices, true, progress)
 		if !strings.Contains(loc, flashTenantKept.query()) {
 			t.Errorf("stopped tenant job sent the operator to %q, want kept", loc)
 		}
@@ -579,5 +590,104 @@ func TestAdminDeleteJobs_ShutdownFinishesTheDeviceInProgress(t *testing.T) {
 				t.Errorf("stop audit rows with one not started = %d, want 1", n)
 			}
 		})
+	}
+}
+
+// A device reassigned after the job read it is skipped: no cert clear, no
+// revoke, no delete in the tenant it moved to.
+func TestAdminDeleteJobs_SkipADeviceThatMovedTenant(t *testing.T) {
+	f := seedTenantDelete(t)
+	snapshot := *deviceByID(t, f.env, f.device)
+	if _, err := f.env.Super.Exec(context.Background(),
+		`UPDATE devices SET tenant_id = $1 WHERE id = $2`, tdHome, snapshot.ID); err != nil {
+		t.Fatal(err)
+	}
+	verdict, _ := f.s.cascadeDeleteOne(context.Background(), "bulk delete", "op@example.com",
+		&snapshot, recoveryVerdict{usable: true}, true)
+	if verdict != cascadeMoved {
+		t.Fatalf("verdict = %v, want cascadeMoved", verdict)
+	}
+	if n := count(t, f, `SELECT count(*) FROM devices WHERE id = $1 AND tenant_id = $2`, snapshot.ID, tdHome); n != 1 {
+		t.Fatal("the moved device was deleted")
+	}
+	if n := count(t, f, `SELECT count(*) FROM device_certificates WHERE device_pk = $1 AND NOT revoked`, snapshot.ID); n != 1 {
+		t.Fatalf("the moved device's live certs = %d, want 1", n)
+	}
+	if n := count(t, f, `SELECT count(*) FROM device_enrollments WHERE device_id = $1`, snapshot.DeviceID); n != 2 {
+		t.Fatalf("the moved device's enrollment rows = %d, want 2", n)
+	}
+}
+
+// A device paired after the job read it meets the recovery gate it now needs.
+func TestAdminDeleteJobs_GateSeesAPairingMadeDuringTheJob(t *testing.T) {
+	f := seedTenantDelete(t)
+	ctx := context.Background()
+	if _, err := f.env.Super.Exec(ctx, `UPDATE devices SET paired_at = NULL WHERE id = $1`, f.device); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := *deviceByID(t, f.env, f.device)
+	if _, err := f.env.Super.Exec(ctx, `UPDATE devices SET paired_at = now() WHERE id = $1`, f.device); err != nil {
+		t.Fatal(err)
+	}
+	verdict, _ := f.s.cascadeDeleteOne(ctx, "tenant delete", "op@example.com",
+		&snapshot, recoveryVerdict{reason: "fallback disabled"}, false)
+	if verdict != cascadeRefused {
+		t.Fatalf("verdict = %v, want cascadeRefused for a device paired mid-job", verdict)
+	}
+	if n := count(t, f, `SELECT count(*) FROM device_certificates WHERE device_pk = $1 AND NOT revoked`, f.device); n != 1 {
+		t.Fatalf("live certs = %d, want the fresh pairing untouched", n)
+	}
+}
+
+// Revoke and DeleteByID under a tenant that no longer owns the row fail
+// instead of reporting a delete that matched nothing.
+func TestDeviceWrites_ZeroRowsUnderAnotherTenantFail(t *testing.T) {
+	f := seedTenantDelete(t)
+	ctx := context.Background()
+	if err := f.env.Services.Certificates.Revoke(ctx, tdHome, f.device); !errors.Is(err, service.ErrDeviceNotInTenant) {
+		t.Fatalf("Revoke under another tenant = %v, want ErrDeviceNotInTenant", err)
+	}
+	if n := count(t, f, `SELECT count(*) FROM device_certificates WHERE device_pk = $1 AND NOT revoked`, f.device); n != 1 {
+		t.Fatalf("live certs after a refused revoke = %d, want 1", n)
+	}
+	if err := f.env.Services.Devices.DeleteByID(ctx, tdHome, f.device); !errors.Is(err, service.ErrDeviceNotInTenant) {
+		t.Fatalf("DeleteByID under another tenant = %v, want ErrDeviceNotInTenant", err)
+	}
+}
+
+// A sealed enrollment is reported even when the tenant is kept: on the
+// device.delete row and in the flash.
+func TestAdminTenantDelete_KeptTenantStillReportsASealedDevice(t *testing.T) {
+	f := seedTenantDelete(t)
+	seedSecondDevice(t, f)
+	ctx := context.Background()
+	devices := tenantDevices(t, f)
+	refused, deleted := devices[0], devices[1]
+	if _, err := f.env.Super.Exec(ctx, `UPDATE devices SET paired_at = now() WHERE id = $1`, refused.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.env.Super.Exec(ctx, `UPDATE devices SET paired_at = NULL WHERE id = $1`, deleted.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Held until the job ends, so the deleted device's enrollment reset times out.
+	tx, err := f.env.Super.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `LOCK TABLE device_enrollments IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	loc := f.s.deleteTenant(ctx, &service.User{Email: "op@example.com"}, goneUUID(t, f), tdGone, tdHome,
+		tenantDevices(t, f), false, func(int) {})
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(loc, flashTenantKept.query()) || !strings.Contains(loc, flashTenantIncomplete.query()) {
+		t.Fatalf("job sent the operator to %q, want kept and incomplete", loc)
+	}
+	if n := count(t, f, `SELECT count(*) FROM admin_audit WHERE action = 'device.delete' AND target_id = $1
+		AND detail->>'enroll_reset_failed' = 'true'`, deleted.ID.String()); n != 1 {
+		t.Fatalf("device.delete rows flagging the sealed enrollment = %d, want 1", n)
 	}
 }

@@ -471,7 +471,7 @@ A password match or a consumed magic link against a row with
 `users.totp_secret` set does not create a session until the 6-digit code
 checks. A password account turns that factor on from Settings: the page
 shows the base32 secret as an otpauth link, then stores it after the
-code matches. There is no QR image. Kanidm sign-in does not ask: that
+code matches. There is no QR image. Single sign-on does not ask: that
 provider already authenticated the user, and the local factor is only
 for password and magic link.
 A time before the Unix epoch uses counter zero. A lookup or secret-decode error is a failed login, not "TOTP is off"
@@ -903,11 +903,12 @@ Source: `pkg/csrf/csrf.go`, `pkg/web/web.go`, `pkg/api/v1/api.go::requireJSON`.
 Every authorize request generates a PKCE code verifier (S256
 challenge), a nonce, and a state value persisted to
 `oauth_auth_requests`. On callback, the row is deleted with
-`RETURNING` so reuse fails atomically. PKCE is required by Kanidm
-1.x for confidential clients - non-negotiable.
+`RETURNING` so reuse fails atomically. PKCE is required for
+confidential clients - non-negotiable.
 
-`/start` also sets the state in an HttpOnly, Lax cookie
-`thesada_oidc_state` scoped to `/auth/oidc/`, and the callback refuses a
+`/start` also sets the state in an HttpOnly, Lax, Secure host-only cookie
+`__Host-thesada_oidc_state` (Path=/, no Domain, so a sibling host cannot
+plant one), and the callback refuses a
 state that cookie does not carry, before the state row is touched. A
 callback URL from the attacker's own IdP login therefore does not sign
 another browser in. Verified by `pkg/web/oidc_state_integration_test.go`.

@@ -8,6 +8,7 @@ package v1
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -275,11 +276,19 @@ func requireJSON(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// maxJSONBody caps a JSON request body read through decodeJSON.
+const maxJSONBody = 64 << 10
+
 // decodeJSON decodes the request body into dst, writing a 400 JSON error on
-// malformed input. Shared by the handlers that take a JSON body.
+// malformed input and a 413 past maxJSONBody. Shared by the JSON handlers.
 // in: writer, request, destination pointer. out: true on success.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxJSONBody)).Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "body too large"})
+			return false
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return false
 	}

@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func newServerForBulkTest() *Server { return &Server{} }
@@ -21,6 +24,23 @@ func postForm(form url.Values) *http.Request {
 	r := httptest.NewRequest(http.MethodPost, "/admin/devices/bulk", strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return r
+}
+
+// An oversize selection is refused before any lookup: the server has no services to call.
+func TestAdminDevicesBulk_Delete_RefusesAnOversizeSelection(t *testing.T) {
+	s := newServerForBulkTest()
+	form := url.Values{"action": {"delete"}}
+	for i := 0; i <= bulkDeleteMax; i++ {
+		form.Add("device_ids", uuid.NewString())
+	}
+	rec := httptest.NewRecorder()
+	s.handleAdminDevicesBulk(rec, postForm(form))
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != flashAdminTooMany.on("/admin/devices") {
+		t.Fatalf("oversize delete = %d %q, want 302 to too_many_selected", rec.Code, rec.Header().Get("Location"))
+	}
+	if !strings.Contains(adminFlashText["error"][flashAdminTooMany.code], strconv.Itoa(bulkDeleteMax)) {
+		t.Fatal("the flash text does not name the cap")
+	}
 }
 
 func TestAdminDevicesBulk_UnknownAction(t *testing.T) {

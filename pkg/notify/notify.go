@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/ratelimit"
+	"thesada.app/app/pkg/safego"
 	"thesada.app/app/pkg/service"
 )
 
@@ -89,6 +90,27 @@ func (m *Mail) RequestLoginLink(email, ip string) error {
 // in: email, client ip. out: error only on an unexpected account or token failure.
 func (m *Mail) RequestResetLink(email, ip string) error {
 	return m.request(email, ip, "reset_link", "Your thesada password reset link", "/reset-password?token=", false)
+}
+
+// RequestLoginLinkAsync runs RequestLoginLink off the request path, so a known
+// and an unknown address answer alike and in the same time. Errors are logged.
+// in: email, client ip. out: none.
+func (m *Mail) RequestLoginLinkAsync(email, ip string) {
+	m.async("login_link", email, func() error { return m.RequestLoginLink(email, ip) })
+}
+
+// RequestResetLinkAsync is RequestLoginLinkAsync for the password-reset link.
+// in: email, client ip. out: none.
+func (m *Mail) RequestResetLinkAsync(email, ip string) {
+	m.async("reset_link", email, func() error { return m.RequestResetLink(email, ip) })
+}
+
+func (m *Mail) async(tmpl, email string, fn func() error) {
+	safego.Go("notify."+tmpl, func() {
+		if err := fn(); err != nil {
+			slog.Error("notify.link.request_failed", "template", tmpl, "email", email, "err", err)
+		}
+	})
 }
 
 // SendResetLink emails a reset link that the caller already created.

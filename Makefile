@@ -1,12 +1,16 @@
 # thesada-app. Bare `make` prints this list and changes nothing.
-# Build, run, and CSS pipeline. No node, no npm.
+# Build, run, and CSS pipeline. No node, no npm. Node only runs the inline-script tests.
 .DEFAULT_GOAL := help
 SHELL := bash
 
 GO ?= go
 TAILWIND ?= ./tools/tailwindcss
 TAILWIND_VERSION ?= v4.2.2
+NODE_VERSION ?= v24.22.1
 BIN := bin/thesada-app
+
+# A node-cli download wins over a system node.
+export PATH := $(CURDIR)/tools/node/bin:$(PATH)
 
 # Detect host OS/arch for the tailwind standalone CLI download URL.
 # The release asset is named macos, not darwin.
@@ -14,6 +18,8 @@ TAILWIND_OS := $(shell uname -s | tr '[:upper:]' '[:lower:]' | sed 's/^darwin$$/
 TAILWIND_ARCH_RAW := $(shell uname -m)
 TAILWIND_ARCH := $(if $(filter x86_64,$(TAILWIND_ARCH_RAW)),x64,$(if $(filter aarch64 arm64,$(TAILWIND_ARCH_RAW)),arm64,$(TAILWIND_ARCH_RAW)))
 TAILWIND_URL := https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/tailwindcss-$(TAILWIND_OS)-$(TAILWIND_ARCH)
+NODE_OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+NODE_URL := https://nodejs.org/dist/$(NODE_VERSION)/node-$(NODE_VERSION)-$(NODE_OS)-$(TAILWIND_ARCH).tar.gz
 
 # Security scanner versions. Pinned so a transient upstream change cannot
 # fail a CI run silently (e.g. gosec moved a default rule, govulncheck
@@ -44,7 +50,7 @@ help: ## Show this help
 ##@ Setup
 
 .PHONY: setup
-setup: tailwind-cli ## Modules plus the pinned Tailwind CLI, enough for a clean clone to build
+setup: tailwind-cli node-cli ## Modules plus the pinned Tailwind CLI and Node, enough for a clean clone to build and test
 	$(GO) mod download
 
 .PHONY: tailwind-cli
@@ -54,6 +60,14 @@ tailwind-cli: ## Download the pinned Tailwind standalone CLI into tools/ when it
 		echo "fetching tailwindcss $(TAILWIND_VERSION) from $(TAILWIND_URL)"; \
 		curl -fsSL -o $(TAILWIND) $(TAILWIND_URL); \
 		chmod +x $(TAILWIND); \
+	fi
+
+.PHONY: node-cli
+node-cli: ## Download the pinned Node into tools/node for the inline-script tests when it is missing
+	@if [ ! -x tools/node/bin/node ]; then \
+		mkdir -p tools/node; \
+		echo "fetching node $(NODE_VERSION) from $(NODE_URL)"; \
+		curl -fsSL $(NODE_URL) | tar -xz --strip-components=1 -C tools/node; \
 	fi
 
 .PHONY: tidy

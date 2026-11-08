@@ -165,13 +165,7 @@ func main() {
 
 	// A delete cut off by the last shutdown, or a reassign, can leave a claim
 	// no device row backs. Clear it before announce and claim traffic starts.
-	sweepCtx, sweepCancel := context.WithTimeout(rootCtx, 30*time.Second)
-	if n, err := services.Enrollments.SweepOrphanClaims(sweepCtx); err != nil {
-		slog.Error("device.enroll.orphan_sweep_failed", "err", err)
-	} else if n > 0 {
-		slog.Warn("device.enroll.orphan_claims_cleared", "rows_deleted", n)
-	}
-	sweepCancel()
+	sweepOrphanClaims(rootCtx, services.Enrollments.SweepOrphanClaims, time.Second)
 
 	// Unclaimed enrollment rows are the one thing in this schema an
 	// unauthenticated caller can create, so they need a sweep of their own.
@@ -190,6 +184,37 @@ func main() {
 	slog.Info("shutdown requested")
 	gracefulShutdown(httpServer, webServer, httpBudget, jobBudget)
 	slog.Info("bye")
+}
+
+// orphanSweepAttempts bounds the boot sweep's retries.
+const orphanSweepAttempts = 4
+
+// sweepOrphanClaims runs the boot orphan claim sweep, retrying a failure with
+// doubling backoff from base, sequentially so attempts never overlap.
+// in: ctx, sweep, first backoff. out: none (logs the outcome).
+func sweepOrphanClaims(ctx context.Context, sweep func(context.Context) (int64, error), base time.Duration) {
+	wait := base
+	for attempt := 1; ; attempt++ {
+		sweepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		n, err := sweep(sweepCtx)
+		cancel()
+		if err == nil {
+			if n > 0 {
+				slog.Warn("device.enroll.orphan_claims_cleared", "rows_deleted", n, "attempt", attempt)
+			}
+			return
+		}
+		slog.Error("device.enroll.orphan_sweep_failed", "attempt", attempt, "max", orphanSweepAttempts, "err", err)
+		if attempt == orphanSweepAttempts {
+			return
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return
+		}
+		wait *= 2
+	}
 }
 
 // setupLogger installs a JSON slog handler as the process default.

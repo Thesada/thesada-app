@@ -2,11 +2,50 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"regexp"
 	"testing"
 	"time"
 )
+
+func TestSweepOrphanClaims_RetriesUntilOneSucceeds(t *testing.T) {
+	calls := 0
+	sweepOrphanClaims(context.Background(), func(context.Context) (int64, error) {
+		calls++
+		if calls < 3 {
+			return 0, errors.New("lock timeout")
+		}
+		return 1, nil
+	}, time.Millisecond)
+	if calls != 3 {
+		t.Fatalf("sweep ran %d times, want 3 (two failures, then success)", calls)
+	}
+}
+
+func TestSweepOrphanClaims_GivesUpAfterTheBudget(t *testing.T) {
+	calls := 0
+	sweepOrphanClaims(context.Background(), func(context.Context) (int64, error) {
+		calls++
+		return 0, errors.New("lock timeout")
+	}, time.Millisecond)
+	if calls != orphanSweepAttempts {
+		t.Fatalf("sweep ran %d times, want %d", calls, orphanSweepAttempts)
+	}
+}
+
+func TestSweepOrphanClaims_StopsOnShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	sweepOrphanClaims(ctx, func(context.Context) (int64, error) {
+		calls++
+		cancel()
+		return 0, errors.New("lock timeout")
+	}, time.Hour)
+	if calls != 1 {
+		t.Fatalf("sweep ran %d times after shutdown, want 1", calls)
+	}
+}
 
 // fakeHTTP blocks Shutdown until release closes, or until its ctx ends when
 // release is nil (a server that never drains).

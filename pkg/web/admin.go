@@ -152,17 +152,39 @@ func (s *Server) handleAdminTenantDelete(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "delete failed", http.StatusInternalServerError)
 		return
 	}
+	tenant, err := s.services.Tenants.Get(slug)
+	if errors.Is(err, service.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		slog.Error("admin tenant delete: tenant lookup failed", "slug", slug, "err", err)
+		http.Error(w, "delete failed", http.StatusInternalServerError)
+		return
+	}
 	override := acceptSerialRecovery(r)
 	s.startJob(w, r, len(devices), flashTenantDeleteFailed.on("/admin/tenants"), func(ctx context.Context, progress func(int)) string {
-		return s.deleteTenant(ctx, user, slug, effective, devices, override, progress)
+		return s.deleteTenant(ctx, user, tenant.UUID, slug, effective, devices, override, progress)
 	})
 }
 
-// deleteTenant is the tenant delete job body.
-// in: ctx, operator, slug, operator's effective tenant, devices, override,
-// progress. out: redirect target with registered flash codes.
-func (s *Server) deleteTenant(ctx context.Context, user *service.User, slug, effective string, devices []service.Device, override bool, progress func(int)) string {
+// deleteTenant is the tenant delete job body. A device whose teardown left a
+// live broker client or a sealed enrollment is shown on every outcome.
+// in: ctx, operator, tenant uuid read with the request, slug, operator's
+// effective tenant, devices, override, progress. out: redirect target with registered flash codes.
+func (s *Server) deleteTenant(ctx context.Context, user *service.User, tenantUUID uuid.UUID, slug, effective string, devices []service.Device, override bool, progress func(int)) string {
 	res := s.deleteTenantDevices(ctx, user, devices, override, progress)
+	incomplete := len(res.brokerLive) > 0 || len(res.sealed) > 0
+	if incomplete {
+		slog.Error("admin tenant delete: device teardown incomplete", "slug", slug,
+			"broker_teardown_failed", res.brokerLive, "enroll_reset_failed", res.sealed)
+	}
+	out := func(f adminFlashCode) string {
+		if incomplete {
+			return f.on("/admin/tenants") + "&" + flashTenantIncomplete.query()
+		}
+		return f.on("/admin/tenants")
+	}
 	if res.notDeleted > 0 {
 		slog.Warn("admin tenant delete: kept, devices left", "slug", slug,
 			"devices", len(devices), "not_deleted", res.notDeleted)
@@ -173,20 +195,26 @@ func (s *Server) deleteTenant(ctx context.Context, user *service.User, slug, eff
 					"not_started": res.notStarted, "revoked_not_deleted": res.revokedKept},
 			})
 		}
-		return flashTenantKept.on("/admin/tenants")
+		return out(flashTenantKept)
 	}
 	ctx = context.WithoutCancel(ctx)
-	if err := s.services.Tenants.Delete(slug, effective, user.TenantID); err != nil {
+	delCtx, delCancel := context.WithTimeout(ctx, stepTimeout)
+	err := s.services.Tenants.Delete(delCtx, tenantUUID, slug, effective, user.TenantID)
+	delCancel()
+	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrTenantProtected):
-			return flashTenantProtected.on("/admin/tenants")
+			return out(flashTenantProtected)
 		case errors.Is(err, service.ErrTenantHasSuperAdmins):
-			return flashTenantSuperAdmin.on("/admin/tenants")
+			return out(flashTenantSuperAdmin)
 		case errors.Is(err, service.ErrTenantHasDevices):
-			return flashTenantRaced.on("/admin/tenants")
+			return out(flashTenantRaced)
+		case errors.Is(err, service.ErrTenantChanged):
+			slog.Warn("tenant.delete.skipped", "reason", "tenant_changed", "slug", slug, "user", user.Email)
+			return out(flashTenantChanged)
 		default:
 			slog.Error("admin tenant delete failed", "slug", slug, "err", err)
-			return flashTenantDeleteFailed.on("/admin/tenants")
+			return out(flashTenantDeleteFailed)
 		}
 	}
 	// A surviving broker client is flagged on its device.delete row, not here.
@@ -199,12 +227,7 @@ func (s *Server) deleteTenant(ctx context.Context, user *service.User, slug, eff
 	s.audit(auditCtx, user, authz.TenantDelete, service.AuditEntry{
 		TargetType: "tenant", TargetID: slug, TenantID: slug, Detail: detail,
 	})
-	if len(res.brokerLive) > 0 || len(res.sealed) > 0 {
-		slog.Error("admin tenant delete: device teardown incomplete", "slug", slug,
-			"broker_teardown_failed", res.brokerLive, "enroll_reset_failed", res.sealed)
-		return flashTenantDeleted.on("/admin/tenants") + "&" + flashTenantIncomplete.query()
-	}
-	return flashTenantDeleted.on("/admin/tenants")
+	return out(flashTenantDeleted)
 }
 
 const tenantProtectedMsg = "That tenant cannot be deleted (default or your current tenant)."
@@ -243,6 +266,9 @@ func (s *Server) deleteTenantDevices(ctx context.Context, user *service.User, de
 			res.brokerLive = append(res.brokerLive, d.DeviceID)
 		}
 		switch verdict {
+		case cascadeMoved:
+			// Left the tenant or is gone. Tenants.Delete re-checks what is left.
+			continue
 		case cascadeRefused, cascadeFailed:
 			res.notDeleted++
 			continue
@@ -257,7 +283,7 @@ func (s *Server) deleteTenantDevices(ctx context.Context, user *service.User, de
 		s.audit(rowCtx, user, authz.DeviceDelete, service.AuditEntry{
 			TargetType: "device", TargetID: d.ID.String(), TenantID: d.TenantID,
 			Detail: deviceDeleteDetail(map[string]any{"device_id": d.DeviceID, "tenant_delete": true},
-				serialRecoveryAccepted(d.PairedAt != nil, v, override), brokerClean),
+				serialRecoveryAccepted(d.PairedAt != nil, v, override), brokerClean, verdict == cascadeOKSealed),
 		})
 		rowCancel()
 	}

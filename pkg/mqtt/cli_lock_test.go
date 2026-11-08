@@ -4,9 +4,12 @@
 package mqtt
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 // cliLockFor returns the same mutex for repeat lookups of the same prefix.
@@ -46,6 +49,23 @@ func TestCliLockForConcurrent(t *testing.T) {
 	wg.Wait()
 	if counter != 100 {
 		t.Fatalf("counter %d, want 100 - lock did not serialize concurrent writers", counter)
+	}
+}
+
+// A caller queued behind a held lock gives up at its own deadline, not the holder's.
+func TestCliLockWaitEndsAtTheCallerDeadline(t *testing.T) {
+	c := &Client{}
+	l := c.cliLockFor("thesada/default/A")
+	l.Lock()
+	defer l.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := l.lockCtx(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lockCtx = %v, want the deadline", err)
+	}
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Fatalf("waited %s for a 50 ms deadline", waited)
 	}
 }
 

@@ -2,7 +2,6 @@ package web
 
 import (
 	"net/url"
-	"strings"
 	"testing"
 )
 
@@ -37,9 +36,8 @@ func TestAdminFlashRendersEveryRegisteredError(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, bad := adminFlash(q)
-	for _, f := range []adminFlashCode{flashAdminEnrollReset, flashAdminBrokerLive} {
-		if !strings.Contains(bad, adminFlashText["error"][f.code]) {
-			t.Errorf("error text %q misses %s", bad, f.code)
-		}
+	want := adminFlashText["error"][flashAdminEnrollReset.code] + " " + adminFlashText["error"][flashAdminBrokerLive.code]
+	if bad != want {
+		t.Errorf("error text = %q, want exactly %q", bad, want)
 	}
 }

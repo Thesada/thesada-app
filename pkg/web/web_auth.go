@@ -60,11 +60,7 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.notes.RequestLoginLink(email, s.clientIP(r)); err != nil {
-		slog.Error("magic link failed", "email", email, "err", err)
-		http.Error(w, "login failed", http.StatusInternalServerError)
-		return
-	}
+	s.notes.RequestLoginLinkAsync(email, s.clientIP(r))
 	s.render(w, r, "login.html", map[string]interface{}{"Sent": true, "Email": email})
 }
 
@@ -128,19 +124,31 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // startSession creates a new session row and writes the cookie on the response.
-// in: writer, request, user, auth method. out: none.
-func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *service.User, method string) {
+// in: writer, request, user, auth method. out: error when no session was created.
+func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *service.User, method string) error {
 	ua := r.UserAgent()
 	ip := s.clientIP(r)
 	token, expires, err := s.services.Auth.CreateSession(u.TenantID, u.ID, method, ua, ip)
 	if err != nil {
-		slog.Error("session create failed", "user_id", u.ID, "err", err)
-		return
+		slog.Error("auth.session.create_failed", "user_id", u.ID, "method", method, "err", err)
+		return err
 	}
 	authmw.SetSessionCookie(w, token, expires, httpsec.RequestIsSecure(r, s.cfg.TrustedProxies))
 	slog.Info("auth.session.state_change",
 		"from", "anonymous", "to", "authenticated",
 		"user_id", u.ID, "tenant", u.TenantID, "method", method)
+	return nil
+}
+
+// startSessionAndRedirect opens a session and sends the user to dest, or
+// answers 500 when the session could not be created.
+// in: writer, request, user, auth method, destination. out: 302 or 500.
+func (s *Server) startSessionAndRedirect(w http.ResponseWriter, r *http.Request, u *service.User, method, dest string) {
+	if err := s.startSession(w, r, u, method); err != nil {
+		http.Error(w, "login failed", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, dest, http.StatusFound)
 }
 
 // clientIP resolves the request's client IP, honouring X-Forwarded-For from a
@@ -222,11 +230,7 @@ func (s *Server) handleForgotSubmit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "forgot.html", map[string]interface{}{"Error": "Email is required."})
 		return
 	}
-	if err := s.notes.RequestResetLink(email, s.clientIP(r)); err != nil {
-		slog.Error("reset link failed", "email", email, "err", err)
-		http.Error(w, "reset failed", http.StatusInternalServerError)
-		return
-	}
+	s.notes.RequestResetLinkAsync(email, s.clientIP(r))
 	s.render(w, r, "forgot.html", map[string]interface{}{"Sent": true, "Email": email})
 }
 

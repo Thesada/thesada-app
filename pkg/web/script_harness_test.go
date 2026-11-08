@@ -33,11 +33,15 @@ func TestMqttScriptKeepsOneSocket(t *testing.T) {
 }
 
 // runScriptHarness renders page, pulls the inline script containing marker
-// and runs it under node with the harness. Skips when node is missing.
+// and runs it under node with the harness. Skips when node is missing,
+// fails instead when THESADA_REQUIRE_NODE is set (CI).
 func runScriptHarness(t *testing.T, page string, data map[string]interface{}, marker, harnessPath string) {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
+		if os.Getenv("THESADA_REQUIRE_NODE") != "" {
+			t.Fatal("node not on PATH and THESADA_REQUIRE_NODE is set")
+		}
 		t.Skip("node not on PATH")
 	}
 	s := &Server{}
