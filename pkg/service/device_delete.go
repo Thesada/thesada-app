@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -36,16 +37,24 @@ import (
 // The WHERE clause still pins the primary key; the GUC is the policy-layer
 // backstop. ErrNoTenant if tenantID is empty.
 //
-// in: ctx, tenant_id, device pk. out: error from pgx.
+// in: ctx, tenant_id, device pk. out: error from pgx, ErrDeviceNotInTenant
+// when no row matched (moved or already gone).
 func (s *DeviceService) DeleteByID(ctx context.Context, tenantID string, id uuid.UUID) error {
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		if err := tombstoneCertSerials(ctx, tx, id); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `DELETE FROM devices WHERE id = $1`, id)
+		tag, err := tx.Exec(ctx, `DELETE FROM devices WHERE id = $1`, id)
+		if err == nil && tag.RowsAffected() == 0 {
+			return ErrDeviceNotInTenant
+		}
 		return err
 	})
 }
+
+// ErrDeviceNotInTenant means a device write under a tenant matched no row:
+// the device moved to another tenant or is gone.
+var ErrDeviceNotInTenant = errors.New("device: no such device in this tenant")
 
 // tombstoneCertSerials copies identity-bound cert serials before the
 // device row and its certificates cascade away. A null pubkey is skipped:

@@ -44,6 +44,9 @@ func (s *Server) handleAdminDevicesBulk(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// bulkDeleteMax caps one bulk delete selection, so resolve and job stay bounded.
+const bulkDeleteMax = 500
+
 // bulkReassign moves every checked device into the target tenant via the
 // existing single-device DeviceService.Reassign path. Per-device errors
 // are counted and surfaced via the redirect query string; a unique-device
@@ -176,16 +179,16 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, flashAdminNoneSelected.on("/admin/devices"), http.StatusFound)
 		return
 	}
+	if len(ids) > bulkDeleteMax {
+		http.Redirect(w, r, flashAdminTooMany.on("/admin/devices"), http.StatusFound)
+		return
+	}
 	confirmCrossTenant := r.PostFormValue("confirm_cross_tenant") == "true"
 	user := authmw.CurrentUser(r)
 
-	// First pass: resolve devices, detect cross-tenant span.
-	type pending struct {
-		id     uuid.UUID
-		device *service.Device
-	}
-	resolved := make([]pending, 0, len(ids))
-	tenants := make(map[string]struct{})
+	// First pass: resolve devices in one query, detect cross-tenant span.
+	pks := make([]uuid.UUID, 0, len(ids))
+	seen := make(map[uuid.UUID]struct{}, len(ids))
 	var lookupFailed int
 	for _, raw := range ids {
 		id, err := uuid.Parse(raw)
@@ -193,20 +196,23 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 			lookupFailed++
 			continue
 		}
-		device, err := s.services.Devices.GetByIDAny(r.Context(), id)
-		if err != nil {
-			// Log a real backend error so a DB outage isn't silently counted as
-			// "not found" (matches the bulk-ota loop; the counter still advances).
-			slog.Warn("bulk resolve: device lookup failed", "id", id, "err", err)
-			lookupFailed++
-			continue
+		if _, dup := seen[id]; !dup {
+			seen[id] = struct{}{}
+			pks = append(pks, id)
 		}
-		if device == nil {
-			lookupFailed++
-			continue
-		}
-		resolved = append(resolved, pending{id: id, device: device})
-		tenants[device.TenantID] = struct{}{}
+	}
+	found, err := s.services.Devices.GetByIDsAny(r.Context(), pks)
+	if err != nil {
+		slog.Error("bulk resolve: device lookup failed", "ids", len(pks), "err", err)
+		http.Redirect(w, r, flashAdminDeleteFailed.on("/admin/devices"), http.StatusFound)
+		return
+	}
+	lookupFailed += len(pks) - len(found)
+	resolved := make([]*service.Device, 0, len(found))
+	tenants := make(map[string]struct{})
+	for i := range found {
+		resolved = append(resolved, &found[i])
+		tenants[found[i].TenantID] = struct{}{}
 	}
 	if len(resolved) == 0 {
 		http.Redirect(w, r,
@@ -224,12 +230,8 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 	// Second pass, as a job: about 2 s per paired online device and up to
 	// 30 s per broker timeout would outlast the edge proxy.
 	override := acceptSerialRecovery(r)
-	devices := make([]*service.Device, len(resolved))
-	for i, p := range resolved {
-		devices[i] = p.device
-	}
-	s.startJob(w, r, len(devices), flashAdminDeleteFailed.on("/admin/devices"), func(ctx context.Context, progress func(int)) string {
-		return s.bulkDeleteRun(ctx, user, devices, len(tenants), lookupFailed, len(ids), override, progress)
+	s.startJob(w, r, len(resolved), flashAdminDeleteFailed.on("/admin/devices"), func(ctx context.Context, progress func(int)) string {
+		return s.bulkDeleteRun(ctx, user, resolved, len(tenants), lookupFailed, len(ids), override, progress)
 	})
 }
 
@@ -240,7 +242,7 @@ func (s *Server) bulkDeleteDevices(w http.ResponseWriter, r *http.Request) {
 // override, progress. out: redirect target with registered flash codes.
 func (s *Server) bulkDeleteRun(ctx context.Context, user *service.User, devices []*service.Device, tenants, lookupFailed, total int, override bool, progress func(int)) string {
 	v := s.recoveryPath(ctx)
-	var ok, failed, refused, sealed, brokerLive, notStarted int
+	var ok, failed, refused, sealed, brokerLive, notStarted, moved int
 	var revokedKept []string
 	failed = lookupFailed
 	for i, device := range devices {
@@ -259,6 +261,11 @@ func (s *Server) bulkDeleteRun(ctx context.Context, user *service.User, devices 
 		case cascadeRefused:
 			refused++
 			continue
+		case cascadeMoved:
+			// Not what the operator selected any more, so it counts as not deleted.
+			moved++
+			failed++
+			continue
 		case cascadeFailed, cascadeStopped:
 			failed++
 			if verdict == cascadeStopped {
@@ -272,7 +279,7 @@ func (s *Server) bulkDeleteRun(ctx context.Context, user *service.User, devices 
 		s.audit(rowCtx, user, authz.DeviceDelete, service.AuditEntry{
 			TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
 			Detail: deviceDeleteDetail(map[string]any{"device_id": device.DeviceID, "bulk": true},
-				serialRecoveryAccepted(device.PairedAt != nil, v, override), brokerClean),
+				serialRecoveryAccepted(device.PairedAt != nil, v, override), brokerClean, verdict == cascadeOKSealed),
 		})
 		rowCancel()
 		ok++
@@ -289,7 +296,7 @@ func (s *Server) bulkDeleteRun(ctx context.Context, user *service.User, devices 
 		"user", user.Email,
 		"tenants", tenants,
 		"cross_tenant", tenants > 1,
-		"ok", ok, "failed", failed, "refused", refused, "sealed", sealed,
+		"ok", ok, "failed", failed, "refused", refused, "sealed", sealed, "moved", moved,
 		"broker_teardown_failed", brokerLive, "total", total)
 
 	done := flashAdminBulkDeleted
@@ -387,11 +394,15 @@ func auditDetail(detail map[string]any, accepted bool) map[string]any {
 }
 
 // deviceDeleteDetail is the device.delete audit detail on every delete path.
-// The row outlives the device, so it carries a broker client that may survive.
-// in: base detail, override accepted, broker teardown clean. out: detail.
-func deviceDeleteDetail(detail map[string]any, accepted, brokerClean bool) map[string]any {
+// The row outlives the device, so it carries a broker client that may survive
+// and an enrollment left sealed.
+// in: base detail, override accepted, broker teardown clean, enrollment sealed. out: detail.
+func deviceDeleteDetail(detail map[string]any, accepted, brokerClean, sealed bool) map[string]any {
 	if !brokerClean {
 		detail["broker_teardown_failed"] = true
+	}
+	if sealed {
+		detail["enroll_reset_failed"] = true
 	}
 	return auditDetail(detail, accepted)
 }
@@ -533,17 +544,39 @@ const (
 	cascadeRefused                 // recovery gate, nothing touched
 	cascadeFailed                  // revoke or DB delete failed
 	cascadeStopped                 // shutdown landed before the DB delete, row kept for a retry
+	cascadeMoved                   // the row left its tenant or is gone since the job read it, nothing touched
 )
 
-// cascadeDeleteOne gates, revokes, tears down dynsec and cascades the DB row
-// for one device. Every step ignores jobCtx's cancellation. A drain about to
-// give up stops it before the DB delete, leaving the revoked row for a retry.
-// Mirrors handleAdminDeviceDelete minus the confirm gate.
+// stepTimeout bounds one DB step of the cascade that has no tighter bound.
+const stepTimeout = 30 * time.Second
+
+// cascadeDeleteOne re-reads the device, then gates, revokes, tears down
+// dynsec and cascades the DB row. *device is refreshed from the row, so the
+// caller's audit row sees the gate's input. Every step ignores jobCtx's
+// cancellation. A drain about to give up stops it before the DB delete,
+// leaving the revoked row for a retry. Mirrors handleAdminDeviceDelete minus the confirm gate.
 // in: job ctx, caller ("bulk delete"|"tenant delete"), operator email, device,
 // probe verdict, operator override. out: verdict, false when the broker client may still be live.
 func (s *Server) cascadeDeleteOne(jobCtx context.Context, op, opEmail string, device *service.Device, v recoveryVerdict, override bool) (cascadeVerdict, bool) {
 	ctx := context.WithoutCancel(jobCtx)
 	reason := strings.ReplaceAll(op, " ", "_")
+	readCtx, readCancel := context.WithTimeout(ctx, stepTimeout)
+	fresh, err := s.services.Devices.GetByIDAny(readCtx, device.ID)
+	readCancel()
+	if err != nil {
+		slog.Error(op+": device re-read failed", "user", opEmail, "device", device.ID, "err", err)
+		return cascadeFailed, true
+	}
+	if fresh == nil || fresh.TenantID != device.TenantID {
+		to := ""
+		if fresh != nil {
+			to = fresh.TenantID
+		}
+		slog.Warn("device.delete.skipped", "reason", "moved", "op", op, "user", opEmail,
+			"device", device.ID, "device_id", device.DeviceID, "from_tenant", device.TenantID, "to_tenant", to)
+		return cascadeMoved, true
+	}
+	*device = *fresh
 	paired := device.PairedAt != nil
 	if !destructiveAllowed(paired, v.usable, override) {
 		slog.Warn("device.delete.refused", "reason", "recovery_path_unusable",
@@ -556,7 +589,10 @@ func (s *Server) cascadeDeleteOne(jobCtx context.Context, op, opEmail string, de
 	}
 	preemptiveCertClear(ctx, s, device, op, v.usable)
 
-	if err := s.services.Certificates.Revoke(ctx, device.TenantID, device.ID); err != nil {
+	revCtx, revCancel := context.WithTimeout(ctx, stepTimeout)
+	err = s.services.Certificates.Revoke(revCtx, device.TenantID, device.ID)
+	revCancel()
+	if err != nil {
 		slog.Error(op+": revoke cert failed",
 			"user", opEmail, "device", device.ID, "err", err)
 		return cascadeFailed, true

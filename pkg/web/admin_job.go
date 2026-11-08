@@ -28,34 +28,45 @@ type jobRunner struct {
 	mu       sync.Mutex
 	wg       sync.WaitGroup
 	stopped  bool
-	stop     chan struct{}
+	next     int
+	cancels  map[int]context.CancelFunc
 	deadline time.Time // when the drain gives up, zero when it has none
 }
 
-// begin registers one job. in: none. out: done func, a channel closed on
-// shutdown, false once draining has started.
-func (j *jobRunner) begin() (func(), <-chan struct{}, bool) {
+// begin registers one job and the cancel drain calls for it.
+// in: cancel. out: done func, false once draining has started.
+func (j *jobRunner) begin(cancel context.CancelFunc) (func(), bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.stopped {
-		return nil, nil, false
+		return nil, false
 	}
-	if j.stop == nil {
-		j.stop = make(chan struct{})
+	if j.cancels == nil {
+		j.cancels = make(map[int]context.CancelFunc)
 	}
+	key := j.next
+	j.next++
+	j.cancels[key] = cancel
 	j.wg.Add(1)
-	return j.wg.Done, j.stop, true
+	return func() {
+		j.mu.Lock()
+		delete(j.cancels, key)
+		j.mu.Unlock()
+		j.wg.Done()
+	}, true
 }
 
-// drain refuses new jobs, signals running ones, and waits until they return
-// or ctx ends. in: ctx bounding the wait. out: errJobsDrained on the deadline.
+// drain refuses new jobs, cancels running ones before it releases the lock,
+// and waits until they return or ctx ends.
+// in: ctx bounding the wait. out: errJobsDrained on the deadline.
 func (j *jobRunner) drain(ctx context.Context) error {
 	j.mu.Lock()
 	if !j.stopped {
 		j.stopped = true
 		j.deadline, _ = ctx.Deadline()
-		if j.stop != nil {
-			close(j.stop)
+		// Synchronous, so a job's next ctx.Err() check already sees the drain.
+		for _, cancel := range j.cancels {
+			cancel()
 		}
 	}
 	j.mu.Unlock()
@@ -92,24 +103,18 @@ func (s *Server) DrainJobs(ctx context.Context) error {
 // in: writer, request, total units, failure target, work(ctx, progress(done))
 // returning the redirect target. out: 302 to /admin/jobs/{id}, 503 while shutting down.
 func (s *Server) startJob(w http.ResponseWriter, r *http.Request, total int, failTarget string, work func(ctx context.Context, progress func(done int)) string) {
-	done, stop, ok := s.runner.begin()
+	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
+	done, ok := s.runner.begin(cancel)
 	if !ok {
+		cancel()
 		http.Error(w, "server is shutting down, retry shortly", http.StatusServiceUnavailable)
 		return
 	}
 	id := s.jobs.enqueue()
 	s.jobs.progress(id, 0, total)
-	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
 	go func() {
 		defer done()
 		defer cancel()
-		go func() {
-			select {
-			case <-stop:
-				cancel()
-			case <-ctx.Done():
-			}
-		}()
 		target := failTarget
 		safego.Run("web.admin_job", func() {
 			target = work(ctx, func(n int) { s.jobs.progress(id, n, total) })
@@ -120,7 +125,7 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, total int, fai
 }
 
 // handleAdminJob shows a running job's progress, redirects a finished one to
-// its target, and says so when the id is unknown, read or expired.
+// its target, and says so when the id is unknown or expired.
 // in: writer, GET /admin/jobs/{id}. out: HTML page or 302.
 func (s *Server) handleAdminJob(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))

@@ -11,24 +11,22 @@ import (
 
 	"github.com/google/uuid"
 	"thesada.app/app/pkg/authmw"
-	"thesada.app/app/pkg/httpsec"
 	"thesada.app/app/pkg/oauth"
 	"thesada.app/app/pkg/service"
 )
 
 // oidcStateCookie binds an OIDC flow's state to the browser that started it.
-const oidcStateCookie = "thesada_oidc_state"
-
-// oidcStatePath scopes the state cookie to the OIDC routes.
-const oidcStatePath = "/auth/oidc/"
+// The __Host- prefix makes the browser refuse one set by a sibling host.
+const oidcStateCookie = "__Host-thesada_oidc_state"
 
 // setOIDCState stores state for the callback. Lax, so the IdP's top-level redirect carries it.
+// __Host- requires Secure, Path=/ and no Domain.
 // in: writer, request, state (empty clears). out: none.
-func (s *Server) setOIDCState(w http.ResponseWriter, r *http.Request, state string) {
+func (s *Server) setOIDCState(w http.ResponseWriter, _ *http.Request, state string) {
 	c := &http.Cookie{
-		Name: oidcStateCookie, Value: state, Path: oidcStatePath,
+		Name: oidcStateCookie, Value: state, Path: "/",
 		MaxAge: int(oauth.AuthRequestTTL.Seconds()), HttpOnly: true,
-		Secure: httpsec.RequestIsSecure(r, s.cfg.TrustedProxies), SameSite: http.SameSiteLaxMode,
+		Secure: true, SameSite: http.SameSiteLaxMode,
 	}
 	if state == "" {
 		c.MaxAge = -1
@@ -191,8 +189,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// --- sign-in flow: existing link first ------------------------------
 	if u, err := s.services.OAuth.FindUserByIdentity(ctx, p.Row.ID, claims.Subject); err == nil {
 		// Kanidm already authenticated this user. Local TOTP applies to password and magic link only.
-		s.startSession(w, r, u, "oidc")
-		http.Redirect(w, r, safeReturn(pending.ReturnTo, "/devices"), http.StatusFound)
+		s.startSessionAndRedirect(w, r, u, "oidc", safeReturn(pending.ReturnTo, "/devices"))
 		return
 	} else if !errors.Is(err, service.ErrNotFound) {
 		slog.Error("oidc identity lookup failed", "err", err)
@@ -207,15 +204,20 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// same email exists in several tenants.
 	if claims.Email != "" && claims.EmailVerified {
 		if u, err := s.services.OAuth.FindUserByEmail(ctx, p.Row.TenantID, claims.Email); err == nil {
-			if err := s.services.OAuth.LinkIdentity(ctx, u.ID, p.Row.ID, claims.Subject, claims.Email); err == nil {
-				slog.Info("oauth.identity.state_change",
-					"from", "unlinked", "to", "linked",
-					"user_id", u.ID, "tenant", u.TenantID, "provider", p.Row.Slug, "trigger", "email_match")
-				// Kanidm already authenticated this user. Local TOTP applies to password and magic link only.
-				s.startSession(w, r, u, "oidc")
-				http.Redirect(w, r, safeReturn(pending.ReturnTo, "/devices"), http.StatusFound)
+			if err := s.services.OAuth.LinkIdentity(ctx, u.ID, p.Row.ID, claims.Subject, claims.Email); err != nil {
+				slog.Error("oauth.identity.link_failed",
+					"user_id", u.ID, "tenant", u.TenantID, "provider", p.Row.Slug, "trigger", "email_match", "err", err)
+				s.render(w, r, "login.html", map[string]interface{}{
+					"Error": "Could not link this " + p.Row.DisplayName + " identity to your account. Try again, or ask an admin.",
+				})
 				return
 			}
+			slog.Info("oauth.identity.state_change",
+				"from", "unlinked", "to", "linked",
+				"user_id", u.ID, "tenant", u.TenantID, "provider", p.Row.Slug, "trigger", "email_match")
+			// Kanidm already authenticated this user. Local TOTP applies to password and magic link only.
+			s.startSessionAndRedirect(w, r, u, "oidc", safeReturn(pending.ReturnTo, "/devices"))
+			return
 		} else if !errors.Is(err, service.ErrNotFound) {
 			slog.Error("oidc email lookup failed", "err", err)
 		}

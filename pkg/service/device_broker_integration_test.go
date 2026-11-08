@@ -110,6 +110,52 @@ func TestBrokerIdentity_SurvivesReassignAndStaysOnOneRow(t *testing.T) {
 	}
 }
 
+// A row with no recorded identity (pre-0040 pairing) keeps the old tenant's
+// identity through a reassign instead of reading as the new tenant's.
+func TestBrokerIdentity_ReassignPinsAnUnrecordedIdentityToTheOldTenant(t *testing.T) {
+	env := servicetest.Start(t)
+	dev := env.Services.Devices
+	ctx := context.Background()
+	const a, b = "broker-pin-a", "broker-pin-b"
+	pk := brokerTenants(t, env, a, b)
+	if current, _ := identityOf(t, env, pk); current != "" {
+		t.Fatalf("seeded row already pinned to %q", current)
+	}
+	if err := dev.Reassign(ctx, pk, b); err != nil {
+		t.Fatal(err)
+	}
+	if current, stale := identityOf(t, env, pk); current != a || len(stale) != 0 {
+		t.Fatalf("after reassign = %q %v, want pinned to %s", current, stale, a)
+	}
+	if id, err := dev.BrokerIdentityOf(ctx, loadDevice(t, env, pk)); err != nil || id.Current != a {
+		t.Fatalf("identity after reassign = %+v, %v, want %s", id, err, a)
+	}
+	// A second move keeps the pin: the identity still carries the first tenant.
+	const c = "broker-pin-c"
+	env.SeedTenant(t, c)
+	if err := dev.Reassign(ctx, pk, c); err != nil {
+		t.Fatal(err)
+	}
+	if current, stale := identityOf(t, env, pk); current != a || len(stale) != 0 {
+		t.Fatalf("after the second reassign = %q %v, want still %s", current, stale, a)
+	}
+}
+
+// The unpinned fallback reads the row's tenant, not the caller's stale snapshot.
+func TestBrokerIdentityOf_UnpinnedFallsBackToTheRowsTenant(t *testing.T) {
+	env := servicetest.Start(t)
+	ctx := context.Background()
+	const a, b = "broker-snap-a", "broker-snap-b"
+	pk := brokerTenants(t, env, a, b)
+	snapshot := loadDevice(t, env, pk)
+	if _, err := env.Super.Exec(ctx, `UPDATE devices SET tenant_id = $1 WHERE id = $2`, b, pk); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := env.Services.Devices.BrokerIdentityOf(ctx, snapshot); err != nil || id.Current != b {
+		t.Fatalf("identity = %+v, %v, want the row's tenant %s", id, err, b)
+	}
+}
+
 func TestBrokerIdentity_FormerTenantCannotClaimTheID(t *testing.T) {
 	for _, stale := range []bool{false, true} {
 		name := "current"

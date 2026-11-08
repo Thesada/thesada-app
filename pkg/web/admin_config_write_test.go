@@ -277,8 +277,8 @@ func TestStagedWrite_RefusesPathsTheShellSplits(t *testing.T) {
 }
 
 func TestWriteSteps_CoversChunksSizeCheckRenameAndRemove(t *testing.T) {
-	if got := writeSteps(writeChunkSize + 1); got != 5 {
-		t.Fatalf("writeSteps = %d, want 2 chunks + fs.cat + fs.mv + fs.rm", got)
+	if got := writeSteps(writeChunkSize + 1); got != 6 {
+		t.Fatalf("writeSteps = %d, want 2 chunks + fs.cat + fs.mv + readback or fs.rm pair", got)
 	}
 }
 
@@ -311,14 +311,125 @@ func TestStagedWrite_RefusesSDPaths(t *testing.T) {
 func TestClaimDeviceWrite_OneWritePerDevice(t *testing.T) {
 	s := &Server{}
 	a, b := uuid.New(), uuid.New()
-	if !s.claimDeviceWrite(a) || !s.claimDeviceWrite(b) {
+	ta, okA := s.claimDeviceWrite(a, time.Minute)
+	_, okB := s.claimDeviceWrite(b, time.Minute)
+	if !okA || !okB {
 		t.Fatal("first claim refused")
 	}
-	if s.claimDeviceWrite(a) {
+	if _, ok := s.claimDeviceWrite(a, time.Minute); ok {
 		t.Fatal("second write to the same device claimed")
 	}
-	s.releaseDeviceWrite(a)
-	if !s.claimDeviceWrite(a) {
+	s.releaseDeviceWrite(a, ta)
+	if _, ok := s.claimDeviceWrite(a, time.Minute); !ok {
 		t.Fatal("claim not released")
+	}
+}
+
+func TestClaimDeviceWrite_SecondReleaseKeepsTheNextWritesClaim(t *testing.T) {
+	s := &Server{}
+	dev := uuid.New()
+	first, _ := s.claimDeviceWrite(dev, time.Minute)
+	s.releaseDeviceWrite(dev, first)
+	if _, ok := s.claimDeviceWrite(dev, time.Minute); !ok {
+		t.Fatal("next write refused after release")
+	}
+	s.releaseDeviceWrite(dev, first)
+	if _, ok := s.claimDeviceWrite(dev, time.Minute); ok {
+		t.Fatal("the first write's deferred release dropped the next write's claim")
+	}
+}
+
+func TestClaimDeviceWrite_ExpiredClaimIsTakenOver(t *testing.T) {
+	s := &Server{}
+	dev := uuid.New()
+	stale, _ := s.claimDeviceWrite(dev, -time.Second)
+	fresh, ok := s.claimDeviceWrite(dev, time.Minute)
+	if !ok {
+		t.Fatal("a claim past its expiry still blocks the device")
+	}
+	s.releaseDeviceWrite(dev, stale)
+	if _, ok := s.claimDeviceWrite(dev, time.Minute); ok {
+		t.Fatal("the stale owner's release dropped the live claim")
+	}
+	s.releaseDeviceWrite(dev, fresh)
+	if _, ok := s.claimDeviceWrite(dev, time.Minute); !ok {
+		t.Fatal("live claim not released by its owner")
+	}
+}
+
+func TestWriteClaimTTL_OutlastsEveryStep(t *testing.T) {
+	step := 30 * time.Second
+	if got, min := writeClaimTTL(step, 3*writeChunkSize), time.Duration(writeSteps(3*writeChunkSize))*step+snapshotUpsertTimeout; got <= min {
+		t.Fatalf("claim ttl %s, want more than the %s the steps can take", got, min)
+	}
+}
+
+func TestStagedWrite_RefusesAPathTheStagingCopyPushesPastTheFirmwareCap(t *testing.T) {
+	fit := "/" + strings.Repeat("a", fwPathCap-1-len(stagedSuffix)-1)
+	if err := stagedWrite(context.Background(), newFakeFS(map[string]string{}), time.Second, "p", fit, []byte("{}")); err != nil {
+		t.Fatalf("%d-byte path refused: %v", len(fit), err)
+	}
+	long := fit + "b"
+	fs := newFakeFS(map[string]string{})
+	err := stagedWrite(context.Background(), fs, time.Second, "p", long, []byte("{}"))
+	if err == nil || !strings.Contains(err.Error(), "path too long") || len(fs.calls) != 0 {
+		t.Fatalf("%d-byte path: err=%v calls=%q, want a refusal before any command", len(long), err, fs.calls)
+	}
+}
+
+func TestStagedWrite_RenameTimeoutReadsBackTheOutcome(t *testing.T) {
+	content := []byte(`{"wifi":{"ssid":"new"}}`)
+	cases := []struct {
+		name       string
+		renamed    bool // the device ran fs.mv, only the reply was lost
+		readback   func(n int, cmd, arg string) *fakeReply
+		wantErr    string
+		wantStatus requestStatus
+		wantCalls  string
+		wantLive   string
+	}{
+		{"rename landed", true, nil, "", "",
+			"fs.write|fs.cat|fs.mv|fs.cat|fs.cat", string(content)},
+		{"rename never ran", false, nil, "timed out", reqStatusTimeout,
+			"fs.write|fs.cat|fs.mv|fs.cat|fs.rm", oldConfig},
+		{"readback lost too", true,
+			func(n int, cmd, _ string) *fakeReply { return when(n == 4, nil, errTimeout) },
+			"rename outcome is unknown", reqStatusTimeout,
+			"fs.write|fs.cat|fs.mv|fs.cat", string(content)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeFS(map[string]string{"/config.json": oldConfig})
+			fs.hook = func(n int, cmd, arg string) *fakeReply {
+				if cmd == "fs.mv" {
+					if tc.renamed {
+						fs.files["/config.json"] = fs.files["/config.json.new"]
+						delete(fs.files, "/config.json.new")
+					}
+					return &fakeReply{nil, errTimeout}
+				}
+				if tc.readback != nil {
+					return tc.readback(n, cmd, arg)
+				}
+				return nil
+			}
+			err := stagedWrite(context.Background(), fs, 50*time.Millisecond, "p", "/config.json", content)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("stagedWrite = %v, want success read back", err)
+				}
+			} else {
+				var f *writeFailure
+				if !errors.As(err, &f) || f.status != tc.wantStatus || !strings.Contains(f.msg, tc.wantErr) {
+					t.Fatalf("err = %v, want %s containing %q", err, tc.wantStatus, tc.wantErr)
+				}
+			}
+			if got := strings.Join(cmdNames(fs.calls), "|"); got != tc.wantCalls {
+				t.Fatalf("calls = %s, want %s", got, tc.wantCalls)
+			}
+			if fs.files["/config.json"] != tc.wantLive {
+				t.Fatalf("config.json = %q, want %q", fs.files["/config.json"], tc.wantLive)
+			}
+		})
 	}
 }

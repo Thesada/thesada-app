@@ -906,8 +906,9 @@ challenge), a nonce, and a state value persisted to
 `RETURNING` so reuse fails atomically. PKCE is required by Kanidm
 1.x for confidential clients - non-negotiable.
 
-`/start` also sets the state in an HttpOnly, Lax cookie
-`thesada_oidc_state` scoped to `/auth/oidc/`, and the callback refuses a
+`/start` also sets the state in an HttpOnly, Lax, Secure host-only cookie
+`__Host-thesada_oidc_state` (Path=/, no Domain, so a sibling host cannot
+plant one), and the callback refuses a
 state that cookie does not carry, before the state row is touched. A
 callback URL from the attacker's own IdP login therefore does not sign
 another browser in. Verified by `pkg/web/oidc_state_integration_test.go`.

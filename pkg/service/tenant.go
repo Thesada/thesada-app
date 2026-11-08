@@ -78,6 +78,10 @@ var ErrTenantProtected = errors.New("tenant is protected")
 // leave through the device delete path, never by tenant cascade.
 var ErrTenantHasDevices = errors.New("tenant still has devices")
 
+// ErrTenantChanged means the slug no longer names the tenant the caller saw:
+// it was deleted, or deleted and created again.
+var ErrTenantChanged = errors.New("tenant changed since it was read")
+
 // ErrTenantHasSuperAdmins means a super-admin user is homed in the tenant. The
 // users FK cascades, so deleting it would delete those accounts.
 var ErrTenantHasSuperAdmins = errors.New("tenant holds a super-admin user")
@@ -294,14 +298,20 @@ func (s *TenantService) HasSuperAdmins(slug string) (bool, error) {
 // Delete removes a tenant by slug, refusing while any device row or any
 // super-admin user remains. The tenant row and its users are locked first, so
 // a racing device insert or promote waits and then sees the tenant gone.
-// in: slug, caller's tenant ids. out: error (ErrTenantProtected, ErrTenantHasDevices, ErrTenantHasSuperAdmins).
-func (s *TenantService) Delete(slug string, callerTenantIDs ...string) error {
+// tenantUUID is the identity the caller saw, so a slug recreated since is refused.
+// in: ctx, tenant uuid, slug, caller's tenant ids. out: error (ErrTenantProtected,
+// ErrTenantChanged, ErrTenantHasDevices, ErrTenantHasSuperAdmins).
+func (s *TenantService) Delete(ctx context.Context, tenantUUID uuid.UUID, slug string, callerTenantIDs ...string) error {
 	if err := DeleteAllowed(slug, callerTenantIDs...); err != nil {
 		return err
 	}
-	ctx := context.Background()
 	if err := db.WithAdminAudit(ctx, s.pools.Admin, "tenant.delete", func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `SELECT 1 FROM tenants WHERE id = $1 FOR UPDATE`, slug); err != nil {
+		var current uuid.UUID
+		err := tx.QueryRow(ctx, `SELECT uuid FROM tenants WHERE id = $1 FOR UPDATE`, slug).Scan(&current)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && current != tenantUUID) {
+			return ErrTenantChanged
+		}
+		if err != nil {
 			return err
 		}
 		var hasDevices bool
@@ -321,7 +331,7 @@ func (s *TenantService) Delete(slug string, callerTenantIDs ...string) error {
 		if hasSuper {
 			return ErrTenantHasSuperAdmins
 		}
-		_, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, slug)
+		_, err = tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, slug)
 		return err
 	}); err != nil {
 		return err

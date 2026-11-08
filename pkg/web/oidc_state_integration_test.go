@@ -33,6 +33,7 @@ type fakeIdP struct {
 	srv     *httptest.Server
 	key     *rsa.PrivateKey
 	subject string
+	email   string // signed as a verified email claim when set
 	mu      sync.Mutex
 	nonce   string
 	tokens  int
@@ -73,10 +74,14 @@ func newFakeIdP(t *testing.T, subject string) *fakeIdP {
 			return
 		}
 		now := time.Now()
-		idTok, err := jwt.Signed(signer).Claims(map[string]any{
+		claims := map[string]any{
 			"iss": f.srv.URL, "aud": "client-oidc", "sub": f.subject, "nonce": nonce,
 			"iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(),
-		}).Serialize()
+		}
+		if f.email != "" {
+			claims["email"], claims["email_verified"] = f.email, true
+		}
+		idTok, err := jwt.Signed(signer).Claims(claims).Serialize()
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return

@@ -3,6 +3,7 @@ package alerts
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -59,6 +60,52 @@ func TestSendTelegram_TransportErrorNeverLeaksToken(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "connection refused") {
 		t.Fatalf("underlying cause lost, error: %q", err.Error())
+	}
+}
+
+// eofBody records whether the reader reached EOF before Close.
+type eofBody struct {
+	*strings.Reader
+	eof bool
+}
+
+func (b *eofBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.eof = true
+	}
+	return n, err
+}
+
+func (b *eofBody) Close() error { return nil }
+
+// The response body is read to EOF, so keep-alive reuses the connection, and
+// an error status carries the API's own reason.
+func TestSendTelegram_DrainsBodyAndReportsReason(t *testing.T) {
+	for _, c := range []struct {
+		status int
+		body   string
+	}{
+		{http.StatusOK, `{"ok":true,"result":{}}`},
+		{http.StatusBadRequest, `{"ok":false,"description":"Bad Request: chat not found"}`},
+	} {
+		body := &eofBody{Reader: strings.NewReader(c.body)}
+		n := &Notifier{
+			cfg: &config.Config{TelegramBotToken: "1:tok"},
+			http: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: c.status, Body: body, Header: http.Header{}}, nil
+			})},
+		}
+		err := n.sendTelegram(context.Background(), "42", "hello")
+		if !body.eof {
+			t.Errorf("status %d: body closed before EOF", c.status)
+		}
+		if c.status >= 400 && (err == nil || !strings.Contains(err.Error(), "chat not found")) {
+			t.Errorf("status %d: error %v, want the API reason", c.status, err)
+		}
+		if c.status < 400 && err != nil {
+			t.Errorf("status %d: %v", c.status, err)
+		}
 	}
 }
 

@@ -27,8 +27,7 @@ func (s *Server) continueLocalLogin(w http.ResponseWriter, r *http.Request, u *s
 		return
 	}
 	if !required {
-		s.startSession(w, r, u, method)
-		http.Redirect(w, r, "/devices", http.StatusFound)
+		s.startSessionAndRedirect(w, r, u, method, "/devices")
 		return
 	}
 	token, expires, err := s.services.Auth.BeginTOTPLogin(u.TenantID, u.ID, method)
@@ -96,8 +95,7 @@ func (s *Server) handleTOTPSubmit(w http.ResponseWriter, r *http.Request) {
 	slog.Info("auth.totp.state_change",
 		"from", "challenged", "to", "passed",
 		"user_id", u.ID, "tenant", u.TenantID, "method", method)
-	s.startSession(w, r, u, method)
-	http.Redirect(w, r, "/devices", http.StatusFound)
+	s.startSessionAndRedirect(w, r, u, method, "/devices")
 }
 
 // handleTOTPBegin starts authenticator enrollment for a password account.

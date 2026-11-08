@@ -171,7 +171,7 @@ func (s *Server) handleAdminDeviceDelete(w http.ResponseWriter, r *http.Request)
 	defer auditCancel()
 	s.audit(auditCtx, user, authz.DeviceDelete, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
-		Detail: deviceDeleteDetail(map[string]any{"device_id": device.DeviceID}, accepted, brokerClean),
+		Detail: deviceDeleteDetail(map[string]any{"device_id": device.DeviceID}, accepted, brokerClean, enrollErr != nil),
 	})
 
 	// A sealed enrollment or a surviving broker client is said on the page,

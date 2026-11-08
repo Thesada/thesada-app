@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/google/uuid"
 )
@@ -111,19 +110,39 @@ type cliEnvelope struct {
 	Args  string `json:"args"`
 }
 
-// cliLockFor returns a mutex unique to the given device. Lazily initialised
+// cliLock is a per-device mutex whose wait can end with the caller's deadline.
+type cliLock struct{ ch chan struct{} }
+
+// Lock waits for the lock without a deadline.
+func (l *cliLock) Lock() { l.ch <- struct{}{} }
+
+// Unlock releases the lock.
+func (l *cliLock) Unlock() { <-l.ch }
+
+// lockCtx waits for the lock until ctx ends. in: ctx. out: ctx.Err() when it
+// ended first, nil with the lock held.
+func (l *cliLock) lockCtx(ctx context.Context) error {
+	select {
+	case l.ch <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// cliLockFor returns a lock unique to the given device. Lazily initialised
 // so the map never grows beyond devices that actually receive CLI traffic.
-// Caller must Lock/Unlock; held for the duration of one CLIRequest.
-// in: topic prefix. out: mutex pointer (never nil).
-func (c *Client) cliLockFor(topicPrefix string) *sync.Mutex {
+// Held for the duration of one CLIRequest.
+// in: topic prefix. out: lock pointer (never nil).
+func (c *Client) cliLockFor(topicPrefix string) *cliLock {
 	c.cliMu.Lock()
 	defer c.cliMu.Unlock()
 	if c.cliLocks == nil {
-		c.cliLocks = make(map[string]*sync.Mutex)
+		c.cliLocks = make(map[string]*cliLock)
 	}
 	m, ok := c.cliLocks[topicPrefix]
 	if !ok {
-		m = &sync.Mutex{}
+		m = &cliLock{ch: make(chan struct{}, 1)}
 		c.cliLocks[topicPrefix] = m
 	}
 	return m
@@ -184,7 +203,9 @@ func (c *Client) CLIRequest(ctx context.Context, topicPrefix, command, payload s
 	}
 
 	lock := c.cliLockFor(topicPrefix)
-	lock.Lock()
+	if err := lock.lockCtx(ctx); err != nil {
+		return nil, err
+	}
 	defer lock.Unlock()
 	// A deadline spent waiting for the lock must not still send the command.
 	if err := ctx.Err(); err != nil {
@@ -235,7 +256,9 @@ func (c *Client) CLIRequestRaw(ctx context.Context, topicPrefix, command string,
 	}
 
 	lock := c.cliLockFor(topicPrefix)
-	lock.Lock()
+	if err := lock.lockCtx(ctx); err != nil {
+		return nil, err
+	}
 	defer lock.Unlock()
 	// A deadline spent waiting for the lock must not still send the command.
 	if err := ctx.Err(); err != nil {

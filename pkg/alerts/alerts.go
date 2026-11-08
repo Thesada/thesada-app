@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -390,6 +391,16 @@ func retryBackoff(base time.Duration, attempts int) time.Duration {
 	return base << shift
 }
 
+// outcomeTimeout bounds one delivery outcome write.
+const outcomeTimeout = 10 * time.Second
+
+// outcomeCtx detaches an outcome write from shutdown: a send that already
+// happened must be recorded, or the next sweep sends it again.
+// in: ctx. out: bounded context, cancel.
+func outcomeCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), outcomeTimeout)
+}
+
 // deliveryFlags is which channels accepted this attempt.
 type deliveryFlags struct {
 	email    bool
@@ -418,6 +429,8 @@ func (n *Notifier) recordOutcome(ctx context.Context, tenantID string, alertID i
 	if !next.IsZero() {
 		nextArg = next
 	}
+	ctx, cancel := outcomeCtx(ctx)
+	defer cancel()
 	err := db.WithTenant(ctx, n.db, tenantID, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, query, alertID, sent.email, sent.telegram, sent.webhook, status, attempts, nextArg); err != nil {
 			return fmt.Errorf("record delivery outcome: %w", err)
@@ -458,8 +471,11 @@ func (n *Notifier) loadAlert(ctx context.Context, tx pgx.Tx, alertID int64) (*al
 // min_severity threshold is met.
 // in: ctx, tenant-scoped tx, alert id. out: [] recipient, error.
 func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64) ([]recipient, error) {
+	// One row per user, channel and destination: a device and an all-devices
+	// subscription on the same channel send once. The device one wins.
 	const query = `
-		SELECT s.id::text, s.user_id::text, s.channel, u.email::text, u.telegram_chat_id, s.destination
+		SELECT DISTINCT ON (s.user_id, s.channel, coalesce(s.destination, ''))
+		       s.id::text, s.user_id::text, s.channel, u.email::text, u.telegram_chat_id, s.destination
 		FROM device_alerts a
 		JOIN alert_subscriptions s
 		  ON (s.device_pk = a.device_pk OR s.device_pk IS NULL)
@@ -467,7 +483,8 @@ func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64)
 		WHERE a.id = $1
 		  AND (CASE a.severity WHEN 'info' THEN 0 WHEN 'warn' THEN 1 WHEN 'crit' THEN 2 END)
 		      >=
-		      (CASE s.min_severity WHEN 'info' THEN 0 WHEN 'warn' THEN 1 WHEN 'crit' THEN 2 END)`
+		      (CASE s.min_severity WHEN 'info' THEN 0 WHEN 'warn' THEN 1 WHEN 'crit' THEN 2 END)
+		ORDER BY s.user_id, s.channel, coalesce(s.destination, ''), s.device_pk IS NULL, s.id`
 	rows, err := tx.Query(ctx, query, alertID)
 	if err != nil {
 		return nil, fmt.Errorf("recipients query: %w", err)
@@ -513,6 +530,8 @@ func (n *Notifier) loadWebhookSent(ctx context.Context, tx pgx.Tx, alertID int64
 // markWebhookSent records one subscription so a later attempt does not POST it again.
 // in: ctx, tenant id, alert id, subscription id. out: error.
 func (n *Notifier) markWebhookSent(ctx context.Context, tenantID string, alertID int64, subID string) error {
+	ctx, cancel := outcomeCtx(ctx)
+	defer cancel()
 	err := db.WithTenant(ctx, n.db, tenantID, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`INSERT INTO alert_webhook_deliveries (alert_id, subscription_id) VALUES ($1, $2)
@@ -591,8 +610,11 @@ func (n *Notifier) sendTelegram(ctx context.Context, chatID, body string) error 
 		return redactToken(err, n.cfg.TelegramBotToken)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// Read to EOF, so the connection goes back to the keep-alive pool.
+	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("telegram api status %d", resp.StatusCode)
+		return redactToken(fmt.Errorf("telegram api status %d: %s", resp.StatusCode, bytes.TrimSpace(snippet)), n.cfg.TelegramBotToken)
 	}
 	return nil
 }

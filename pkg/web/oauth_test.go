@@ -72,3 +72,25 @@ func TestSafeReturn(t *testing.T) {
 		}
 	}
 }
+
+// The state cookie is host-locked over plain HTTP too, so a sibling host cannot plant one.
+func TestSetOIDCState_HostPrefixedCookie(t *testing.T) {
+	s := &Server{}
+	for _, state := range []string{"st1", ""} {
+		rec := httptest.NewRecorder()
+		s.setOIDCState(rec, httptest.NewRequest(http.MethodGet, "http://app.example/auth/oidc/k/start", nil), state)
+		cs := rec.Result().Cookies()
+		if len(cs) != 1 {
+			t.Fatalf("state %q: %d cookies, want 1", state, len(cs))
+		}
+		c := cs[0]
+		if c.Name != "__Host-thesada_oidc_state" || !c.Secure || c.Path != "/" || c.Domain != "" || !c.HttpOnly {
+			t.Fatalf("state %q: cookie %+v, want __Host- name, Secure, Path=/, no Domain, HttpOnly", state, c)
+		}
+	}
+	r := httptest.NewRequest(http.MethodGet, "/auth/oidc/k/callback", nil)
+	r.AddCookie(&http.Cookie{Name: "thesada_oidc_state", Value: "st1"})
+	if oidcStateMatches(r, "st1") {
+		t.Fatal("the old unprefixed cookie still binds the flow")
+	}
+}
