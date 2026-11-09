@@ -36,7 +36,7 @@ import (
 
 // AuthRequestTTL bounds how long a pending authorize flow stays valid. Long
 // enough for a slow user on a bad network to complete the IdP round-trip;
-// short enough to make replay attacks uninteresting. Matches Kanidm's own
+// short enough to make replay attacks uninteresting. Matches the common
 // authorize code TTL of 10 min.
 const AuthRequestTTL = 10 * time.Minute
 
@@ -218,9 +218,8 @@ func (p *Provider) Exchange(ctx context.Context, code string, pending *PendingRe
 		return nil, fmt.Errorf("oauth: parse id_token claims: %w", err)
 	}
 
-	// Fall back to userinfo when the id_token omitted email (Kanidm does
-	// include email in the id_token for scope=email, but not every IdP
-	// does; this keeps us portable).
+	// Fall back to userinfo when the id_token omitted email (not every IdP
+	// puts email in the id_token for scope=email, this keeps us portable).
 	if c.Email == "" {
 		ui, err := p.oidc.UserInfo(ctx, oauth2.StaticTokenSource(tok))
 		if err == nil {

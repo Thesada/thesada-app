@@ -7,6 +7,7 @@ package service
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 
 	"github.com/google/uuid"
@@ -61,62 +62,88 @@ const identityHeldElsewhere = `EXISTS (SELECT 1 FROM devices o
 func (s *DeviceService) ReserveBrokerIdentity(ctx context.Context, tenantID, deviceID string) (BrokerIdentity, error) {
 	var out BrokerIdentity
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "device broker identity reserve", func(tx pgx.Tx) error {
-		var prev *string
-		var stale []string
-		if err := tx.QueryRow(ctx,
-			`SELECT id, broker_tenant_id, broker_stale_tenants FROM devices
-			  WHERE tenant_id = $1 AND device_id = $2 FOR UPDATE`,
-			tenantID, deviceID).Scan(&out.DevicePk, &prev, &stale); err != nil {
-			return err
-		}
-		var taken bool
-		if err := tx.QueryRow(ctx, `SELECT `+identityHeldElsewhere,
-			tenantID, deviceID, out.DevicePk).Scan(&taken); err != nil {
-			return err
-		}
-		if taken {
-			return ErrBrokerIdentityTaken
-		}
-		if prev != nil && *prev != tenantID && !slices.Contains(stale, *prev) {
-			stale = append(stale, *prev)
-		}
-		stale = slices.DeleteFunc(stale, func(t string) bool { return t == tenantID })
-		_, err := tx.Exec(ctx,
-			`UPDATE devices SET broker_tenant_id = $1, broker_stale_tenants = $2 WHERE id = $3`,
-			tenantID, stale, out.DevicePk)
-		if violates(err, "devices_broker_identity_uniq") {
-			return ErrBrokerIdentityTaken
-		}
-		out.Current, out.Stale = tenantID, stale
+		var err error
+		out, err = reserveBrokerIdentityTx(ctx, tx, tenantID, deviceID)
 		return err
 	})
 	return out, err
 }
 
+// reserveBrokerIdentityTx is ReserveBrokerIdentity inside the caller's
+// transaction. A taken identity returns before any write.
+// in: ctx, tx, tenant, device id. out: identity, error.
+func reserveBrokerIdentityTx(ctx context.Context, tx pgx.Tx, tenantID, deviceID string) (BrokerIdentity, error) {
+	var out BrokerIdentity
+	var prev *string
+	var stale []string
+	if err := tx.QueryRow(ctx,
+		`SELECT id, broker_tenant_id, broker_stale_tenants FROM devices
+		  WHERE tenant_id = $1 AND device_id = $2 FOR UPDATE`,
+		tenantID, deviceID).Scan(&out.DevicePk, &prev, &stale); err != nil {
+		return out, err
+	}
+	var taken bool
+	if err := tx.QueryRow(ctx, `SELECT `+identityHeldElsewhere,
+		tenantID, deviceID, out.DevicePk).Scan(&taken); err != nil {
+		return out, err
+	}
+	if taken {
+		return out, ErrBrokerIdentityTaken
+	}
+	if prev != nil && *prev != tenantID && !slices.Contains(stale, *prev) {
+		stale = append(stale, *prev)
+	}
+	stale = slices.DeleteFunc(stale, func(t string) bool { return t == tenantID })
+	_, err := tx.Exec(ctx,
+		`UPDATE devices SET broker_tenant_id = $1, broker_stale_tenants = $2 WHERE id = $3`,
+		tenantID, stale, out.DevicePk)
+	if violates(err, "devices_broker_identity_uniq") {
+		return out, ErrBrokerIdentityTaken
+	}
+	out.Current, out.Stale = tenantID, stale
+	return out, err
+}
+
+// ErrBrokerSnapshotStale means the device moved tenants since the caller read
+// it and its identity is unpinned, so neither tenant's client is known.
+var ErrBrokerSnapshotStale = errors.New("device moved since the snapshot, broker identity unknown")
+
 // BrokerIdentityOf returns what the device row holds on the broker. An
 // unrecorded current identity falls back to the device's own tenant, unless
-// another row holds that one: then the row has none of its own.
+// another row holds that one: then the row has none of its own. A caller's
+// snapshot from another tenant is ErrBrokerSnapshotStale, nothing to tear down.
 // Cross-tenant by design, through WithAdminAudit.
 // in: ctx, device. out: identity, error.
 func (s *DeviceService) BrokerIdentityOf(ctx context.Context, device *Device) (BrokerIdentity, error) {
 	out := BrokerIdentity{DevicePk: device.ID}
 	var recorded *string
+	var rowTenant string
 	var heldElsewhere bool
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "device broker identity lookup", func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT d.broker_tenant_id, d.broker_stale_tenants,
+			`SELECT d.broker_tenant_id, d.broker_stale_tenants, d.tenant_id,
 			        EXISTS (SELECT 1 FROM devices o
 			                 WHERE o.device_id = d.device_id AND o.id <> d.id
 			                   AND (o.broker_tenant_id = d.tenant_id OR d.tenant_id = ANY(o.broker_stale_tenants)))
-			   FROM devices d WHERE d.id = $1`, device.ID).Scan(&recorded, &out.Stale, &heldElsewhere)
+			   FROM devices d WHERE d.id = $1`, device.ID).Scan(&recorded, &out.Stale, &rowTenant, &heldElsewhere)
 	})
-	switch {
-	case err != nil:
+	if err != nil {
 		return BrokerIdentity{}, err
-	case recorded != nil:
+	}
+	if recorded != nil {
 		out.Current = *recorded
-	case !heldElsewhere:
-		out.Current = device.TenantID
+		return out, nil
+	}
+	// The row's own tenant, the one the ownership check above tested. A
+	// snapshot from another tenant is stale: neither tenant is safe to tear down.
+	slog.Warn("device.broker_identity.unpinned", "device", device.ID, "device_id", device.DeviceID,
+		"tenant", rowTenant, "snapshot_tenant", device.TenantID, "held_elsewhere", heldElsewhere)
+	switch {
+	case heldElsewhere:
+	case rowTenant != device.TenantID:
+		return out, ErrBrokerSnapshotStale
+	default:
+		out.Current = rowTenant
 	}
 	return out, nil
 }

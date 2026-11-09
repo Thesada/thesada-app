@@ -160,7 +160,7 @@ func loadTestProvider(t *testing.T, idp *fakeIDP) *Provider {
 	t.Helper()
 	p, err := LoadProvider(context.Background(), ProviderRow{
 		ID:        uuid.New(),
-		Slug:      "kanidm",
+		Slug:      "sso",
 		Kind:      "oidc",
 		IssuerURL: idp.srv.URL,
 		ClientID:  testClientID,

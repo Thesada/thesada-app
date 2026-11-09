@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/db"
+	"thesada.app/app/pkg/service"
 	"thesada.app/app/pkg/service/servicetest"
 )
 
@@ -72,15 +73,15 @@ func TestDeviceDelete(t *testing.T) {
 		}
 	})
 
-	t.Run("wrong_tenant_is_noop", func(t *testing.T) {
+	t.Run("wrong_tenant_matches_nothing", func(t *testing.T) {
 		devPK, err := dev.Upsert(tA, "dev-scope", "S", "1.0.0", "esp32", "thesada/dev-scope")
 		if err != nil {
 			t.Fatalf("seed device: %v", err)
 		}
 		// Delete under tenant B: the RLS policy on devices hides A's row, so
-		// the DELETE matches nothing. No error, and the row survives.
-		if err := dev.DeleteByID(ctx, tB, devPK); err != nil {
-			t.Fatalf("cross-tenant DeleteByID errored: %v", err)
+		// the DELETE matches nothing. That is an error, and the row survives.
+		if err := dev.DeleteByID(ctx, tB, devPK); !errors.Is(err, service.ErrDeviceNotInTenant) {
+			t.Fatalf("cross-tenant DeleteByID = %v, want ErrDeviceNotInTenant", err)
 		}
 		if got, _ := dev.GetByID(devPK, tA); got == nil {
 			t.Errorf("device removed by wrong-tenant delete (RLS leak)")
@@ -93,9 +94,9 @@ func TestDeviceDelete(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown_id_is_noop", func(t *testing.T) {
-		if err := dev.DeleteByID(ctx, tA, uuid.New()); err != nil {
-			t.Errorf("DeleteByID(unknown id) = %v, want nil", err)
+	t.Run("unknown_id_errors", func(t *testing.T) {
+		if err := dev.DeleteByID(ctx, tA, uuid.New()); !errors.Is(err, service.ErrDeviceNotInTenant) {
+			t.Errorf("DeleteByID(unknown id) = %v, want ErrDeviceNotInTenant", err)
 		}
 	})
 }

@@ -67,7 +67,7 @@ func startBrokerIdentity(t *testing.T) biFixture {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	s := &Server{cfg: &cfg, services: env.Services, mqtt: client, jobs: newRequestStore[jobResult](time.Minute)}
+	s := &Server{cfg: &cfg, services: env.Services, mqtt: client, jobs: newRequestStore[jobResult](time.Minute, t.Context().Done())}
 
 	ctx := context.Background()
 	env.SeedTenant(t, biFrom)
@@ -170,7 +170,7 @@ func TestBrokerIdentity_FailedLookupFailsTheTeardown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{cfg: f.s.cfg, services: services, mqtt: f.s.mqtt, jobs: newRequestStore[jobResult](time.Minute)}
+	s := &Server{cfg: f.s.cfg, services: services, mqtt: f.s.mqtt, jobs: newRequestStore[jobResult](time.Minute, t.Context().Done())}
 	if s.teardownDeviceDynsec(context.Background(), f.device, "device_delete") {
 		t.Fatal("teardown with a failed lookup reported clean")
 	}
@@ -183,7 +183,7 @@ func TestBrokerIdentity_FailedLookupFailsTheTeardown(t *testing.T) {
 // later teardown still deletes it.
 func TestBrokerIdentity_FailedReissueKeepsTheOldIdentity(t *testing.T) {
 	f := startBrokerIdentity(t)
-	offline := &Server{cfg: f.s.cfg, services: f.env.Services, mqtt: &mqtt.Client{}, jobs: newRequestStore[jobResult](time.Minute)}
+	offline := &Server{cfg: f.s.cfg, services: f.env.Services, mqtt: &mqtt.Client{}, jobs: newRequestStore[jobResult](time.Minute, t.Context().Done())}
 	if _, err := offline.provisionDeviceDynsec(context.Background(), biTo, biDevID,
 		service.DeviceTopicPrefix("thesada", biTo, biDevID), service.DeviceCertCN(biTo, biDevID)); err == nil {
 		t.Fatal("provision on a disconnected broker succeeded")
