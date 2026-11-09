@@ -13,6 +13,9 @@
 
 # tailwind standalone CLI binary - downloaded per environment, not committed
 /tools/tailwindcss
+# pinned node for the inline-script tests (make node-cli)
+/tools/node/
+/tools/node.tmp/
 # generated CSS output
 /pkg/web/static/css/app.css
 

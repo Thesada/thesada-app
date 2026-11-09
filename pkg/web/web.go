@@ -57,6 +57,8 @@ type Server struct {
 	jobs        *requestStore[jobResult]
 	// deviceWrites holds the device ids with a staged file write in flight.
 	deviceWrites sync.Map
+	// deviceOwners serializes delete and reassign per device id.
+	deviceOwners ownerLocks
 	runner       jobRunner
 }
 
@@ -75,12 +77,12 @@ func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mq
 		mux:            http.NewServeMux(),
 		waitlistNotify: ratelimit.New(24*time.Hour, 1),
 		claimLimits:    newClaimLimiter(cfg),
-		cliRequests:    newCLIRequestStore(cfg.CLIRequestTimeout + 60*time.Second),
-		jobs:           newRequestStore[jobResult](10 * time.Minute),
+		cliRequests:    newCLIRequestStore(cfg.CLIRequestTimeout+60*time.Second, nil),
+		jobs:           newRequestStore[jobResult](10*time.Minute, nil),
 	}
 	s.parseTemplates()
 	s.routes()
-	s.handler = csrf.Middleware([]byte(cfg.CookieSecret), cfg.TrustedProxies)(authmw.Middleware(services.Auth, cfg.TrustedProxies)(s.mux))
+	s.handler = limitFormBody(csrf.Middleware([]byte(cfg.CookieSecret), cfg.TrustedProxies)(authmw.Middleware(services.Auth, cfg.TrustedProxies)(s.mux)))
 
 	// Sweep residual keys left by expired windows; without this the maps grow
 	// unbounded. context.Background: sweepers live for the process lifetime.

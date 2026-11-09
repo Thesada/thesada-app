@@ -56,7 +56,7 @@ func seedProvider(t *testing.T, env *servicetest.Env, tenant, issuerURL string) 
 	var id uuid.UUID
 	if err := env.Super.QueryRow(context.Background(),
 		`INSERT INTO oauth_providers (tenant_id, slug, display_name, kind, issuer_url, client_id, enabled)
-		 VALUES ($1, 'kanidm-int', 'SSO', 'oidc', $2, 'client-int', true) RETURNING id`,
+		 VALUES ($1, 'sso-int', 'SSO', 'oidc', $2, 'client-int', true) RETURNING id`,
 		tenant, issuerURL).Scan(&id); err != nil {
 		t.Fatalf("seed provider: %v", err)
 	}
@@ -67,7 +67,7 @@ func loadProvider(t *testing.T, idpURL string, pid uuid.UUID) *oauth.Provider {
 	t.Helper()
 	p, err := oauth.LoadProvider(context.Background(), oauth.ProviderRow{
 		ID:        pid,
-		Slug:      "kanidm-int",
+		Slug:      "sso-int",
 		Kind:      "oidc",
 		IssuerURL: idpURL,
 		ClientID:  "client-int",
