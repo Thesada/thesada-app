@@ -12,6 +12,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"thesada.app/app/pkg/service"
 	"thesada.app/app/pkg/service/servicetest"
 )
@@ -123,11 +125,29 @@ func TestTenantService(t *testing.T) {
 	})
 
 	t.Run("Delete_and_protected_guards", func(t *testing.T) {
-		if _, err := ten.Create("tendelete", ""); err != nil {
+		created, err := ten.Create("tendelete", "")
+		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		if err := ten.Delete("tendelete", "some-caller"); err != nil {
+		if err := ten.Delete(context.Background(), uuid.New(), "tendelete", "some-caller"); !errors.Is(err, service.ErrTenantChanged) {
+			t.Fatalf("Delete with another tenant's uuid = %v, want ErrTenantChanged", err)
+		}
+		if err := ten.Delete(context.Background(), created.UUID, "tendelete", "some-caller"); err != nil {
 			t.Fatalf("Delete: %v", err)
+		}
+		// A second job on the slug, after a recreate, must not take the new tenant.
+		again, err := ten.Create("tendelete", "")
+		if err != nil {
+			t.Fatalf("recreate: %v", err)
+		}
+		if err := ten.Delete(context.Background(), created.UUID, "tendelete", "some-caller"); !errors.Is(err, service.ErrTenantChanged) {
+			t.Fatalf("Delete of the recreated slug = %v, want ErrTenantChanged", err)
+		}
+		if err := ten.Delete(context.Background(), again.UUID, "tendelete", "some-caller"); err != nil {
+			t.Fatalf("Delete of the recreated tenant: %v", err)
+		}
+		if err := ten.Delete(context.Background(), again.UUID, "tendelete", "some-caller"); !errors.Is(err, service.ErrTenantChanged) {
+			t.Fatalf("Delete of a gone tenant = %v, want ErrTenantChanged", err)
 		}
 		if _, err := ten.Get("tendelete"); !errors.Is(err, service.ErrNotFound) {
 			t.Errorf("Get after delete = %v, want ErrNotFound", err)
@@ -136,19 +156,20 @@ func TestTenantService(t *testing.T) {
 			t.Error("ExistsBySlug true after Delete")
 		}
 		// The bootstrap 'default' tenant and the caller's own seat are protected.
-		if err := ten.Delete("default", "x"); !errors.Is(err, service.ErrTenantProtected) {
+		if err := ten.Delete(context.Background(), uuid.New(), "default", "x"); !errors.Is(err, service.ErrTenantProtected) {
 			t.Errorf("delete default = %v, want ErrTenantProtected", err)
 		}
-		if err := ten.Delete("self", "self"); !errors.Is(err, service.ErrTenantProtected) {
+		if err := ten.Delete(context.Background(), uuid.New(), "self", "self"); !errors.Is(err, service.ErrTenantProtected) {
 			t.Errorf("delete own seat = %v, want ErrTenantProtected", err)
 		}
-		if err := ten.Delete("home", "elsewhere", "home"); !errors.Is(err, service.ErrTenantProtected) {
+		if err := ten.Delete(context.Background(), uuid.New(), "home", "elsewhere", "home"); !errors.Is(err, service.ErrTenantProtected) {
 			t.Errorf("delete own home while elsewhere = %v, want ErrTenantProtected", err)
 		}
 	})
 
 	t.Run("Delete_refuses_super_admin_tenant", func(t *testing.T) {
-		if _, err := ten.Create("tensuper", ""); err != nil {
+		tsuper, err := ten.Create("tensuper", "")
+		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 		u, err := env.Services.Auth.CreateUser("tensuper", "su@tensuper.test", "", true)
@@ -165,7 +186,7 @@ func TestTenantService(t *testing.T) {
 		if has, err := ten.HasSuperAdmins("tensuper"); err != nil || !has {
 			t.Fatalf("HasSuperAdmins after promote = %v, %v", has, err)
 		}
-		if err := ten.Delete("tensuper", "other"); !errors.Is(err, service.ErrTenantHasSuperAdmins) {
+		if err := ten.Delete(context.Background(), tsuper.UUID, "tensuper", "other"); !errors.Is(err, service.ErrTenantHasSuperAdmins) {
 			t.Fatalf("Delete = %v, want ErrTenantHasSuperAdmins", err)
 		}
 		if _, err := ten.Get("tensuper"); err != nil {
@@ -193,7 +214,8 @@ func TestTenantService(t *testing.T) {
 	t.Run("Delete_crypto_shreds_secrets", func(t *testing.T) {
 		ctx := context.Background()
 		const slug = "tenshred"
-		if _, err := ten.Create(slug, ""); err != nil {
+		shred, err := ten.Create(slug, "")
+		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 		pk := mustUpsert(t, env.Services.Devices, slug, "shred-dev", "", "", "", "")
@@ -208,7 +230,7 @@ func TestTenantService(t *testing.T) {
 			t.Fatalf("pre-delete device_config_secrets = %d, want 1", got)
 		}
 		// Devices leave through the device delete path, never by tenant cascade.
-		if err := ten.Delete(slug, "some-caller"); !errors.Is(err, service.ErrTenantHasDevices) {
+		if err := ten.Delete(ctx, shred.UUID, slug, "some-caller"); !errors.Is(err, service.ErrTenantHasDevices) {
 			t.Fatalf("Delete with a device = %v, want ErrTenantHasDevices", err)
 		}
 		if err := env.Services.Devices.DeleteByID(ctx, slug, pk); err != nil {
@@ -216,7 +238,7 @@ func TestTenantService(t *testing.T) {
 		}
 		// Delete the tenant: the DEK row cascades away (crypto-shred) and the
 		// ciphertext cascades with it - the value is now unrecoverable.
-		if err := ten.Delete(slug, "some-caller"); err != nil {
+		if err := ten.Delete(ctx, shred.UUID, slug, "some-caller"); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
 		if got := countRows(t, env, ctx, "tenant_dek", slug); got != 0 {

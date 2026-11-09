@@ -65,7 +65,7 @@ type Client struct {
 	// (firmware v1.4.5+) is belt-and-suspenders for retained replays /
 	// out-of-order delivery, not the primary defence.
 	cliMu    sync.Mutex
-	cliLocks map[string]*sync.Mutex
+	cliLocks map[string]*cliLock
 
 	// insertRetrySlots caps concurrent alert-insert retry goroutines. A DB
 	// outage overlapping an alert burst spawns one goroutine per alert; when

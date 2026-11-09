@@ -6,11 +6,16 @@
 package web
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func newServerForBulkTest() *Server { return &Server{} }
@@ -21,6 +26,23 @@ func postForm(form url.Values) *http.Request {
 	r := httptest.NewRequest(http.MethodPost, "/admin/devices/bulk", strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return r
+}
+
+// An oversize selection is refused before any lookup: the server has no services to call.
+func TestAdminDevicesBulk_Delete_RefusesAnOversizeSelection(t *testing.T) {
+	s := newServerForBulkTest()
+	form := url.Values{"action": {"delete"}}
+	for i := 0; i <= bulkDeleteMax; i++ {
+		form.Add("device_ids", uuid.NewString())
+	}
+	rec := httptest.NewRecorder()
+	s.handleAdminDevicesBulk(rec, postForm(form))
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != flashAdminTooMany.on("/admin/devices") {
+		t.Fatalf("oversize delete = %d %q, want 302 to too_many_selected", rec.Code, rec.Header().Get("Location"))
+	}
+	if !strings.Contains(adminFlashText["error"][flashAdminTooMany.code], strconv.Itoa(bulkDeleteMax)) {
+		t.Fatal("the flash text does not name the cap")
+	}
 }
 
 func TestAdminDevicesBulk_UnknownAction(t *testing.T) {
@@ -155,5 +177,19 @@ func TestSerialRecoveryAccepted_OnlyWhenOverrideDidTheWork(t *testing.T) {
 		if got := serialRecoveryAccepted(c.paired, c.v, c.override); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// A reassignment cannot land while a delete holds the device's owner lock.
+func TestReassignDevice_RefusedWhileADeleteHoldsTheDevice(t *testing.T) {
+	s := &Server{}
+	id := uuid.New()
+	release, err := s.deviceOwners.lock(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := s.reassignDevice(context.Background(), id, "other"); !errors.Is(err, errDeviceBusy) {
+		t.Fatalf("reassign during delete = %v, want errDeviceBusy", err)
 	}
 }

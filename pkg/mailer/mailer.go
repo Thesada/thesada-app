@@ -4,40 +4,49 @@ package mailer
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/smtp"
 	"strings"
+	"time"
 
 	"thesada.app/app/pkg/config"
 )
 
-// Mailer holds SMTP connection config. Safe for concurrent use (smtp.SendMail
-// opens a fresh connection per call).
+// sendTimeout bounds one whole SMTP session: dial, handshake and DATA.
+const sendTimeout = 30 * time.Second
+
+// Mailer holds SMTP connection config. Safe for concurrent use (each send
+// opens a fresh connection).
 type Mailer struct {
-	host string
-	port string
-	user string
-	pass string
-	from string
+	host    string
+	port    string
+	user    string
+	pass    string
+	from    string
+	timeout time.Duration
 }
 
 // New constructs a Mailer from the application config.
 // in: cfg. out: *Mailer (no connection attempted until Send).
 func New(cfg *config.Config) *Mailer {
 	return &Mailer{
-		host: cfg.SMTPHost,
-		port: cfg.SMTPPort,
-		user: cfg.SMTPUsername,
-		pass: cfg.SMTPPassword,
-		from: cfg.SMTPFrom,
+		host:    cfg.SMTPHost,
+		port:    cfg.SMTPPort,
+		user:    cfg.SMTPUsername,
+		pass:    cfg.SMTPPassword,
+		from:    cfg.SMTPFrom,
+		timeout: sendTimeout,
 	}
 }
 
 // Send delivers a plain-text email to one recipient.
 // No-op with a warning log if SMTPHost is empty.
-// in: to address, subject, body. out: error from smtp.SendMail.
+// in: to address, subject, body. out: error from the SMTP session.
 func (m *Mailer) Send(to, subject, body string) error {
 	if m.host == "" {
 		slog.Warn("mailer disabled (SMTPHost empty), dropping message", "to", to, "subject", subject)
@@ -46,9 +55,55 @@ func (m *Mailer) Send(to, subject, body string) error {
 	to, subject = sanitizeHeader(to), sanitizeHeader(subject)
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
 		m.from, to, subject, body)
-	auth := smtp.PlainAuth("", m.user, m.pass, m.host)
-	addr := m.host + ":" + m.port
-	return smtp.SendMail(addr, auth, m.from, []string{to}, []byte(msg))
+	return m.sendMail(to, []byte(msg))
+}
+
+// sendMail is smtp.SendMail with one deadline over the dial and the session,
+// so a stalled server fails the send inside m.timeout instead of hanging it.
+// in: recipient, raw message. out: error.
+func (m *Mailer) sendMail(to string, msg []byte) error {
+	deadline := time.Now().Add(m.timeout)
+	conn, err := (&net.Dialer{Deadline: deadline}).Dial("tcp", net.JoinHostPort(m.host, m.port))
+	if err != nil {
+		return fmt.Errorf("smtp dial: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return fmt.Errorf("smtp deadline: %w", err)
+	}
+	c, err := smtp.NewClient(conn, m.host)
+	if err != nil {
+		return fmt.Errorf("smtp greeting: %w", err)
+	}
+	defer func() { _ = c.Close() }()
+	if ok, _ := c.Extension("STARTTLS"); ok {
+		if err := c.StartTLS(&tls.Config{ServerName: m.host, MinVersion: tls.VersionTLS12}); err != nil {
+			return fmt.Errorf("smtp starttls: %w", err)
+		}
+	}
+	if ok, _ := c.Extension("AUTH"); !ok {
+		return errors.New("smtp: server doesn't support AUTH")
+	}
+	if err := c.Auth(smtp.PlainAuth("", m.user, m.pass, m.host)); err != nil {
+		return fmt.Errorf("smtp auth: %w", err)
+	}
+	if err := c.Mail(m.from); err != nil {
+		return err
+	}
+	if err := c.Rcpt(to); err != nil {
+		return err
+	}
+	w, err := c.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(msg); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return c.Quit()
 }
 
 // sanitizeHeader strips CR and LF from a value placed into an email header
@@ -107,7 +162,5 @@ func (m *Mailer) SendMIME(to, subject, textBody, htmlBody string) error {
 	b.WriteString(htmlBody)
 	b.WriteString("\r\n")
 	fmt.Fprintf(&b, "--%s--\r\n", boundary)
-	auth := smtp.PlainAuth("", m.user, m.pass, m.host)
-	addr := m.host + ":" + m.port
-	return smtp.SendMail(addr, auth, m.from, []string{to}, []byte(b.String()))
+	return m.sendMail(to, []byte(b.String()))
 }

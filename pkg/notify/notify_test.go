@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -16,21 +17,26 @@ type fakeAccounts struct {
 	user   *service.User
 	err    error
 	logins int
+	stall  bool
 }
 
-func (f *fakeAccounts) GetUserByEmailAnyTenant(string) (*service.User, error) {
+func (f *fakeAccounts) GetUserByEmailAnyTenantCtx(ctx context.Context, _ string) (*service.User, error) {
+	if f.stall {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
 	return f.user, nil
 }
 
-func (f *fakeAccounts) CreateMagicLink(uuid.UUID) (string, time.Time, error) {
+func (f *fakeAccounts) CreateMagicLinkCtx(context.Context, uuid.UUID) (string, time.Time, error) {
 	f.logins++
 	return "login-token", time.Now(), nil
 }
 
-func (f *fakeAccounts) CreateResetLink(uuid.UUID) (string, time.Time, error) {
+func (f *fakeAccounts) CreateResetLinkCtx(context.Context, uuid.UUID) (string, time.Time, error) {
 	return "reset-token", time.Now(), nil
 }
 
@@ -208,5 +214,51 @@ func TestRequestLoginLink_ParallelBurstDoesNotSpendAddress(t *testing.T) {
 	}
 	if mail.sends != maxPerIP*2 {
 		t.Fatalf("sends = %d, want %d", mail.sends, maxPerIP*2)
+	}
+}
+
+func TestAsync_BoundsInFlightAndDrains(t *testing.T) {
+	m := New(&fakeAccounts{}, &fakeMail{}, "https://app.example")
+	release := make(chan struct{})
+	var mu sync.Mutex
+	started := 0
+	for i := 0; i < maxInFlight+5; i++ {
+		m.async("login_link", "a@example.com", func() error {
+			mu.Lock()
+			started++
+			mu.Unlock()
+			<-release
+			return nil
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := m.Drain(ctx); err == nil {
+		t.Fatal("Drain returned while sends were still blocked")
+	}
+	close(release)
+	if err := m.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if started != maxInFlight {
+		t.Fatalf("started %d sends, want the %d cap", started, maxInFlight)
+	}
+}
+
+func TestRequestLoginLink_StalledDatabaseReleasesTheSlot(t *testing.T) {
+	orig := linkDBTimeout
+	t.Cleanup(func() { linkDBTimeout = orig })
+	linkDBTimeout = 50 * time.Millisecond
+	m := New(&fakeAccounts{stall: true}, &fakeMail{}, "https://app.example")
+	for i := 0; i < maxInFlight; i++ {
+		m.RequestLoginLinkAsync(fmt.Sprintf("u%d@example.com", i), fmt.Sprintf("192.0.2.%d", i))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := m.Drain(ctx); err != nil {
+		t.Fatalf("stalled lookups still hold the link slots: %v", err)
+	}
+	if n := len(m.slots); n != 0 {
+		t.Fatalf("%d slots still held", n)
 	}
 }

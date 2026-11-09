@@ -4,9 +4,19 @@
   <h1 class="text-2xl font-semibold mb-1">Account settings</h1>
   <p class="text-sm text-slate-500 mb-6">Signed in as {{.User.Email}}.</p>
 
+  {{if .LoadWarning}}
+  <div class="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+    Some settings could not be loaded. Reload the page to try again.
+  </div>
+  {{end}}
+
   {{if eq .SavedSection "profile"}}
   <div class="mb-4 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
     Profile updated.
+  </div>
+  {{else if eq .SaveError "profile"}}
+  <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+    Could not save your profile.
   </div>
   {{end}}
 
@@ -80,7 +90,7 @@
   {{if .HasPassword}}
   <h2 class="text-lg font-medium mb-2">Authenticator</h2>
   <p class="text-sm text-slate-500 mb-4">
-    Password sign-in and magic links ask for a 6 digit code. Kanidm does not.
+    Password sign-in and magic links ask for a 6 digit code. Single sign-on does not.
   </p>
   {{if .TOTPError}}
   <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">That code is not valid.</div>
@@ -121,6 +131,10 @@
   {{if eq .SavedSection "notifications"}}
   <div class="mb-4 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
     Notification settings updated.
+  </div>
+  {{else if eq .SaveError "notifications"}}
+  <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+    Could not remove that notification.
   </div>
   {{end}}
 
