@@ -486,3 +486,65 @@ func TestDispatch_PartialChannelFailure_RetriesOnlyFailedChannel(t *testing.T) {
 		t.Fatalf("sends email:%d tg:%d, want email:1 tg:2", emailSends, tgSends)
 	}
 }
+
+// A shutdown that lands during the send must not lose the record of it, or
+// the next sweep sends the email again.
+func TestDispatch_ShutdownDuringSendStillRecordsTheOutcome(t *testing.T) {
+	env := servicetest.Start(t)
+	devicePk, alertID := seedAlert(t, env, "acme")
+	seedEmailSub(t, env, "acme", devicePk, "ops@example.com")
+
+	n := New(env.Cfg, env.Pools, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	n.sendEmail = func(_, _, _, _ string) error { cancel(); return nil }
+	if err := n.Dispatch(ctx, "acme", alertID); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if status, attempts, email, _, _ := deliveryRow(t, env, alertID); status != "delivered" || attempts != 1 || !email {
+		t.Fatalf("after a cancelled send: %s/%d email:%v, want delivered/1 email:true", status, attempts, email)
+	}
+}
+
+// A user subscribed to the device and to all devices on one channel gets one
+// email. Two webhook destinations of one user stay two.
+func TestDispatch_OverlappingSubscriptionsSendOnce(t *testing.T) {
+	env := servicetest.Start(t)
+	ctx := context.Background()
+	devicePk, alertID := seedAlert(t, env, "acme")
+	seedEmailSub(t, env, "acme", devicePk, "ops@example.com")
+	var userID string
+	if err := env.Super.QueryRow(ctx, `SELECT id FROM users WHERE email = 'ops@example.com'`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Super.Exec(ctx, `
+		INSERT INTO alert_subscriptions (user_id, device_pk, channel, min_severity, destination) VALUES
+		    ($1, NULL, 'email', 'info', NULL),
+		    ($1, $2, 'webhook', 'warn', 'https://a.example/hook'),
+		    ($1, NULL, 'webhook', 'warn', 'https://b.example/hook')`, userID, devicePk); err != nil {
+		t.Fatal(err)
+	}
+	n := New(env.Cfg, env.Pools, nil)
+	err := db.WithTenant(ctx, n.db, "acme", func(tx pgx.Tx) error {
+		recipients, err := n.loadRecipients(ctx, tx, alertID)
+		if err != nil {
+			return err
+		}
+		emails, hooks := 0, 0
+		for _, r := range recipients {
+			switch r.channel {
+			case "email":
+				emails++
+			case "webhook":
+				hooks++
+			}
+		}
+		if emails != 1 || hooks != 2 {
+			t.Errorf("recipients = %d email, %d webhook, want 1 and 2: %+v", emails, hooks, recipients)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

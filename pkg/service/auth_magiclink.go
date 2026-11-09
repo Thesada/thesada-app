@@ -43,7 +43,13 @@ const PurposeReset = "reset"
 // and returns the raw token the caller embeds into the login URL emailed out.
 // in: user_id. out: raw token (url-safe), expiry time, error.
 func (s *AuthService) CreateMagicLink(userID uuid.UUID) (string, time.Time, error) {
-	return s.createLinkToken(userID, PurposeLogin, magicLinkLifetime)
+	return s.CreateMagicLinkCtx(context.Background(), userID)
+}
+
+// CreateMagicLinkCtx is CreateMagicLink bounded by ctx, pool acquire included.
+// in: ctx, user_id. out: raw token, expiry, error.
+func (s *AuthService) CreateMagicLinkCtx(ctx context.Context, userID uuid.UUID) (string, time.Time, error) {
+	return s.createLinkToken(ctx, userID, PurposeLogin, magicLinkLifetime)
 }
 
 // CreateResetLink generates a password-reset token with a longer lifetime.
@@ -51,19 +57,24 @@ func (s *AuthService) CreateMagicLink(userID uuid.UUID) (string, time.Time, erro
 // and vice versa.
 // in: user_id. out: raw token, expiry time, error.
 func (s *AuthService) CreateResetLink(userID uuid.UUID) (string, time.Time, error) {
-	return s.createLinkToken(userID, PurposeReset, resetLinkLifetime)
+	return s.CreateResetLinkCtx(context.Background(), userID)
+}
+
+// CreateResetLinkCtx is CreateResetLink bounded by ctx.
+// in: ctx, user_id. out: raw token, expiry, error.
+func (s *AuthService) CreateResetLinkCtx(ctx context.Context, userID uuid.UUID) (string, time.Time, error) {
+	return s.createLinkToken(ctx, userID, PurposeReset, resetLinkLifetime)
 }
 
 // createLinkToken is the shared INSERT path for both login and reset tokens.
-// in: user_id, purpose tag, lifetime duration. out: raw token, expiry, error.
-func (s *AuthService) createLinkToken(userID uuid.UUID, purpose string, lifetime time.Duration) (string, time.Time, error) {
+// in: ctx, user_id, purpose tag, lifetime duration. out: raw token, expiry, error.
+func (s *AuthService) createLinkToken(ctx context.Context, userID uuid.UUID, purpose string, lifetime time.Duration) (string, time.Time, error) {
 	token, err := randomToken(32)
 	if err != nil {
 		return "", time.Time{}, err
 	}
 	hash := sha256.Sum256([]byte(token))
 	expires := time.Now().Add(lifetime)
-	ctx := context.Background()
 	err = db.WithAdminAudit(ctx, s.pools.Admin, "auth.create_link_token", func(tx pgx.Tx) error {
 		_, execErr := tx.Exec(ctx,
 			`INSERT INTO magic_link_tokens (user_id, token_hash, expires_at, purpose) VALUES ($1, $2, $3, $4)`,

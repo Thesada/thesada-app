@@ -83,8 +83,8 @@ func (s *OAuthService) ListEnabledProvidersForTenant(ctx context.Context, tenant
 // ListEnabledProvidersForLogin is the unauthenticated variant - used by
 // the login page when we don't yet know which tenant the user will hit.
 // One button per slug; migration 0015 cross-joined providers per tenant,
-// so the same Kanidm config now exists N times (once per tenant) and we
-// must dedupe to avoid rendering "Sign in with Kanidm" once per tenant.
+// so the same provider config now exists N times (once per tenant) and we
+// must dedupe to avoid rendering one sign-in button per tenant.
 // DISTINCT ON (slug) with a stable ORDER BY id picks the same per-tenant
 // row on every call so the provider_id seen by LoadProviderBySlug stays
 // consistent (and existing user_oauth_identities links keep resolving).
@@ -231,7 +231,7 @@ func (s *OAuthService) ListIdentitiesForUser(ctx context.Context, tenantID strin
 // FindUserByIdentity resolves an external (provider, subject) pair to
 // the local user and records last_login_at on the identity row. Matches
 // across every per-tenant copy of the provider via slug-equality so a
-// post-0015 deployment, where the same Kanidm config exists as N rows
+// post-0015 deployment, where the same provider config exists as N rows
 // (one per tenant) each with its own UUID, still resolves to the user's
 // original identity link regardless of which per-tenant row
 // LoadProviderBySlug happened to pick on this request. Returns

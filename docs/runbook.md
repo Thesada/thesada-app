@@ -54,14 +54,24 @@ Assume broker credentials and/or the dynsec store are untrusted.
 1. Symptom: the app cannot connect or a background job (continuous aggregate refresh) fails on a role error.
 2. Check which pool is affected - App / Admin(BYPASSRLS) / MQTT are separate roles (`cmd/thesada-app/main.go:44`).
 3. Known gotcha: a continuous-aggregate owner role needs `rolcanlogin`; if a role was created `NOLOGIN`, refreshes fail. Grant login on that role. *(Exact SQL: verify against the deploy before running.)*
-4. If migrations are stuck: `thesada-app migrate` on the host.
+4. If migrations are stuck: `thesada-app migrate` on the host. See [Migrations](#migrations) for the role grant they need.
 5. Restore path (if the DB itself is lost): TimescaleDB restores must be **version-matched** to the dump.
+
+## Migrations
+
+`thesada-app migrate` runs as `thesada_app`, the owner of every table. Tenant tables are `FORCE ROW LEVEL SECURITY`, so the owner sees no rows: a data step (`UPDATE` / `INSERT` / `DELETE`) on one switches to the BYPASSRLS role with `SET LOCAL ROLE thesada_app_admin`. Since 0040 that switch needs a membership grant.
+
+1. Once per database, as a superuser, before the first migrate that includes 0040 or later:
+   `GRANT thesada_app_admin TO thesada_app;`
+2. Check it: `SELECT pg_has_role('thesada_app', 'thesada_app_admin', 'MEMBER');` returns `t`.
+3. Without it, 0040 and 0041 fail with `permission denied to set role "thesada_app_admin"` and the deploy stops with the old binary still serving. Grant, then rerun `thesada-app migrate`.
+4. An `UPDATE` or `DELETE` without the switch does not fail, it changes 0 rows. An `INSERT` without it fails the RLS `WITH CHECK` policy, which stops the migration with an error. `go test ./migrations/` refuses either (`TestMigrations_RLSDataStepsSetRole`).
 
 ## Magic-link mail broken
 
 1. Symptom: users report the sign-in link never arrives; the app still shows "check your email" (the failure is operator-only; the UI still reports success).
 2. Check config: an empty `SMTPHost` makes the mailer **drop silently and return success** (`mailer.go:42`) - the link is never sent. Set `SMTPHost`.
-3. Check the app logs for `magic link email failed` (SMTP handoff errors).
+3. Check the app logs for `notify send failed` (SMTP handoff errors, a stalled server times out after 30 s) and `notify.link.request_failed` (account or token lookup errors). The send runs after the page answers, so neither shows to the visitor.
 4. There is no bounce/delivery tracking - a link that was handed to SMTP but never arrived (greylist/spam) is invisible. Test end-to-end with a known-good mailbox.
 5. Workaround while broken: users with a password can still sign in; new users are blocked until mail is restored.
 

@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/ratelimit"
+	"thesada.app/app/pkg/safego"
 	"thesada.app/app/pkg/service"
 )
 
@@ -26,16 +27,22 @@ const (
 	// spend the address on its own. Distributed sends still stop here.
 	maxPerEmail = maxPerIP * 4
 	window      = time.Hour
+	// maxInFlight bounds link sends running at once. A burst past it is
+	// dropped and logged, the response is the same either way.
+	maxInFlight = 16
 )
+
+// linkDBTimeout bounds the account lookup and token insert of one link send.
+var linkDBTimeout = 10 * time.Second
 
 //go:embed templates
 var templatesFS embed.FS
 
 // Accounts is the slice of AuthService the mail path needs.
 type Accounts interface {
-	GetUserByEmailAnyTenant(email string) (*service.User, error)
-	CreateMagicLink(userID uuid.UUID) (string, time.Time, error)
-	CreateResetLink(userID uuid.UUID) (string, time.Time, error)
+	GetUserByEmailAnyTenantCtx(ctx context.Context, email string) (*service.User, error)
+	CreateMagicLinkCtx(ctx context.Context, userID uuid.UUID) (string, time.Time, error)
+	CreateResetLinkCtx(ctx context.Context, userID uuid.UUID) (string, time.Time, error)
 }
 
 // MIMESender delivers a multipart text+html message.
@@ -54,6 +61,8 @@ type Mail struct {
 	byEmail   *ratelimit.Limiter
 	byIP      *ratelimit.Limiter
 	mu        sync.Mutex
+	slots     chan struct{}
+	inFlight  sync.WaitGroup
 }
 
 // New loads the email templates and starts the limiter sweepers.
@@ -65,6 +74,7 @@ func New(accounts Accounts, send MIMESender, baseURL string) *Mail {
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		byEmail:  ratelimit.New(window, maxPerEmail),
 		byIP:     ratelimit.New(window, maxPerIP),
+		slots:    make(chan struct{}, maxInFlight),
 	}
 	names := []string{"login_link", "reset_link"}
 	m.emailText = make(map[string]*texttemplate.Template, len(names))
@@ -91,6 +101,48 @@ func (m *Mail) RequestResetLink(email, ip string) error {
 	return m.request(email, ip, "reset_link", "Your thesada password reset link", "/reset-password?token=", false)
 }
 
+// RequestLoginLinkAsync runs RequestLoginLink off the request path, so a known
+// and an unknown address answer alike and in the same time. Errors are logged.
+// in: email, client ip. out: none.
+func (m *Mail) RequestLoginLinkAsync(email, ip string) {
+	m.async("login_link", email, func() error { return m.RequestLoginLink(email, ip) })
+}
+
+// RequestResetLinkAsync is RequestLoginLinkAsync for the password-reset link.
+// in: email, client ip. out: none.
+func (m *Mail) RequestResetLinkAsync(email, ip string) {
+	m.async("reset_link", email, func() error { return m.RequestResetLink(email, ip) })
+}
+
+func (m *Mail) async(tmpl, email string, fn func() error) {
+	select {
+	case m.slots <- struct{}{}:
+	default:
+		slog.Warn("notify.link.dropped", "template", tmpl, "reason", "busy")
+		return
+	}
+	m.inFlight.Add(1)
+	safego.Go("notify."+tmpl, func() {
+		defer func() { <-m.slots; m.inFlight.Done() }()
+		if err := fn(); err != nil {
+			slog.Error("notify.link.request_failed", "template", tmpl, "email", email, "err", err)
+		}
+	})
+}
+
+// Drain waits for the link sends already started, bounded by ctx.
+// in: ctx. out: ctx error when sends were still running.
+func (m *Mail) Drain(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() { m.inFlight.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // SendResetLink emails a reset link that the caller already created.
 // in: recipient, absolute link. out: render or send error.
 func (m *Mail) SendResetLink(to, link string) error {
@@ -101,7 +153,10 @@ func (m *Mail) request(email, ip, tmpl, subject, path string, login bool) error 
 	if !m.allow(email, ip) {
 		return nil
 	}
-	u, err := m.accounts.GetUserByEmailAnyTenant(email)
+	// A stalled database must not hold a link slot: lookup and token share one deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), linkDBTimeout)
+	defer cancel()
+	u, err := m.accounts.GetUserByEmailAnyTenantCtx(ctx, email)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			return nil
@@ -110,9 +165,9 @@ func (m *Mail) request(email, ip, tmpl, subject, path string, login bool) error 
 	}
 	var token string
 	if login {
-		token, _, err = m.accounts.CreateMagicLink(u.ID)
+		token, _, err = m.accounts.CreateMagicLinkCtx(ctx, u.ID)
 	} else {
-		token, _, err = m.accounts.CreateResetLink(u.ID)
+		token, _, err = m.accounts.CreateResetLinkCtx(ctx, u.ID)
 	}
 	if err != nil {
 		return err

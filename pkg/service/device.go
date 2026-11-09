@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -203,6 +204,35 @@ func (s *DeviceService) GetByIDAny(ctx context.Context, id uuid.UUID) (*Device, 
 	return &d, nil
 }
 
+// GetByIDsAny is GetByIDAny for many ids in one query. Ids with no row are
+// left out. Cross-tenant BY DESIGN, through WithAdminAudit.
+// in: ctx, device pks. out: devices found, error.
+func (s *DeviceService) GetByIDsAny(ctx context.Context, ids []uuid.UUID) ([]Device, error) {
+	const query = `
+		SELECT id, tenant_id, owner_user_id, device_id, pairing_key, paired_at, display_name,
+		       hardware_type, firmware_version, last_seen_at, mqtt_topic_prefix, created_at
+		FROM devices WHERE id = ANY($1)`
+	var out []Device
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "device.get_by_ids_any", func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, query, ids)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var d Device
+			if err := rows.Scan(&d.ID, &d.TenantID, &d.OwnerUserID, &d.DeviceID, &d.PairingKey, &d.PairedAt,
+				&d.DisplayName, &d.HardwareType, &d.FirmwareVersion, &d.LastSeenAt,
+				&d.MQTTTopicPrefix, &d.CreatedAt); err != nil {
+				return err
+			}
+			out = append(out, d)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
 // ListAllForAdmin returns every device row across every tenant, ordered by
 // tenant then last_seen_at DESC. Used by the super-admin device reassignment
 // UI. Do not call from a tenant-scoped handler - use ListByTenant.
@@ -266,12 +296,28 @@ func (s *DeviceService) ListAllForAdmin(ctx context.Context) ([]Device, error) {
 // pool. Under the App pool the devices RLS policy WITH CHECK would reject
 // the UPDATE: the new tenant_id never matches the GUC (whichever tenant
 // was set, the row is being moved to a different one).
+// An unrecorded broker identity is pinned to the old tenant first, the one
+// it was issued under, so the move cannot rename it.
 // in: ctx, device pk, target tenant slug. out: error.
 func (s *DeviceService) Reassign(ctx context.Context, id uuid.UUID, targetTenant string) error {
 	return db.WithAdminAudit(ctx, s.pools.Admin, "device.reassign", func(tx pgx.Tx) error {
-		var deviceID string
-		if err := tx.QueryRow(ctx, `SELECT device_id FROM devices WHERE id = $1`, id).Scan(&deviceID); err != nil {
+		var deviceID, oldTenant string
+		var pinned *string
+		if err := tx.QueryRow(ctx,
+			`SELECT device_id, tenant_id, broker_tenant_id FROM devices WHERE id = $1 FOR UPDATE`,
+			id).Scan(&deviceID, &oldTenant, &pinned); err != nil {
 			return err
+		}
+		if pinned == nil {
+			_, err := reserveBrokerIdentityTx(ctx, tx, oldTenant, deviceID)
+			switch {
+			case errors.Is(err, ErrBrokerIdentityTaken):
+				// Another row holds that identity, so this row has none to pin.
+			case err != nil:
+				return err
+			default:
+				slog.Info("device.broker_identity.pinned", "device", id, "broker_tenant", oldTenant, "reason", "reassign")
+			}
 		}
 		max := 0
 		if s.cfg != nil {

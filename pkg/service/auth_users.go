@@ -60,10 +60,15 @@ func (s *AuthService) GetUserByEmail(tenantID, email string) (*User, error) {
 // Cross-tenant by design: login has no tenant yet; runs under WithAdminAudit.
 // in: email. out: *User or ErrNotFound.
 func (s *AuthService) GetUserByEmailAnyTenant(email string) (*User, error) {
+	return s.GetUserByEmailAnyTenantCtx(context.Background(), email)
+}
+
+// GetUserByEmailAnyTenantCtx is GetUserByEmailAnyTenant bounded by ctx.
+// in: ctx, email. out: *User or ErrNotFound.
+func (s *AuthService) GetUserByEmailAnyTenantCtx(ctx context.Context, email string) (*User, error) {
 	const query = `
 		SELECT id, tenant_id, email, display_name, telegram_chat_id, is_admin, is_super_admin, created_at, last_login_at
 		FROM users WHERE email = $1 ORDER BY created_at LIMIT 1`
-	ctx := context.Background()
 	var u User
 	err := db.WithAdminAudit(ctx, s.pools.Admin, "auth.get_user_by_email_any_tenant", func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, query, email).Scan(
