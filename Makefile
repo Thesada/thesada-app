@@ -155,7 +155,7 @@ sec-static: ## Fail on HIGH gosec findings
 sec: sec-vuln sec-static ## govulncheck, then the HIGH gosec gate
 
 .PHONY: ci
-ci: lint pools test coverage sec ## Local CI: lint, pools guard, unit tests, coverage, vuln and gosec gates
+ci: lint pools test test-integration coverage sec ## Local CI: lint, pools guard, unit and integration tests, coverage, vuln and gosec gates
 
 ##@ Housekeeping
 

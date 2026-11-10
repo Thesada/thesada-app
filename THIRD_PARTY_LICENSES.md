@@ -11,6 +11,7 @@ the licence terms noted below. All are compatible with AGPL-3.0.
 | `github.com/coreos/go-oidc/v3` | v3.x | Apache-2.0 | as published |
 | `github.com/eclipse/paho.mqtt.golang` | v1.5.x | EPL-2.0 OR EDL-1.0 | **EDL-1.0 selected** (BSD-3-Clause equivalent, AGPL-compatible) |
 | `github.com/go-jose/go-jose/v4` | v4.x | Apache-2.0 | as published |
+| `github.com/go-webauthn/webauthn` | v0.18.x | BSD-3-Clause | as published |
 | `github.com/google/uuid` | v1.x | BSD-3-Clause | as published |
 | `github.com/gorilla/websocket` | v1.5.x | BSD-2-Clause | as published |
 | `github.com/jackc/pgx/v5` | v5.x | MIT | as published |
