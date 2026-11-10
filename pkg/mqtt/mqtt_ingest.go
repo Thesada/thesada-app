@@ -298,6 +298,32 @@ func (c *Client) handleSensor(tenant, device, metric string, payload []byte, ret
 
 	c.hub.Publish(tenant, device, map[string]string{"type": "sensor", "device": device, "metric": metric})
 	slog.Debug("sensor processed", "tenant", tenant, "device", device, "device_pk", devicePk, "metric", metric)
+	if value != nil {
+		c.evaluateTrends(tenant, device, devicePk, metric, *value)
+	}
+}
+
+// evaluateTrends runs the trend rules for one numeric reading and dispatches
+// what it raised, like handleAlert does for a device alert.
+// in: tenant, device id, device pk, metric, value. out: none (logs on error).
+func (c *Client) evaluateTrends(tenant, device string, devicePk uuid.UUID, metric string, value float64) {
+	ids, err := c.services.Alerts.EvaluateTrends(context.Background(), tenant, devicePk, metric, value)
+	if err != nil {
+		slog.Error("trend evaluate failed", "tenant", tenant, "device", device, "metric", metric, "err", err)
+		return
+	}
+	for _, id := range ids {
+		c.hub.Publish(tenant, device, map[string]string{"type": "alert", "device": device, "alert_id": fmt.Sprintf("%d", id)})
+		if c.notifier == nil {
+			continue
+		}
+		alertID := id
+		safego.Go("mqtt.trend_dispatch", func() {
+			if err := c.notifier.Dispatch(context.Background(), tenant, alertID); err != nil {
+				slog.Error("alert dispatch failed", "alert_id", alertID, "err", err)
+			}
+		}, "tenant", tenant, "device", device, "alert_id", alertID)
+	}
 }
 
 // handleInfo persists device metadata from a retained thesada/<tenant>/<device>/info

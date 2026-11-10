@@ -571,13 +571,13 @@ const stopMargin = 3 * time.Second
 type cascadeVerdict int
 
 const (
-	cascadeOK       cascadeVerdict = iota
-	cascadeOKSealed                // deleted, but the enrollment rows may still be sealed
-	cascadeRefused                 // recovery gate, nothing touched
-	cascadeFailed                  // revoke or DB delete failed
-	cascadeStopped                 // shutdown landed before the DB delete, row kept for a retry
-	cascadeMoved                   // the row left its tenant or is gone since the job read it, nothing touched
-	cascadeNotStarted              // shutdown landed while waiting for the device lock, nothing touched
+	cascadeOK         cascadeVerdict = iota
+	cascadeOKSealed                  // deleted, but the enrollment rows may still be sealed
+	cascadeRefused                   // recovery gate, nothing touched
+	cascadeFailed                    // revoke or DB delete failed
+	cascadeStopped                   // shutdown landed before the DB delete, row kept for a retry
+	cascadeMoved                     // the row left its tenant or is gone since the job read it, nothing touched
+	cascadeNotStarted                // shutdown landed while waiting for the device lock, nothing touched
 )
 
 // retryGoneEnrollmentReset resets the enrollment of a device whose row is

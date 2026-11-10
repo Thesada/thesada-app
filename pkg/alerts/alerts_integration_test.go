@@ -57,9 +57,31 @@ func seedEmailSub(t *testing.T, env *servicetest.Env, tenant, devicePk, email st
 		tenant, email).Scan(&userID); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	if _, err := env.Super.Exec(ctx,
-		`INSERT INTO alert_subscriptions (user_id, device_pk, channel, min_severity)
-		 VALUES ($1, $2, 'email', 'warn')`, userID, devicePk); err != nil {
+	seedSub(t, env, userID, devicePk, "email", email, "warn")
+}
+
+// seedSub subscribes userID through a kind/target channel, creating the channel
+// when missing. devicePk "" means all devices.
+func seedSub(t *testing.T, env *servicetest.Env, userID, devicePk, kind, target, severity string) {
+	t.Helper()
+	ctx := context.Background()
+	var chID string
+	if err := env.Super.QueryRow(ctx, `
+		INSERT INTO notification_channels (user_id, kind, target) VALUES ($1, $2, $3)
+		ON CONFLICT (user_id, kind, target) DO UPDATE SET target = EXCLUDED.target
+		RETURNING id`, userID, kind, target).Scan(&chID); err != nil {
+		t.Fatalf("seed channel: %v", err)
+	}
+	var dev, dest any
+	if devicePk != "" {
+		dev = devicePk
+	}
+	if kind == "webhook" {
+		dest = target
+	}
+	if _, err := env.Super.Exec(ctx, `
+		INSERT INTO alert_subscriptions (user_id, device_pk, channel, min_severity, destination, channel_id)
+		VALUES ($1, $2, $3, $4, $5, $6)`, userID, dev, kind, severity, dest, chID); err != nil {
 		t.Fatalf("seed subscription: %v", err)
 	}
 }
@@ -151,11 +173,7 @@ func seedWebhookSub(t *testing.T, env *servicetest.Env, tenant, devicePk, email,
 		tenant, email).Scan(&userID); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	if _, err := env.Super.Exec(ctx,
-		`INSERT INTO alert_subscriptions (user_id, device_pk, channel, min_severity, destination)
-		 VALUES ($1, $2, 'webhook', 'warn', $3)`, userID, devicePk, dest); err != nil {
-		t.Fatalf("seed webhook: %v", err)
-	}
+	seedSub(t, env, userID, devicePk, "webhook", dest, "warn")
 }
 
 // countHost counts request hosts in a dispatch's webhook calls.
@@ -215,7 +233,7 @@ func TestDispatch_TenantScope(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if len(recipients) != 1 || recipients[0].email != "ops@example.com" {
+		if len(recipients) != 1 || recipients[0].target != "ops@example.com" {
 			t.Errorf("loadRecipients = %+v, want one ops@example.com", recipients)
 		}
 		return nil
@@ -409,11 +427,7 @@ func seedTelegramSub(t *testing.T, env *servicetest.Env, tenant, devicePk, chatI
 		tenant, "tg-"+chatID+"@"+tenant+".example", chatID).Scan(&userID); err != nil {
 		t.Fatalf("seed tg user: %v", err)
 	}
-	if _, err := env.Super.Exec(ctx,
-		`INSERT INTO alert_subscriptions (user_id, device_pk, channel, min_severity)
-		 VALUES ($1, $2, 'telegram', 'warn')`, userID, devicePk); err != nil {
-		t.Fatalf("seed tg subscription: %v", err)
-	}
+	seedSub(t, env, userID, devicePk, "telegram", chatID, "warn")
 }
 
 func TestDispatch_UnconfiguredSMTP_NeverMarksDelivered(t *testing.T) {
@@ -449,11 +463,7 @@ func TestDispatch_PartialChannelFailure_RetriesOnlyFailedChannel(t *testing.T) {
 		"acme", "tg@example.com", "12345").Scan(&userID); err != nil {
 		t.Fatalf("seed tg user: %v", err)
 	}
-	if _, err := env.Super.Exec(ctx,
-		`INSERT INTO alert_subscriptions (user_id, device_pk, channel, min_severity)
-		 VALUES ($1, $2, 'telegram', 'warn')`, userID, devicePk); err != nil {
-		t.Fatalf("seed tg subscription: %v", err)
-	}
+	seedSub(t, env, userID, devicePk, "telegram", "12345", "warn")
 
 	env.Cfg.AlertMaxAttempts = 5
 	env.Cfg.AlertRetryBase = time.Minute
@@ -517,13 +527,9 @@ func TestDispatch_OverlappingSubscriptionsSendOnce(t *testing.T) {
 	if err := env.Super.QueryRow(ctx, `SELECT id FROM users WHERE email = 'ops@example.com'`).Scan(&userID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := env.Super.Exec(ctx, `
-		INSERT INTO alert_subscriptions (user_id, device_pk, channel, min_severity, destination) VALUES
-		    ($1, NULL, 'email', 'info', NULL),
-		    ($1, $2, 'webhook', 'warn', 'https://a.example/hook'),
-		    ($1, NULL, 'webhook', 'warn', 'https://b.example/hook')`, userID, devicePk); err != nil {
-		t.Fatal(err)
-	}
+	seedSub(t, env, userID, "", "email", "ops@example.com", "info")
+	seedSub(t, env, userID, devicePk, "webhook", "https://a.example/hook", "warn")
+	seedSub(t, env, userID, "", "webhook", "https://b.example/hook", "warn")
 	n := New(env.Cfg, env.Pools, nil)
 	err := db.WithTenant(ctx, n.db, "acme", func(tx pgx.Tx) error {
 		recipients, err := n.loadRecipients(ctx, tx, alertID)

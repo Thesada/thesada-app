@@ -42,30 +42,3 @@ func TestAbsenceEpisode_OpensOncePerQuietStretch(t *testing.T) {
 		t.Fatal("fresh sample opened an episode")
 	}
 }
-
-func TestTrendFromNewest_MatchesOldestFirstRise(t *testing.T) {
-	if !TrendFromNewest([]float64{23, 21, 20}, 2) {
-		t.Fatal("newest-first rise was not rising")
-	}
-	if TrendFromNewest([]float64{21, 20}, 2) {
-		t.Fatal("small newest-first rise was rising")
-	}
-}
-
-func TestTrendRising_NeedsTheMinimumClimb(t *testing.T) {
-	if !TrendRising([]float64{20, 21, 23}, 2) {
-		t.Fatal("rise of 3 was not rising")
-	}
-	if TrendRising([]float64{20, 21}, 2) {
-		t.Fatal("rise of 1 was rising")
-	}
-	if TrendRising([]float64{20}, 1) {
-		t.Fatal("one sample was rising")
-	}
-}
-
-func TestTrendRising_NegativeDeltaIsNotRising(t *testing.T) {
-	if TrendRising([]float64{1, 9}, -1) {
-		t.Fatal("negative minimum counted as a rise")
-	}
-}

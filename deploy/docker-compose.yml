@@ -3,7 +3,7 @@
 
 services:
   timescaledb:
-    image: timescale/timescaledb:2.27.1-pg17
+    image: timescale/timescaledb:2.31.0-pg17
     restart: unless-stopped
     env_file: db.env
     environment:
@@ -19,7 +19,7 @@ services:
       retries: 5
 
   mosquitto:
-    image: eclipse-mosquitto:2
+    image: eclipse-mosquitto:2.1.2-alpine
     restart: unless-stopped
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
@@ -27,7 +27,7 @@ services:
     networks: [thesada-broker]
 
   app:
-    image: ghcr.io/thesada/thesada-app:latest
+    image: ghcr.io/thesada/thesada-app:26.11.4
     restart: unless-stopped
     # Shutdown drains requests for up to 15s and admin jobs for up to 18s
     # (jobBudget in cmd/thesada-app/main.go). Keep this above both.

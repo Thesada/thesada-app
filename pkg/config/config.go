@@ -56,9 +56,14 @@ type Config struct {
 
 	TelegramBotToken string
 
-	BaseURL      string // public base URL for magic links, e.g. https://app.example.com
-	CookieSecret string // signs session cookies, must be >= 32 bytes
-	AdminEmail   string // if set, bootstraps this user as admin on startup
+	BaseURL string // public base URL for magic links, e.g. https://app.example.com
+
+	// WebAuthnRPID is the passkey relying party (a host, no scheme or port) and
+	// WebAuthnOrigins the browser origins allowed to answer a ceremony. Both default from BaseURL.
+	WebAuthnRPID    string
+	WebAuthnOrigins []string
+	CookieSecret    string // signs session cookies, must be >= 32 bytes
+	AdminEmail      string // if set, bootstraps this user as admin on startup
 
 	// TrustedProxies are peer networks whose X-Forwarded-For is honoured for
 	// client-IP resolution (logging, per-IP rate limit). Empty = use RemoteAddr.
@@ -172,6 +177,11 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.WebhookAllowNets = wa
+	rpID, origins, err := webAuthnParties(c.BaseURL, os.Getenv("THESADA_WEBAUTHN_RP_ID"), os.Getenv("THESADA_WEBAUTHN_ORIGINS"))
+	if err != nil {
+		return nil, err
+	}
+	c.WebAuthnRPID, c.WebAuthnOrigins = rpID, origins
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
@@ -341,4 +351,36 @@ func (c *Config) DeviceBrokerHost() string {
 		return ""
 	}
 	return h
+}
+
+// webAuthnParties resolves the passkey RP ID and allowed origins. Unset values
+// come from the base URL, so one public host needs no extra config.
+// in: base URL, RP ID override, comma-separated origins override. out: RP ID, origins, error.
+func webAuthnParties(baseURL, rpID, origins string) (string, []string, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", nil, fmt.Errorf("THESADA_BASE_URL: %q is not an absolute URL", baseURL)
+	}
+	if rpID = strings.TrimSpace(rpID); rpID == "" {
+		rpID = u.Hostname()
+	}
+	var list []string
+	for i, o := range strings.Split(origins, ",") {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			if strings.TrimSpace(origins) != "" {
+				return "", nil, fmt.Errorf("THESADA_WEBAUTHN_ORIGINS: empty entry at position %d", i+1)
+			}
+			continue
+		}
+		ou, err := url.Parse(o)
+		if err != nil || ou.Scheme == "" || ou.Host == "" || (ou.Path != "" && ou.Path != "/") {
+			return "", nil, fmt.Errorf("THESADA_WEBAUTHN_ORIGINS: %q is not an origin", o)
+		}
+		list = append(list, ou.Scheme+"://"+ou.Host)
+	}
+	if len(list) == 0 {
+		list = []string{u.Scheme + "://" + u.Host}
+	}
+	return rpID, list, nil
 }

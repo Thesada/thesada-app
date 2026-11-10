@@ -96,6 +96,8 @@ func Start(t *testing.T) *Env {
 		CLIRequestTimeout: 30 * time.Second,
 		CADir:             t.TempDir(),
 		DeviceConfigKEK:   "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+		WebAuthnRPID:      PasskeyRPID,
+		WebAuthnOrigins:   []string{PasskeyOrigin},
 	}
 
 	services, err := service.New(cfg, pools)
@@ -140,3 +142,9 @@ func (e *Env) Truncate(t *testing.T, tables ...string) {
 		}
 	}
 }
+
+// The relying party the test config uses, for webauthntest authenticators.
+const (
+	PasskeyRPID   = "app.thesada.test"
+	PasskeyOrigin = "https://app.thesada.test"
+)

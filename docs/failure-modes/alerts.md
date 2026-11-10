@@ -14,16 +14,20 @@
 | Handler panic | Recovered at dispatch point -> `slog.Error("mqtt.callback_panic")` (`mqtt.go`) | One bad message can't crash ingest |
 | Panic in the insert retry, the inline dispatch or a redispatch row | `goroutine.panic` at error with `site` (`mqtt.alert_insert_retry`, `mqtt.alert_dispatch`, `alerts.redispatch`) and the stack (`pkg/safego`) | **Automatic** for dispatch: the panic counts as one attempt, channels that sent are kept, and the sweep retries after backoff until `dead` at `THESADA_ALERT_MAX_ATTEMPTS`. The retry panic line carries the dead-letter fields for a manual replay |
 | Retained sensor replay at app restart | `slog.Debug("sensor ignored, retained replay")` (`mqtt_ingest.go`) | None needed: a replay neither bumps `last_seen_at` nor clears an open absence alert |
+| Trend rule check fails on ingest | `slog.Error("trend evaluate failed")` (`mqtt_ingest.go::evaluateTrends`), per-rule `alert.trend.insert_failed` or `alert.trend.clear_failed` | The reading is already stored. The next reading checks again, so a missed raise or clear catches up on the next sample |
+| No baseline for a trend rule (device was quiet for two windows) | None, by design | No decision is taken: a long silence never reads as a jump. The next sample a window after the gap decides again |
 
 ## Gaps
 
 - **No ingest lag / queue-depth metric** (`mqtt.go`).
 - **Insert dead-letter is log-only.** Until the insert lands the alert exists only in process memory. A process crash mid-retry loses it. A replay needs the payload from the `alert.ingest.dead_letter` line or the `mqtt.alert_insert_retry` `goroutine.panic` line, so it works only if one of them fired.
+- **A switched-off channel is skipped, not queued.** An alert while a channel is off never reaches it, switching it on later does not replay (`alerts.go::loadRecipients`).
 - **Channel success is per-alert, not per-recipient.** Two email subscribers, one send fails: the channel counts delivered and the failed recipient is not retried (`alerts.go::Dispatch`).
 - **`dead` alerts are operator-visible only (logs/DB).** No UI surface for delivery state yet; the end user still cannot see that their alert never went out.
 - **A panic while loading the row is not counted.** Only a render or send panic counts as an attempt. One in the tenant-scoped row load leaves the row due without backoff, so the sweep retries it each pass (`alerts.go::Dispatch`).
 - **Sweeper claim is in-process.** Running more than one app instance can double-send; needs `FOR UPDATE SKIP LOCKED` claims first (`alerts.go::claim`).
 - **The device Telegram relay is not an alert.** `Telegram.broadcast` on the device also publishes `{"value":"<text> [heap=N]"}` to `<prefix>/alert` (`TelegramModule::send` through the EventBus). It has no severity, so `handleAlert` drops it. The stored alert is the rule's own JSON publish.
+- **Trend rules see only live readings.** A rule added now does not look back over stored telemetry, and a reading that arrives late (buffered on the device) is compared with the baseline at its arrival time, not its measurement time (`trend_rules.go`).
 - **Duplicate detection is a window, not a key.** `InsertAlert` refuses the same JSON payload from the same device inside 10 minutes (`alert.go`), and `handleAlert` drops a retained alert outright (`mqtt_ingest.go`). That covers QoS 1 redelivery, retained replay on reconnect, and the insert retry after a lost commit-ack. It does not cover a genuine repeat with an identical payload inside the window (firmware rule cooldowns are 15 minutes, so none in the shipped examples), and the firmware sends no sequence number to key on.
 
 ---
