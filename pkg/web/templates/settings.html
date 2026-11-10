@@ -29,16 +29,6 @@
              placeholder="Optional"
              class="w-full rounded border border-slate-300 px-3 py-2 text-sm">
     </div>
-    <div>
-      <label class="block text-sm font-medium mb-1" for="telegram_chat_id">Telegram chat ID</label>
-      <input type="text" id="telegram_chat_id" name="telegram_chat_id" value="{{if .User.TelegramChatID}}{{deref .User.TelegramChatID}}{{end}}"
-             placeholder="e.g. 123456789 or -100987654321"
-             class="w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono">
-      <p class="text-xs text-slate-500 mt-1">
-        To get your chat ID: message <a href="https://t.me/userinfobot" class="text-sky-700 hover:underline" target="_blank">@userinfobot</a> on Telegram.
-        For group alerts, use the group chat ID (starts with -100).
-      </p>
-    </div>
     <button type="submit"
             class="rounded bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800">
       Save profile
@@ -123,21 +113,159 @@
   {{end}}
   {{end}}
 
-  <h2 class="text-lg font-medium mb-2">Alert notifications</h2>
+  {{if and .HasPassword .PasskeysEnabled}}
+  <div data-passkey>
+  <h2 class="text-lg font-medium mb-2">Passkeys</h2>
   <p class="text-sm text-slate-500 mb-4">
-    Subscribe to receive alerts by email, Telegram, or an http(s) webhook.
+    A security key or phone can stand in for the 6 digit code. Your password stays.
+  </p>
+  {{if .PasskeyError}}
+  <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">That password is not right.</div>
+  {{end}}
+  {{if eq .SavedSection "passkey"}}
+  <div class="mb-4 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">Passkeys updated.</div>
+  {{end}}
+  <div data-passkey-error hidden class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"></div>
+  {{if .Passkeys}}
+  <ul class="divide-y divide-slate-200 border border-slate-200 rounded mb-4">
+    {{range .Passkeys}}
+    <li class="px-3 py-2 text-sm">
+      <div class="font-medium">{{.Name}}</div>
+      <div class="text-xs text-slate-500">Added {{.CreatedAt.Format "2006-01-02"}}{{if .LastUsedAt}}, last used {{.LastUsedAt.Format "2006-01-02"}}{{end}}</div>
+      <form method="POST" action="/settings/passkeys/{{.ID}}/delete" class="flex gap-2 mt-2">
+        <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+        <input type="password" name="password" required autocomplete="current-password" placeholder="Password"
+               class="flex-1 rounded border border-slate-300 px-3 py-1 text-sm">
+        <button type="submit" class="rounded bg-white border border-slate-300 text-sm px-3 py-1">Remove</button>
+      </form>
+    </li>
+    {{end}}
+  </ul>
+  {{end}}
+  <form data-passkey-add class="space-y-3 mb-8">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <input type="text" name="name" maxlength="64" placeholder="Name, for example YubiKey"
+           class="w-full rounded border border-slate-300 px-3 py-2 text-sm">
+    <input type="password" name="password" required autocomplete="current-password" placeholder="Password"
+           class="w-full rounded border border-slate-300 px-3 py-2 text-sm">
+    <button type="submit" class="rounded bg-slate-900 text-white text-sm px-4 py-2">Add passkey</button>
+  </form>
+  </div>
+  <script src="/static/js/passkey.js"></script>
+  {{end}}
+
+  <h2 id="notifications" class="text-lg font-medium mb-2">Alert notifications</h2>
+  <p class="text-sm text-slate-500 mb-4">
+    Add the places alerts go to, then pick which of them get alerts and from what severity.
   </p>
 
-  {{if eq .SavedSection "notifications"}}
+  {{if or (eq .SavedSection "notifications") (eq .SavedSection "channels")}}
   <div class="mb-4 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
     Notification settings updated.
   </div>
-  {{else if eq .SaveError "notifications"}}
+  {{else if or (eq .SaveError "notifications") (eq .SaveError "channels")}}
   <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-    Could not remove that notification.
+    Could not save that change.
   </div>
   {{end}}
 
+  <h3 class="text-sm font-medium mb-2">Channels</h3>
+  {{if .Channels}}
+  <div class="bg-white border border-slate-200 rounded-xl overflow-x-auto mb-4">
+    <table class="min-w-full text-sm">
+      <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+        <tr>
+          <th class="text-left px-4 py-2">Type</th>
+          <th class="text-left px-4 py-2">Target</th>
+          <th class="text-left px-4 py-2">Label</th>
+          <th class="text-left px-4 py-2">State</th>
+          <th class="text-right px-4 py-2"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100">
+        {{range .Channels}}
+        <tr>
+          <td class="px-4 py-2">{{.Kind}}</td>
+          <td class="px-4 py-2 font-mono text-xs break-all">{{.Target}}{{if .FollowsAccount}} <span class="font-sans text-xs px-1.5 py-0.5 rounded bg-sky-50 text-sky-700">account email</span>{{end}}</td>
+          <td class="px-4 py-2">{{.Label}}</td>
+          <td class="px-4 py-2">
+            <form method="POST" action="/settings/channels/{{.ID}}/toggle" class="inline">
+              <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+              {{if .Enabled}}
+              <input type="hidden" name="enabled" value="false">
+              <button type="submit" class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700">on</button>
+              {{else}}
+              <input type="hidden" name="enabled" value="true">
+              <button type="submit" class="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-600">off</button>
+              {{end}}
+            </form>
+          </td>
+          <td class="px-4 py-2 text-right whitespace-nowrap">
+            <details class="inline-block text-left">
+              <summary class="text-xs text-sky-700 hover:underline cursor-pointer inline">Edit</summary>
+              <form method="POST" action="/settings/channels/{{.ID}}/update" class="mt-2 space-y-2">
+                <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+                {{if .FollowsAccount}}
+                <p class="w-64 text-xs text-slate-500">Follows your account email.</p>
+                {{else}}
+                <input type="text" name="target" value="{{.Target}}" required
+                       class="w-64 text-sm border border-slate-300 rounded px-2 py-1 font-mono">
+                {{end}}
+                <input type="text" name="label" value="{{.Label}}" placeholder="Label"
+                       class="w-64 text-sm border border-slate-300 rounded px-2 py-1">
+                <label class="flex items-center gap-2 text-xs">
+                  <input type="checkbox" name="enabled" {{if .Enabled}}checked{{end}}> enabled
+                </label>
+                <button type="submit" class="rounded bg-slate-900 text-white text-xs px-3 py-1">Save</button>
+              </form>
+            </details>
+            <form method="POST" action="/settings/channels/{{.ID}}/delete" class="inline ml-2"
+                  onsubmit="return confirm('Remove this channel and the alert rules that use it?')">
+              <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+              <button type="submit" class="text-xs text-red-600 hover:underline">Remove</button>
+            </form>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="text-sm text-slate-400 mb-4">No channels yet.</p>
+  {{end}}
+
+  <form method="POST" action="/settings/channels/add" class="flex flex-wrap gap-2 items-end mb-6">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <div>
+      <label class="block text-xs font-medium mb-1" for="channel_kind">Type</label>
+      <select id="channel_kind" name="kind" class="text-sm border border-slate-300 rounded px-2 py-1">
+        <option value="email">Email</option>
+        <option value="telegram">Telegram</option>
+        <option value="webhook">Webhook</option>
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs font-medium mb-1" for="channel_target">Address, chat ID or URL</label>
+      <input type="text" id="channel_target" name="target" required
+             placeholder="name@example.com, 123456789 or https://example/hook"
+             class="w-72 text-sm border border-slate-300 rounded px-2 py-1 font-mono">
+    </div>
+    <div>
+      <label class="block text-xs font-medium mb-1" for="channel_label">Label</label>
+      <input type="text" id="channel_label" name="label" placeholder="Optional"
+             class="text-sm border border-slate-300 rounded px-2 py-1">
+    </div>
+    <button type="submit"
+            class="rounded bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800">
+      Add channel
+    </button>
+  </form>
+  <p class="text-xs text-slate-500 -mt-4 mb-6">
+    Telegram chat ID: message <a href="https://t.me/userinfobot" class="text-sky-700 hover:underline" target="_blank">@userinfobot</a>.
+    A group chat ID starts with -100.
+  </p>
+
+  <h3 class="text-sm font-medium mb-2">Alert rules</h3>
   {{if .Subscriptions}}
   <div class="bg-white border border-slate-200 rounded-xl overflow-x-auto mb-4">
     <table class="min-w-full text-sm">
@@ -151,7 +279,12 @@
       <tbody class="divide-y divide-slate-100">
         {{range .Subscriptions}}
         <tr>
-          <td class="px-4 py-2">{{.Channel}}</td>
+          <td class="px-4 py-2">
+            {{.Channel}}
+            {{if .Target}}<span class="font-mono text-xs text-slate-500 break-all">{{.Target}}</span>{{end}}
+            {{if not .ChannelID}}<span class="text-xs text-amber-700">no channel, not sent</span>
+            {{else if not .Enabled}}<span class="text-xs text-slate-500">channel off</span>{{end}}
+          </td>
           <td class="px-4 py-2">
             <span class="text-xs px-2 py-0.5 rounded
               {{if eq .MinSeverity "crit"}}bg-red-100 text-red-700
@@ -171,27 +304,23 @@
     </table>
   </div>
   {{else}}
-  <p class="text-sm text-slate-400 mb-4">No subscriptions yet.</p>
+  <p class="text-sm text-slate-400 mb-4">No alert rules yet.</p>
   {{end}}
 
+  {{if .Channels}}
   <form method="POST" action="/settings/notifications/add" class="flex flex-wrap gap-2 items-end">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <div>
-      <label class="block text-xs font-medium mb-1">Channel</label>
-      <select name="channel" class="text-sm border border-slate-300 rounded px-2 py-1">
-        <option value="email">Email</option>
-        <option value="telegram">Telegram</option>
-        <option value="webhook">Webhook</option>
+      <label class="block text-xs font-medium mb-1" for="rule_channel">Channel</label>
+      <select id="rule_channel" name="channel_id" class="text-sm border border-slate-300 rounded px-2 py-1">
+        {{range .Channels}}
+        <option value="{{.ID}}">{{.Kind}}: {{if .Label}}{{.Label}}{{else}}{{.Target}}{{end}}</option>
+        {{end}}
       </select>
     </div>
     <div>
-      <label class="block text-xs font-medium mb-1">Webhook URL</label>
-      <input type="url" name="destination" placeholder="https://example/hook"
-             class="text-sm border border-slate-300 rounded px-2 py-1">
-    </div>
-    <div>
-      <label class="block text-xs font-medium mb-1">Min severity</label>
-      <select name="min_severity" class="text-sm border border-slate-300 rounded px-2 py-1">
+      <label class="block text-xs font-medium mb-1" for="rule_severity">Min severity</label>
+      <select id="rule_severity" name="min_severity" class="text-sm border border-slate-300 rounded px-2 py-1">
         <option value="warn">warn</option>
         <option value="crit">crit</option>
         <option value="info">info</option>
@@ -199,9 +328,10 @@
     </div>
     <button type="submit"
             class="rounded bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800">
-      Add
+      Add rule
     </button>
   </form>
+  {{end}}
 </section>
 
 <section id="sso" class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mt-6">

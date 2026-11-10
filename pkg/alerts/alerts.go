@@ -150,12 +150,10 @@ type alertRow struct {
 
 // recipient is one subscription the alert was matched against.
 type recipient struct {
-	subID          string
-	userID         string
-	channel        string
-	email          string
-	telegramChatID *string
-	destination    *string
+	subID   string
+	userID  string
+	channel string
+	target  string
 }
 
 // Dispatch sends one alert through every matching subscription channel and
@@ -248,8 +246,8 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 			if row.alreadyEmail {
 				continue
 			}
-			if err := n.sendEmail(r.email, subject, body, htmlBody); err != nil {
-				slog.Error("alert email failed", "alert_id", alertID, "to", r.email, "err", err)
+			if err := n.sendEmail(r.target, subject, body, htmlBody); err != nil {
+				slog.Error("alert email failed", "alert_id", alertID, "to", r.target, "err", err)
 				continue
 			}
 			emailOK = true
@@ -257,12 +255,8 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 			if row.alreadyTg {
 				continue
 			}
-			if r.telegramChatID == nil || *r.telegramChatID == "" {
-				slog.Warn("telegram subscription without chat_id", "alert_id", alertID, "user_id", r.userID)
-				continue
-			}
-			if err := n.sendTG(ctx, *r.telegramChatID, body); err != nil {
-				slog.Error("alert telegram failed", "alert_id", alertID, "chat_id", *r.telegramChatID, "err", err)
+			if err := n.sendTG(ctx, r.target, body); err != nil {
+				slog.Error("alert telegram failed", "alert_id", alertID, "chat_id", r.target, "err", err)
 				continue
 			}
 			tgOK = true
@@ -273,11 +267,7 @@ func (n *Notifier) Dispatch(ctx context.Context, tenantID string, alertID int64)
 			if _, done := sentHooks[r.subID]; done {
 				continue
 			}
-			dest := ""
-			if r.destination != nil {
-				dest = *r.destination
-			}
-			if err := n.sendWebhook(ctx, dest, hookBody); err != nil {
+			if err := n.sendWebhook(ctx, r.target, hookBody); err != nil {
 				slog.Error("alert webhook failed", "alert_id", alertID, "err", err)
 				continue
 			}
@@ -467,24 +457,26 @@ func (n *Notifier) loadAlert(ctx context.Context, tx pgx.Tx, alertID int64) (*al
 }
 
 // loadRecipients walks alert_subscriptions for the alert's device or a
-// tenant-wide wildcard row (device_pk IS NULL) and returns everyone whose
-// min_severity threshold is met.
+// tenant-wide wildcard row (device_pk IS NULL) and returns the enabled channel
+// of everyone whose min_severity threshold is met.
 // in: ctx, tenant-scoped tx, alert id. out: [] recipient, error.
 func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64) ([]recipient, error) {
-	// One row per user, channel and destination: a device and an all-devices
-	// subscription on the same channel send once. The device one wins.
+	// One row per channel: a device and an all-devices subscription on the
+	// same channel send once. The device one wins.
 	const query = `
-		SELECT DISTINCT ON (s.user_id, s.channel, coalesce(s.destination, ''))
-		       s.id::text, s.user_id::text, s.channel, u.email::text, u.telegram_chat_id, s.destination
+		SELECT DISTINCT ON (c.id)
+		       s.id::text, s.user_id::text, c.kind,
+		       CASE WHEN c.follows_account THEN u.email::text ELSE c.target END
 		FROM device_alerts a
 		JOIN alert_subscriptions s
 		  ON (s.device_pk = a.device_pk OR s.device_pk IS NULL)
-		JOIN users u ON u.id = s.user_id
+		JOIN notification_channels c ON c.id = s.channel_id AND c.enabled
+		JOIN users u ON u.id = c.user_id
 		WHERE a.id = $1
 		  AND (CASE a.severity WHEN 'info' THEN 0 WHEN 'warn' THEN 1 WHEN 'crit' THEN 2 END)
 		      >=
 		      (CASE s.min_severity WHEN 'info' THEN 0 WHEN 'warn' THEN 1 WHEN 'crit' THEN 2 END)
-		ORDER BY s.user_id, s.channel, coalesce(s.destination, ''), s.device_pk IS NULL, s.id`
+		ORDER BY c.id, s.device_pk IS NULL, s.id`
 	rows, err := tx.Query(ctx, query, alertID)
 	if err != nil {
 		return nil, fmt.Errorf("recipients query: %w", err)
@@ -493,7 +485,7 @@ func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64)
 	var out []recipient
 	for rows.Next() {
 		var r recipient
-		if err := rows.Scan(&r.subID, &r.userID, &r.channel, &r.email, &r.telegramChatID, &r.destination); err != nil {
+		if err := rows.Scan(&r.subID, &r.userID, &r.channel, &r.target); err != nil {
 			return nil, fmt.Errorf("recipients scan: %w", err)
 		}
 		out = append(out, r)
