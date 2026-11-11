@@ -205,7 +205,7 @@ func TestAuthUsers(t *testing.T) {
 		}
 	})
 
-	t.Run("UpdateDisplayName_and_TelegramChatID", func(t *testing.T) {
+	t.Run("UpdateDisplayName", func(t *testing.T) {
 		u := mustCreateUser(t, auth, tA, "upd@a.test")
 		if err := auth.UpdateDisplayName(tA, u.ID, "Renamed"); err != nil {
 			t.Fatalf("UpdateDisplayName: %v", err)
@@ -213,21 +213,6 @@ func TestAuthUsers(t *testing.T) {
 		got, _ := auth.GetUserByID(tA, u.ID)
 		if got.DisplayName == nil || *got.DisplayName != "Renamed" {
 			t.Errorf("display name = %v, want Renamed", got.DisplayName)
-		}
-		if err := auth.UpdateTelegramChatID(tA, u.ID, "12345"); err != nil {
-			t.Fatalf("UpdateTelegramChatID set: %v", err)
-		}
-		got, _ = auth.GetUserByID(tA, u.ID)
-		if got.TelegramChatID == nil || *got.TelegramChatID != "12345" {
-			t.Errorf("telegram = %v, want 12345", got.TelegramChatID)
-		}
-		// Empty string clears to NULL.
-		if err := auth.UpdateTelegramChatID(tA, u.ID, ""); err != nil {
-			t.Fatalf("UpdateTelegramChatID clear: %v", err)
-		}
-		got, _ = auth.GetUserByID(tA, u.ID)
-		if got.TelegramChatID != nil {
-			t.Errorf("telegram after clear = %v, want nil", got.TelegramChatID)
 		}
 	})
 

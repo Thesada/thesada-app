@@ -34,4 +34,98 @@
 </div>
 {{end}}
 </div>
+
+<h2 id="rules" class="text-lg font-semibold mt-10 mb-1">Trend rules</h2>
+<p class="text-sm text-slate-500 mb-3">Alert when a reading moves this much within the window.</p>
+{{if eq .SavedSection "rules"}}<p class="text-sm text-green-700 mb-3">Saved.</p>{{end}}
+{{if eq .ErrSection "rules"}}<p class="text-sm text-red-600 mb-3">Could not save, try again.</p>{{end}}
+{{if .TrendRules}}
+<div class="bg-white border border-slate-200 rounded-xl overflow-x-auto mb-4">
+  <table class="min-w-full text-sm">
+    <thead class="bg-slate-50 text-slate-600 text-xs uppercase">
+      <tr>
+        <th class="text-left px-4 py-2">Metric</th>
+        <th class="text-left px-4 py-2">Device</th>
+        <th class="text-left px-4 py-2">Rule</th>
+        <th class="text-left px-4 py-2">Severity</th>
+        <th class="text-left px-4 py-2">On</th>
+        <th class="px-4 py-2"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .TrendRules}}
+      <tr class="border-t border-slate-100">
+        <td class="px-4 py-2 font-mono">{{.Metric}}</td>
+        <td class="px-4 py-2">{{if .DeviceID}}{{.DeviceID}}{{else}}all devices{{end}}</td>
+        <td class="px-4 py-2">{{.Direction}} {{.Delta}} in {{trendWindow .WindowS}}</td>
+        <td class="px-4 py-2">{{.Severity}}</td>
+        <td class="px-4 py-2">
+          <form method="POST" action="/alerts/rules/{{.ID}}/toggle">
+            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+            <input type="checkbox" name="enabled" {{if .Enabled}}checked{{end}} data-autosubmit aria-label="enabled">
+          </form>
+        </td>
+        <td class="px-4 py-2 text-right">
+          <form method="POST" action="/alerts/rules/{{.ID}}/delete" class="inline"
+                data-confirm="Remove this rule?">
+            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+            <button type="submit" class="text-xs text-red-600 hover:underline">Remove</button>
+          </form>
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{else}}
+<p class="text-sm text-slate-400 mb-4">No trend rules yet.</p>
+{{end}}
+
+<form method="POST" action="/alerts/rules/add" class="flex flex-wrap gap-2 items-end mb-6">
+  <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+  <div>
+    <label class="block text-xs font-medium mb-1" for="trend_metric">Metric</label>
+    <input type="text" id="trend_metric" name="metric" list="trend_metrics" required placeholder="temp.boiler"
+           class="w-44 text-sm border border-slate-300 rounded px-2 py-1 font-mono">
+    <datalist id="trend_metrics">{{range .TrendMetrics}}<option value="{{.}}">{{end}}</datalist>
+  </div>
+  <div>
+    <label class="block text-xs font-medium mb-1" for="trend_device">Device</label>
+    <select id="trend_device" name="device" class="text-sm border border-slate-300 rounded px-2 py-1">
+      <option value="">All devices</option>
+      {{range .Devices}}<option value="{{.ID}}">{{.DeviceID}}</option>{{end}}
+    </select>
+  </div>
+  <div>
+    <label class="block text-xs font-medium mb-1" for="trend_direction">Moves</label>
+    <select id="trend_direction" name="direction" class="text-sm border border-slate-300 rounded px-2 py-1">
+      <option value="fall">falls</option>
+      <option value="rise">rises</option>
+      <option value="either">either way</option>
+    </select>
+  </div>
+  <div>
+    <label class="block text-xs font-medium mb-1" for="trend_delta">By at least</label>
+    <input type="number" id="trend_delta" name="delta" step="any" min="0" required
+           class="w-24 text-sm border border-slate-300 rounded px-2 py-1">
+  </div>
+  <div>
+    <label class="block text-xs font-medium mb-1" for="trend_window">Within</label>
+    <input type="number" id="trend_window" name="window" min="1" required value="10"
+           class="w-20 text-sm border border-slate-300 rounded px-2 py-1">
+    <select name="unit" aria-label="window unit" class="text-sm border border-slate-300 rounded px-2 py-1">
+      <option value="min">min</option>
+      <option value="h">h</option>
+    </select>
+  </div>
+  <div>
+    <label class="block text-xs font-medium mb-1" for="trend_severity">Severity</label>
+    <select id="trend_severity" name="severity" class="text-sm border border-slate-300 rounded px-2 py-1">
+      <option value="warn">warn</option>
+      <option value="crit">crit</option>
+      <option value="info">info</option>
+    </select>
+  </div>
+  <button type="submit" class="rounded bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800">Add rule</button>
+</form>
 {{end}}

@@ -87,6 +87,10 @@
       var fn = window[name];
       if (typeof fn === 'function' && fn(form) === false) ev.preventDefault();
     }, true);
+    document.addEventListener('change', function (ev) {
+      var el = ev.target;
+      if (el && el.form && el.hasAttribute && el.hasAttribute('data-autosubmit')) el.form.requestSubmit();
+    });
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js");
     }
