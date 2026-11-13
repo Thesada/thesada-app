@@ -189,3 +189,29 @@ func TestBlankConfigSecrets(t *testing.T) {
 		}
 	})
 }
+
+// A config whose secret leaves are empty is a blanked snapshot or editor copy;
+// writing it to the device would erase the device's secrets (#85).
+func TestConfigHasBlankSecrets(t *testing.T) {
+	cases := map[string]bool{
+		`{"mqtt":{"password":"","host":"b"}}`:                              true,
+		`{"wifi":{"networks":[{"ssid":"home","password":""}]}}`:            true,
+		`{"telegram":{"bot_token":""}}`:                                    true,
+		`{"mqtt":{"password":"s3cret","host":"b"}}`:                        false,
+		`{"mqtt":{"host":"b"}}`:                                            false,
+		`{"wifi":{"networks":[{"ssid":"home","password":"pw"}]},"web":{}}`: false,
+		`not json at all`:                                                  false,
+	}
+	for content, want := range cases {
+		got, err := ConfigHasBlankSecrets(content)
+		if err != nil {
+			t.Fatalf("%s: %v", content, err)
+		}
+		if got != want {
+			t.Errorf("%s: got %v, want %v", content, got, want)
+		}
+	}
+	if _, err := ConfigHasBlankSecrets(`{"mqtt":`); err == nil {
+		t.Error("broken object content must fail closed")
+	}
+}

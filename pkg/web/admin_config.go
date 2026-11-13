@@ -337,6 +337,10 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 		http.Error(w, "path and content required", http.StatusBadRequest)
 		return
 	}
+	if msg := configWriteRefusal(req.Path, req.Content); msg != "" {
+		http.Error(w, msg, http.StatusUnprocessableEntity)
+		return
+	}
 
 	// Two writes would share <path>.new and interleave their chunks on the device.
 	claim, ok := s.claimDeviceWrite(device.ID, writeClaimTTL(s.cfg.CLIRequestTimeout, len(req.Content)))
@@ -503,6 +507,24 @@ const readbackChunkSize = 2048
 // the staging check, then fs.rm or a full readback of the destination.
 func writeSteps(n int) int {
 	return writeChunkCount(n) + 3 + max(1, (n+readbackChunkSize-1)/readbackChunkSize)
+}
+
+// configWriteRefusal stops a config.json write whose secret fields are empty: snapshots and the
+// editor carry blanked secrets, and writing them would erase the device's secrets (#85).
+// in: path, content. out: refusal message, or "" to let the write through.
+func configWriteRefusal(path, content string) string {
+	if path != configSnapshotKey && path != "/"+configSnapshotKey {
+		return ""
+	}
+	blank, err := service.ConfigHasBlankSecrets(content)
+	if err != nil {
+		return "config.json does not parse, nothing was sent"
+	}
+	if blank {
+		return "config.json has empty secret fields (snapshots and the editor never show secrets), " +
+			"writing it would erase the device's secrets. Change settings with Push config keys, nothing was sent"
+	}
+	return ""
 }
 
 // writeFailure is a failed stagedWrite: the request store status plus the UI message.
