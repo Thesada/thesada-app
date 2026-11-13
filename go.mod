@@ -1,6 +1,6 @@
 module thesada.app/app
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/containerd/errdefs v1.0.0

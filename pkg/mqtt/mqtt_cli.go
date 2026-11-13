@@ -1,10 +1,12 @@
 package mqtt
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -246,12 +248,23 @@ func (c *Client) CLIRequest(ctx context.Context, topicPrefix, command, payload s
 	return awaitPagedCLIResponse(ctx, ch)
 }
 
-// CLIRequestRaw sends a CLI command with a raw byte payload (for fs.write
-// and fs.append where the payload contains path + newline + binary content).
-// Firmware binary handlers read payload as raw bytes and would not parse a
-// JSON envelope, so this path does not wrap. The per-device mutex still
-// serializes against any concurrent CLIRequest on the same device.
-// in: ctx, topicPrefix, command, rawPayload. out: *CLIResponse, error.
+// CLIRequestFields sends a "<key>\n<value>" payload (cert.set, secret.set)
+// inside the req_id envelope, so the reply correlates on req_id. Firmware
+// unwraps args before its binary handlers. Bytes JSON cannot carry exactly
+// (invalid UTF-8, NUL) fall back to CLIRequestRaw.
+// in: ctx, topicPrefix, command, payload. out: *CLIResponse, error.
+func (c *Client) CLIRequestFields(ctx context.Context, topicPrefix, command string, payload []byte) (*CLIResponse, error) {
+	if utf8.Valid(payload) && bytes.IndexByte(payload, 0) < 0 {
+		return c.CLIRequest(ctx, topicPrefix, command, string(payload))
+	}
+	return c.CLIRequestRaw(ctx, topicPrefix, command, payload)
+}
+
+// CLIRequestRaw sends a CLI command with a raw byte payload, used for the
+// fs.write and fs.append chunks. Firmware would unwrap an envelope here too,
+// but JSON escaping grows a 3900-byte chunk past the device input buffer and
+// a chunk cut inside a UTF-8 rune would be rewritten, so chunks stay raw and
+// correlate on the command name. The per-device mutex still serializes.
 func (c *Client) CLIRequestRaw(ctx context.Context, topicPrefix, command string, rawPayload []byte) (*CLIResponse, error) {
 	if c.c == nil || !c.c.IsConnected() {
 		return nil, errors.New("mqtt client not connected")

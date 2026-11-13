@@ -83,6 +83,7 @@ func (s *Server) loadSettingsData(r *http.Request) (map[string]interface{}, erro
 	}
 	return map[string]interface{}{
 		"HasPassword":     has,
+		"HomeTenantID":    u.TenantID,
 		"Subscriptions":   subs,
 		"Channels":        channels,
 		"SavedSection":    r.URL.Query().Get("saved"),

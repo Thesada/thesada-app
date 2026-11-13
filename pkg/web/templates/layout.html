@@ -60,7 +60,7 @@
     {{block "content" .}}{{end}}
   </main>
   <footer class="max-w-5xl mx-auto px-4 pt-6 pb-28 text-xs text-slate-500 md:pb-6">
-    thesada-app dev build - {{.Now}}
+    thesada-app {{.AppVersion}}
   </footer>
   <script nonce="{{.CSPNonce}}">
     document.addEventListener('click', function (ev) {
@@ -201,5 +201,13 @@
 {{else}}
 <a href="/signup" class="px-1 py-3 text-xs font-medium hover:bg-slate-100 rounded md:px-3 md:text-sm">Sign up</a>
 <a href="/login" class="px-1 py-3 text-xs font-medium hover:bg-slate-100 rounded md:px-3 md:text-sm">Login</a>
+{{end}}
+{{end}}
+
+{{define "alert-coverage"}}
+{{if .AlertsUnheard}}
+<div class="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status" data-alert-coverage="none">
+  Nobody gets alerts for this tenant. <a href="/settings#notifications" class="font-medium underline">Set up alert notifications</a>
+</div>
 {{end}}
 {{end}}

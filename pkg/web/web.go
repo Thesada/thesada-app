@@ -4,6 +4,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/buildinfo"
 	"thesada.app/app/pkg/config"
 	"thesada.app/app/pkg/csrf"
 	"thesada.app/app/pkg/httpsec"
@@ -257,9 +259,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /admin/observability", authmw.RequireSuperAdmin(s.handleAdminObservability))
 }
 
-// render executes a parsed page template, injecting auth context into data.
-// in: writer, request, page filename, template data. out: HTML response.
+// render executes a page with 200. See renderStatus.
+// in: writer, request, page, data. out: HTML response.
 func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, data map[string]interface{}) {
+	s.renderStatus(w, r, http.StatusOK, page, data)
+}
+
+// renderStatus executes a parsed page template, injecting auth context into
+// data. in: writer, request, status, page filename, template data. out: HTML response.
+func (s *Server) renderStatus(w http.ResponseWriter, r *http.Request, status int, page string, data map[string]interface{}) {
 	t, ok := s.templates[page]
 	if !ok {
 		http.Error(w, "template not found: "+page, http.StatusInternalServerError)
@@ -268,8 +276,8 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, dat
 	if data == nil {
 		data = map[string]interface{}{}
 	}
-	if _, set := data["Now"]; !set {
-		data["Now"] = time.Now().Format("2006-01-02 15:04 MST")
+	if _, set := data["AppVersion"]; !set {
+		data["AppVersion"] = buildinfo.Version
 	}
 	if _, set := data["User"]; !set {
 		data["User"] = authmw.CurrentUser(r)
@@ -283,11 +291,16 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, dat
 	if _, set := data["CSPNonce"]; !set {
 		data["CSPNonce"] = httpsec.Nonce(r.Context())
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := t.ExecuteTemplate(w, "layout", data); err != nil {
+	// Render into a buffer so a template error mid-page answers a clean 500.
+	var buf bytes.Buffer
+	if err := t.ExecuteTemplate(&buf, "layout", data); err != nil {
 		slog.Error("template execute failed", "page", page, "err", err)
 		http.Error(w, "render error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = buf.WriteTo(w)
 }
 
 // handleIndex sends the visitor to the device list (auth lands later).

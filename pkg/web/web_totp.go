@@ -67,11 +67,27 @@ func (s *Server) secondFactorData(token string, extra map[string]interface{}) ma
 	if err != nil && !errors.Is(err, service.ErrExpired) {
 		slog.Error("auth.totp.factors_failed", "err", err)
 	}
-	data := map[string]interface{}{"HasTOTP": totpOn || err != nil, "HasPasskey": keys && s.services.Auth.PasskeysEnabled()}
+	hasTOTP, hasPasskey, msg := secondFactorOffer(totpOn, keys, s.services.Auth.PasskeysEnabled(), err != nil)
+	data := map[string]interface{}{"HasTOTP": hasTOTP, "HasPasskey": hasPasskey}
+	if msg != "" {
+		data["Error"] = msg
+	}
 	for k, v := range extra {
 		data[k] = v
 	}
 	return data
+}
+
+// secondFactorOffer picks what the second-factor page offers. A failed lookup
+// shows the code form and a passkey-only account with passkeys off gets an
+// error, so the page never skips a factor and never renders empty.
+// in: totp on, has passkeys, passkeys enabled, lookup failed. out: offers, error text.
+func secondFactorOffer(totpOn, keys, passkeysOn, lookupFailed bool) (hasTOTP, hasPasskey bool, msg string) {
+	hasTOTP, hasPasskey = totpOn || lookupFailed, keys && passkeysOn
+	if !hasTOTP && !hasPasskey && keys {
+		msg = "This account signs in with a passkey, and passkeys are turned off on this server. Ask an administrator."
+	}
+	return hasTOTP, hasPasskey, msg
 }
 
 // handleTOTPSubmit checks the challenge cookie and opens the session.
@@ -84,12 +100,11 @@ func (s *Server) handleTOTPSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := s.clientIP(r)
 	if !s.services.Auth.AllowTOTPAttempt(ip) {
-		w.WriteHeader(http.StatusTooManyRequests)
 		data := map[string]interface{}{"Error": "Too many attempts. Wait a few minutes and try again.", "HasTOTP": true}
 		if c, cerr := r.Cookie(totpPendingCookie); cerr == nil && c.Value != "" {
 			data = s.secondFactorData(c.Value, map[string]interface{}{"Error": data["Error"]})
 		}
-		s.render(w, r, "login-totp.html", data)
+		s.renderStatus(w, r, http.StatusTooManyRequests, "login-totp.html", data)
 		return
 	}
 	c, err := r.Cookie(totpPendingCookie)

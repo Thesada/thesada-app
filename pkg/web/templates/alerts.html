@@ -1,5 +1,6 @@
 {{define "title"}}Alerts - thesada{{end}}
 {{define "content"}}
+{{template "alert-coverage" .}}
 <div class="flex items-center justify-between mb-4"
      hx-get="/alerts" hx-trigger="thesada:event from:body throttle:2s" hx-select="#alerts-live" hx-target="#alerts-live" hx-swap="outerHTML">
   <h1 class="text-2xl font-semibold">Alerts</h1>
