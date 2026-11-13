@@ -28,6 +28,13 @@ fi
 echo "pulling images..."
 docker compose pull
 
+# A new image leaves an existing volume on the old extension version.
+# POSTGRES_USER is the superuser, -X keeps psqlrc out of the first statement.
+echo "updating the timescaledb extension..."
+docker compose up -d --wait timescaledb
+docker compose exec -T timescaledb psql -X -v ON_ERROR_STOP=1 -U thesada_app -d thesada_app \
+  -c "ALTER EXTENSION timescaledb UPDATE;"
+
 # one-shot; aborts before the app starts if a migration fails.
 echo "applying database migrations..."
 docker compose run --rm app migrate

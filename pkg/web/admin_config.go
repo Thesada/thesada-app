@@ -337,6 +337,10 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 		http.Error(w, "path and content required", http.StatusBadRequest)
 		return
 	}
+	if msg := configWriteRefusal(req.Path, req.Content); msg != "" {
+		http.Error(w, msg, http.StatusUnprocessableEntity)
+		return
+	}
 
 	// Two writes would share <path>.new and interleave their chunks on the device.
 	claim, ok := s.claimDeviceWrite(device.ID, writeClaimTTL(s.cfg.CLIRequestTimeout, len(req.Content)))
@@ -483,6 +487,8 @@ type cliSender interface {
 }
 
 const (
+	// configSnapshotKey is the device_files path drift and read snapshots store config under.
+	configSnapshotKey = "config.json"
 	// Leaves room for path + newline under the device buffer_in (4096).
 	writeChunkSize = 3900
 	// Not .tmp: the firmware stages its own config saves there.
@@ -503,6 +509,24 @@ func writeSteps(n int) int {
 	return writeChunkCount(n) + 3 + max(1, (n+readbackChunkSize-1)/readbackChunkSize)
 }
 
+// configWriteRefusal stops a config.json write whose secret fields are empty: snapshots and the
+// editor carry blanked secrets, and writing them would erase the device's secrets (#85).
+// in: path, content. out: refusal message, or "" to let the write through.
+func configWriteRefusal(path, content string) string {
+	if path != configSnapshotKey && path != "/"+configSnapshotKey {
+		return ""
+	}
+	blank, err := service.ConfigHasBlankSecrets(content)
+	if err != nil {
+		return "config.json does not parse, nothing was sent"
+	}
+	if blank {
+		return "config.json has empty secret fields (snapshots and the editor never show secrets), " +
+			"writing it would erase the device's secrets. Change settings with Push config keys, nothing was sent"
+	}
+	return ""
+}
+
 // writeFailure is a failed stagedWrite: the request store status plus the UI message.
 type writeFailure struct {
 	status requestStatus
@@ -518,6 +542,10 @@ var ackBytesRE = regexp.MustCompile(`^(?:Wrote|Appended) (\d+) bytes to (.+)$`)
 // only after every chunk acked its full length, so a failure leaves path as it was.
 // in: ctx, sender, per-step timeout, topic prefix, path, content. out: nil or *writeFailure.
 func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration, topicPrefix, path string, content []byte) error {
+	// "config.json" is the snapshot key for the root config. Firmware wants the slash.
+	if path == configSnapshotKey {
+		path = "/" + configSnapshotKey
+	}
 	// The shell splits fs.mv and fs.rm args on blanks and globs * and ?.
 	if strings.ContainsAny(path, " \t\r\n*?") {
 		return &writeFailure{reqStatusError, "path must not contain whitespace, * or ?"}

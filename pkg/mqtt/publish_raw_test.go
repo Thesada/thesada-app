@@ -16,7 +16,7 @@ type stuckToken struct {
 }
 
 func (s stuckToken) WaitTimeout(d time.Duration) bool { *s.waited = d; return false }
-func (stuckToken) Error() error                   { return nil }
+func (stuckToken) Error() error                       { return nil }
 
 // stuckBroker is connected and hands out tokens that never complete.
 type stuckBroker struct {

@@ -268,6 +268,22 @@ func (s *TenantService) CountRecentAlertsAny(slug string) (int, error) {
 	return n, err
 }
 
+// CountSubscribersAny is how many of the tenant's users have an alert
+// subscription on an enabled channel. Cross-tenant BY DESIGN, behind RequireSuperAdmin.
+// in: slug. out: count, error.
+func (s *TenantService) CountSubscribersAny(slug string) (int, error) {
+	ctx := context.Background()
+	var n int
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "tenant.count_subscribers", func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT count(DISTINCT s.user_id) FROM alert_subscriptions s
+			JOIN users u ON u.id = s.user_id
+			JOIN notification_channels c ON c.id = s.channel_id AND c.enabled
+			WHERE u.tenant_id = $1 AND `+subCoversPaired, slug).Scan(&n)
+	})
+	return n, err
+}
+
 // DeleteAllowed is the guard Delete runs: the 'default' bootstrap tenant and
 // every tenant the caller sits in (home and effective) are protected.
 // in: slug, caller's tenant ids. out: ErrTenantProtected or nil.

@@ -217,3 +217,49 @@ func blankSensitiveLeaves(v any) bool {
 	}
 	return changed
 }
+
+// ConfigHasBlankSecrets reports whether config.json content carries an empty
+// sensitive leaf, the shape blankConfigSecrets leaves in snapshots and the
+// editor. Writing such content to a device would erase its secrets.
+// Object-shaped content that does not parse fails closed with an error.
+// in: raw config.json content. out: blank secret found, error.
+func ConfigHasBlankSecrets(content string) (bool, error) {
+	trimmed := strings.TrimSpace(content)
+	if !strings.HasPrefix(trimmed, "{") {
+		return false, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &m); err != nil {
+		return false, fmt.Errorf("parse config.json: %w", err)
+	}
+	for _, dotted := range ScalarSecretFields {
+		if v, ok := readPath(m, strings.Split(dotted, ".")); ok && v == "" {
+			return true, nil
+		}
+	}
+	return hasBlankSensitiveLeaf(m), nil
+}
+
+func hasBlankSensitiveLeaf(v any) bool {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			if s, ok := val.(string); ok {
+				if s == "" && sensitiveConfigKeyRE.MatchString(k) {
+					return true
+				}
+				continue
+			}
+			if hasBlankSensitiveLeaf(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range t {
+			if hasBlankSensitiveLeaf(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
