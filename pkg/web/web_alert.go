@@ -30,11 +30,12 @@ func (s *Server) handleAlertList(w http.ResponseWriter, r *http.Request) {
 		slog.Error("alerts.load_failed", "part", "devices", "tenant", tenantID, "err", err)
 	}
 	s.render(w, r, "alerts.html", map[string]interface{}{
-		"Alerts":       rows,
-		"TrendRules":   rules,
-		"TrendMetrics": metrics,
-		"Devices":      devices,
-		"SavedSection": r.URL.Query().Get("saved"),
-		"ErrSection":   r.URL.Query().Get("err"),
+		"Alerts":        rows,
+		"TrendRules":    rules,
+		"TrendMetrics":  metrics,
+		"Devices":       devices,
+		"SavedSection":  r.URL.Query().Get("saved"),
+		"ErrSection":    r.URL.Query().Get("err"),
+		"AlertsUnheard": s.alertsUnheard(r, tenantID),
 	})
 }

@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,13 +54,13 @@ func (s *Server) handleAdminDebug(w http.ResponseWriter, r *http.Request) {
 
 	proc := []debugRow{
 		{"Hostname", hostname},
-		{"PID", itoa(os.Getpid())},
+		{"PID", strconv.Itoa(os.Getpid())},
 		{"Started at", buildinfo.StartedAt().UTC().Format(time.RFC3339)},
 		{"Uptime", buildinfo.Uptime().Truncate(time.Second).String()},
 		{"Heap Alloc", humanBytes(ms.Alloc)},
 		{"Heap Sys", humanBytes(ms.Sys)},
-		{"NumGC", itoaUint32(ms.NumGC)},
-		{"Goroutines", itoa(runtime.NumGoroutine())},
+		{"NumGC", strconv.FormatUint(uint64(ms.NumGC), 10)},
+		{"Goroutines", strconv.Itoa(runtime.NumGoroutine())},
 	}
 
 	cfg := sanitizeConfig(s.cfg)
@@ -170,9 +171,9 @@ func valueString(v reflect.Value) string {
 		}
 		return "false"
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return itoa64(v.Int())
+		return strconv.FormatInt(v.Int(), 10)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return itoaU64(v.Uint())
+		return strconv.FormatUint(v.Uint(), 10)
 	case reflect.Float32, reflect.Float64:
 		return ftoa(v.Float())
 	default:
@@ -180,62 +181,8 @@ func valueString(v reflect.Value) string {
 	}
 }
 
-// itoa returns base-10 string of an int.
-func itoa(i int) string { return itoa64(int64(i)) }
-
-// itoaUint32 returns base-10 string of a uint32.
-func itoaUint32(i uint32) string { return itoaU64(uint64(i)) }
-
-// itoa64 returns base-10 string of an int64 without strconv import in hot
-// path code paths above (kept local for clarity).
-func itoa64(i int64) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for i > 0 {
-		pos--
-		buf[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
-}
-
-// itoaU64 returns base-10 string of a uint64.
-func itoaU64(i uint64) string {
-	if i == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for i > 0 {
-		pos--
-		buf[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	return string(buf[pos:])
-}
-
 // ftoa renders a float64 with 2 decimals.
-func ftoa(f float64) string {
-	// Quick-and-dirty; runtime.MemStats fields used here are integers, so
-	// this only fires for hypothetical float config values.
-	whole := int64(f)
-	frac := int64((f - float64(whole)) * 100)
-	if frac < 0 {
-		frac = -frac
-	}
-	return itoa64(whole) + "." + itoa64(frac)
-}
+func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', 2, 64) }
 
 // humanBytes formats a byte count with KB/MB/GB suffixes.
 // in: count. out: e.g. "12.4 MB".
@@ -253,6 +200,6 @@ func humanBytes(n uint64) string {
 	case n >= kb:
 		return ftoa(float64(n)/float64(kb)) + " KB"
 	default:
-		return itoaU64(n) + " B"
+		return strconv.FormatUint(n, 10) + " B"
 	}
 }

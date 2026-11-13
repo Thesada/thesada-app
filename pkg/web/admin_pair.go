@@ -579,7 +579,7 @@ func (s *Server) pushCertPart(ctx context.Context, topicPrefix, partType, pem st
 	payload = append(payload, '\n')
 	payload = append(payload, []byte(pem)...)
 
-	resp, err := s.mqtt.CLIRequestRaw(cctx, topicPrefix, "cert.set", payload)
+	resp, err := s.mqtt.CLIRequestFields(cctx, topicPrefix, "cert.set", payload)
 	if err != nil {
 		return "push+" + partType + "+failed+(device+unreachable)", false
 	}
@@ -687,7 +687,7 @@ func (s *Server) pushSecret(ctx context.Context, topicPrefix, fwField, value str
 	payload = append(payload, '\n')
 	payload = append(payload, []byte(value)...)
 
-	resp, err := s.mqtt.CLIRequestRaw(cctx, topicPrefix, "secret.set", payload)
+	resp, err := s.mqtt.CLIRequestFields(cctx, topicPrefix, "secret.set", payload)
 	if err != nil {
 		return "push+secret+failed+(device+unreachable)", false
 	}

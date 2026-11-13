@@ -44,15 +44,28 @@ func (c *Client) devicePaired(tenant string, devicePk uuid.UUID) bool {
 	return snapshotAllowed(d.PairedAt)
 }
 
+// driftCLIFallback bounds a drift round trip on a Client built without config.
+const driftCLIFallback = 15 * time.Second
+
+// driftCLI runs one drift-pull CLI round trip under cfg.CLIRequestTimeout, so
+// a cellular device gets the same budget as an operator command.
+// in: topic prefix, command, payload. out: response, error.
+func (c *Client) driftCLI(topicPrefix, command, payload string) (*CLIResponse, error) {
+	d := c.cliTimeout
+	if d <= 0 {
+		d = driftCLIFallback
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	return c.CLIRequest(ctx, topicPrefix, command, payload)
+}
+
 // discoverAndSnapshotScripts lists /scripts/ on the device and snapshots
 // any .lua files that don't have a stored snapshot yet. Catches custom
 // scripts beyond main.lua and rules.lua.
 // in: tenant id, device pk, topic prefix. out: none.
 func (c *Client) discoverAndSnapshotScripts(tenant string, devicePk uuid.UUID, topicPrefix string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	resp, err := c.CLIRequest(ctx, topicPrefix, "fs.ls", "/scripts")
+	resp, err := c.driftCLI(topicPrefix, "fs.ls", "/scripts")
 	if err != nil || !resp.OK {
 		return
 	}
@@ -101,12 +114,9 @@ func (c *Client) discoverAndSnapshotScripts(tenant string, devicePk uuid.UUID, t
 // in: tenant id, device pk, topic prefix, file path, source label, expected
 // sha (empty string when caller has no reference hash). out: none.
 func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix, path, source, expectedSha string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
 	var content string
 	if path == "config.json" {
-		resp, err := c.CLIRequest(ctx, topicPrefix, "config.dump", "")
+		resp, err := c.driftCLI(topicPrefix, "config.dump", "")
 		if err != nil {
 			slog.Error("drift pull failed", "path", path, "err", err)
 			return
@@ -122,7 +132,7 @@ func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix,
 		offset := 0
 		for {
 			payload := fmt.Sprintf("%s %d 2048", path, offset)
-			resp, err := c.CLIRequest(ctx, topicPrefix, "fs.cat", payload)
+			resp, err := c.driftCLI(topicPrefix, "fs.cat", payload)
 			if err != nil {
 				slog.Error("drift pull chunk failed", "path", path, "offset", offset, "err", err)
 				return
