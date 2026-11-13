@@ -158,6 +158,12 @@
   <p class="text-sm text-slate-500 mb-4">
     Add the places alerts go to, then pick which of them get alerts and from what severity.
   </p>
+  {{if and .HomeTenantID .EffectiveTenantID (ne .EffectiveTenantID .HomeTenantID)}}
+  <div class="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+    You are viewing {{.EffectiveTenantID}}. These alert rules are yours and only cover devices in {{.HomeTenantID}}.
+    To get alerts from {{.EffectiveTenantID}}, subscribe as a user of that tenant.
+  </div>
+  {{end}}
 
   {{if or (eq .SavedSection "notifications") (eq .SavedSection "channels")}}
   <div class="mb-4 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
@@ -339,6 +345,10 @@
   {{if eq .OAuthError "identity_taken"}}
   <div class="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">
     That external identity is already linked to a different Thesada account.
+  </div>
+  {{else if eq .OAuthError "identity_not_found"}}
+  <div class="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">
+    That connected account was already removed.
   </div>
   {{else if eq .OAuthError "last_credential"}}
   <div class="mb-3 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded px-3 py-2">

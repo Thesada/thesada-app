@@ -2,9 +2,11 @@ package mqtt
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestIsDynsecAlreadyExists(t *testing.T) {
@@ -70,5 +72,27 @@ func TestRetryDynsecDelete(t *testing.T) {
 	})
 	if err == nil || calls != 3 {
 		t.Fatalf("exhausted = %v after %d calls, want error after 3", err, calls)
+	}
+}
+
+// Replies to other callers' commands share the response topic. They must not
+// fill the waiter's buffer and push its own reply out.
+func TestSendDynsec_ForeignRepliesDoNotCrowdOutOurs(t *testing.T) {
+	c := &Client{}
+	c.c = &answerBroker{answer: func(_ string, p []byte) {
+		var env dynsecEnvelope
+		if err := json.Unmarshal(p, &env); err != nil || len(env.Commands) != 1 {
+			t.Errorf("command envelope %q: %v", p, err)
+			return
+		}
+		for _, id := range []string{"other-1", "other-2", env.Commands[0].CorrelationData} {
+			resp := fmt.Sprintf(`{"responses":[{"command":"createRole","correlationData":%q}]}`, id)
+			c.fanoutTaps(dynsecResponseTopic, []byte(resp), false, 0)
+		}
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := c.CreateDynsecRole(ctx, "role", nil); err != nil {
+		t.Fatalf("our reply arrived after two foreign ones, got %v", err)
 	}
 }

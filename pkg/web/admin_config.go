@@ -483,6 +483,8 @@ type cliSender interface {
 }
 
 const (
+	// configSnapshotKey is the device_files path drift and read snapshots store config under.
+	configSnapshotKey = "config.json"
 	// Leaves room for path + newline under the device buffer_in (4096).
 	writeChunkSize = 3900
 	// Not .tmp: the firmware stages its own config saves there.
@@ -518,6 +520,10 @@ var ackBytesRE = regexp.MustCompile(`^(?:Wrote|Appended) (\d+) bytes to (.+)$`)
 // only after every chunk acked its full length, so a failure leaves path as it was.
 // in: ctx, sender, per-step timeout, topic prefix, path, content. out: nil or *writeFailure.
 func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration, topicPrefix, path string, content []byte) error {
+	// "config.json" is the snapshot key for the root config. Firmware wants the slash.
+	if path == configSnapshotKey {
+		path = "/" + configSnapshotKey
+	}
 	// The shell splits fs.mv and fs.rm args on blanks and globs * and ?.
 	if strings.ContainsAny(path, " \t\r\n*?") {
 		return &writeFailure{reqStatusError, "path must not contain whitespace, * or ?"}

@@ -87,11 +87,23 @@ func (c *Client) sendDynsec(ctx context.Context, cmd dynsecCommand) (json.RawMes
 	}
 	cmd.CorrelationData = fmt.Sprintf("thesada-app-%d", dynsecSeq.Add(1))
 
-	ch := make(chan []byte, 1)
-	cancel, err := c.RegisterTap(dynsecResponseTopic, func(topic string, p []byte, retained bool, qos byte) {
-		select {
-		case ch <- append([]byte(nil), p...):
-		default:
+	// Every caller shares the response topic, so the sink keeps only the item
+	// answering this command. Foreign replies never take the one slot.
+	ch := make(chan dynsecResponseItem, 1)
+	cancel, err := c.RegisterTap(dynsecResponseTopic, func(_ string, p []byte, _ bool, _ byte) {
+		var env dynsecResponseEnvelope
+		if json.Unmarshal(p, &env) != nil {
+			return
+		}
+		for _, r := range env.Responses {
+			if r.CorrelationData != cmd.CorrelationData {
+				continue
+			}
+			select {
+			case ch <- r:
+			default:
+			}
+			return
 		}
 	})
 	if err != nil {
@@ -107,26 +119,14 @@ func (c *Client) sendDynsec(ctx context.Context, cmd dynsecCommand) (json.RawMes
 		return nil, fmt.Errorf("publish dynsec cmd: %w", err)
 	}
 
-	for {
-		select {
-		case raw := <-ch:
-			var env dynsecResponseEnvelope
-			if err := json.Unmarshal(raw, &env); err != nil {
-				return nil, fmt.Errorf("parse dynsec response: %w", err)
-			}
-			for _, r := range env.Responses {
-				if r.CorrelationData != cmd.CorrelationData {
-					continue
-				}
-				if r.Error != "" {
-					return nil, fmt.Errorf("dynsec %s: %s", cmd.Command, r.Error)
-				}
-				return r.Data, nil
-			}
-			// Response without matching correlationData - keep waiting.
-		case <-ctx.Done():
-			return nil, ctx.Err()
+	select {
+	case r := <-ch:
+		if r.Error != "" {
+			return nil, fmt.Errorf("dynsec %s: %s", cmd.Command, r.Error)
 		}
+		return r.Data, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 

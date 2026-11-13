@@ -84,6 +84,10 @@ func seedCrossTenant(t *testing.T) crossTenantFixture {
 	if _, err := env.Super.Exec(ctx, `UPDATE devices SET owner_user_id = $1 WHERE id = $2`, ownerID, pk); err != nil {
 		t.Fatalf("set owner: %v", err)
 	}
+	// Subscribed before pairing, so pairing adds no default subscription.
+	if err := env.Services.Alerts.CreateSubscription(ctx, ctTenantA, ownerID, &pk, "email", "warn", "owner@ct-a.test"); err != nil {
+		t.Fatalf("seed subscription: %v", err)
+	}
 	now := time.Now()
 	if err := env.Services.Certificates.Issue(ctx, ctTenantA, pk, "ct-serial", "ct-cn", now, now.Add(time.Hour), "pem"); err != nil {
 		t.Fatalf("issue cert: %v", err)
@@ -94,9 +98,6 @@ func seedCrossTenant(t *testing.T) crossTenantFixture {
 	}
 	if _, err := env.Services.Alerts.InsertAlert(ctx, ctTenantA, pk, "warn", "CT1", ctAlertText, nil); err != nil {
 		t.Fatalf("seed alert: %v", err)
-	}
-	if err := env.Services.Alerts.CreateSubscription(ctx, ctTenantA, ownerID, &pk, "email", "warn", "owner@ct-a.test"); err != nil {
-		t.Fatalf("seed subscription: %v", err)
 	}
 	subs, err := env.Services.Alerts.ListSubscriptions(ctx, ctTenantA, ownerID)
 	if err != nil || len(subs) != 1 {
