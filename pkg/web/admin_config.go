@@ -280,7 +280,7 @@ func (s *Server) snapshotFromCmdResponse(ctx context.Context, tenantID string, d
 	}
 	h := sha256.Sum256([]byte(content))
 	hashHex := hex.EncodeToString(h[:])
-	if err := s.services.DeviceFiles.Upsert(ctx, tenantID, devicePk, path, content, hashHex, "read", userID); err != nil {
+	if err := s.services.DeviceFiles.UpsertFromDevice(ctx, tenantID, devicePk, path, content, hashHex, "read", userID); err != nil {
 		slog.Error("device_file upsert failed", "path", path, "err", err)
 	}
 }
@@ -335,6 +335,10 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 
 	if req.Path == "" || req.Content == "" {
 		http.Error(w, "path and content required", http.StatusBadRequest)
+		return
+	}
+	if msg := configWriteRefusal(req.Path, req.Content, s.openWifiLookup(r.Context(), device)); msg != "" {
+		http.Error(w, msg, http.StatusUnprocessableEntity)
 		return
 	}
 
@@ -405,7 +409,9 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID, claim uuid.UUID, 
 	h := sha256.Sum256(contentBytes)
 	hashHex := hex.EncodeToString(h[:])
 	uctx, cancel := context.WithTimeout(parentCtx, snapshotUpsertTimeout)
-	if err := s.services.DeviceFiles.Upsert(uctx, device.TenantID, device.ID, path, content, hashHex, "write", userID); err != nil {
+	// stagedWrite verified the bytes on the device, so they are device truth: the secret
+	// store follows them, or a stale open-network marker would pass the next empty write.
+	if err := s.services.DeviceFiles.UpsertFromDevice(uctx, device.TenantID, device.ID, path, content, hashHex, "write", userID); err != nil {
 		slog.Error("write device_file upsert failed", "path", path, "err", err)
 	}
 	cancel()
@@ -503,6 +509,47 @@ const readbackChunkSize = 2048
 // the staging check, then fs.rm or a full readback of the destination.
 func writeSteps(n int) int {
 	return writeChunkCount(n) + 3 + max(1, (n+readbackChunkSize-1)/readbackChunkSize)
+}
+
+// configWriteRefusal stops a config.json write whose secret fields are empty: snapshots and the
+// editor carry blanked secrets, and writing them would erase the device's secrets (#85). An empty
+// WiFi password passes only when isOpen says the device reported that network open (#88).
+// in: path, content, isOpen (nil refuses every empty secret). out: refusal message, or "" to let the write through.
+func configWriteRefusal(path, content string, isOpen func(field string) (bool, error)) string {
+	if path != configSnapshotKey && path != "/"+configSnapshotKey {
+		return ""
+	}
+	fields, unknown, err := service.BlankSecretFields(content)
+	if err != nil {
+		return "config.json is not one JSON object, nothing was sent"
+	}
+	const refusal = "config.json has empty secret fields (snapshots and the editor never show secrets), " +
+		"writing it would erase the device's secrets. Change settings with Push config keys, nothing was sent"
+	if unknown || (len(fields) > 0 && isOpen == nil) {
+		return refusal
+	}
+	for _, f := range fields {
+		if !service.IsWifiPasswordField(f) {
+			return refusal
+		}
+		if open, err := isOpen(f); err != nil || !open {
+			return refusal
+		}
+	}
+	return ""
+}
+
+// openWifiLookup reports whether the device last reported a WiFi network as open: its own
+// store row holds "". Nil when the store is off, so the guard refuses every empty secret.
+// in: ctx, device. out: lookup func or nil.
+func (s *Server) openWifiLookup(ctx context.Context, device *service.Device) func(string) (bool, error) {
+	if !s.services.Secrets.Enabled() {
+		return nil
+	}
+	return func(field string) (bool, error) {
+		v, found, err := s.services.Secrets.Reveal(ctx, device.TenantID, device.ID, field)
+		return found && v == "", err
+	}
 }
 
 // writeFailure is a failed stagedWrite: the request store status plus the UI message.

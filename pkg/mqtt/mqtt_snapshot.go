@@ -195,7 +195,7 @@ func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix,
 		return
 	}
 
-	if err := c.services.DeviceFiles.Upsert(context.Background(), tenant, devicePk, path, content, hashHex, source, nil); err != nil {
+	if err := c.services.DeviceFiles.UpsertFromDevice(context.Background(), tenant, devicePk, path, content, hashHex, source, nil); err != nil {
 		slog.Error("drift file upsert failed", "path", path, "err", err)
 	} else {
 		slog.Info("device_file saved", "path", path, "source", source, "sha256", hashHex[:12])
