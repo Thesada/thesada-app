@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +22,9 @@ type AlertSubscription struct {
 	DevicePK    *uuid.UUID `json:"device_pk"`
 	Channel     string     `json:"channel"`
 	Destination *string    `json:"destination,omitempty"`
+	ChannelID   *uuid.UUID `json:"channel_id,omitempty"`
+	Target      string     `json:"target,omitempty"`
+	Enabled     bool       `json:"enabled"`
 	MinSeverity string     `json:"min_severity"`
 	CreatedAt   time.Time  `json:"created_at"`
 }
@@ -157,8 +159,12 @@ func (s *AlertService) RecentByTenant(ctx context.Context, tenantID string, limi
 // in: ctx, tenantID, user_id. out: []AlertSubscription.
 func (s *AlertService) ListSubscriptions(ctx context.Context, tenantID string, userID uuid.UUID) ([]AlertSubscription, error) {
 	const query = `
-		SELECT id, user_id, device_pk, channel, destination, min_severity, created_at
-		FROM alert_subscriptions WHERE user_id = $1 ORDER BY created_at`
+		SELECT s.id, s.user_id, s.device_pk, s.channel, s.destination, s.channel_id,
+		       coalesce(` + channelTargetSQL + `, ''), coalesce(c.enabled, false), s.min_severity, s.created_at
+		FROM alert_subscriptions s
+		LEFT JOIN notification_channels c ON c.id = s.channel_id
+		LEFT JOIN users u ON u.id = c.user_id
+		WHERE s.user_id = $1 ORDER BY s.created_at`
 	var out []AlertSubscription
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, query, userID)
@@ -169,7 +175,7 @@ func (s *AlertService) ListSubscriptions(ctx context.Context, tenantID string, u
 		for rows.Next() {
 			var sub AlertSubscription
 			if err := rows.Scan(&sub.ID, &sub.UserID, &sub.DevicePK, &sub.Channel,
-				&sub.Destination, &sub.MinSeverity, &sub.CreatedAt); err != nil {
+				&sub.Destination, &sub.ChannelID, &sub.Target, &sub.Enabled, &sub.MinSeverity, &sub.CreatedAt); err != nil {
 				return err
 			}
 			out = append(out, sub)
@@ -182,25 +188,20 @@ func (s *AlertService) ListSubscriptions(ctx context.Context, tenantID string, u
 	return out, nil
 }
 
-// CreateSubscription creates a new alert subscription. Tenant-scoped via WithTenant.
-// in: ctx, tenantID, user id, device pk, channel, min severity, destination. out: error.
+// CreateSubscription subscribes by kind, as the API does: email goes to the
+// account address, telegram to the oldest telegram channel, webhook to the URL.
+// The channel is created when missing (telegram needs one already).
+// in: ctx, tenantID, user id, device pk, channel kind, min severity, webhook URL. out: error.
 func (s *AlertService) CreateSubscription(ctx context.Context, tenantID string, userID uuid.UUID, devicePK *uuid.UUID, channel, minSeverity, destination string) error {
-	var allow []*net.IPNet
-	if s.cfg != nil {
-		allow = s.cfg.WebhookAllowNets
-	}
-	if err := WebhookDestinationError(channel, destination, allow); err != nil {
+	if err := WebhookDestinationError(channel, destination, s.webhookAllow()); err != nil {
 		return err
-	}
-	var dest any
-	if destination != "" {
-		dest = destination
 	}
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
-			`INSERT INTO alert_subscriptions (user_id, device_pk, channel, min_severity, destination)
-			 VALUES ($1, $2, $3, $4, $5)`, userID, devicePK, channel, minSeverity, dest)
-		return err
+		chID, err := channelForKindTx(ctx, tx, userID, channel, destination)
+		if err != nil {
+			return err
+		}
+		return insertSubscriptionTx(ctx, tx, userID, devicePK, chID, minSeverity)
 	})
 	if err != nil {
 		return fmt.Errorf("create subscription: %w", err)

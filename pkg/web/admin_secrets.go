@@ -50,12 +50,14 @@ func (f secretFieldStatus) Overridden() bool { return f.Origin == service.Origin
 func parseSecretInfo(output []string) map[string]string {
 	states := make(map[string]string, len(output))
 	for _, line := range output {
-		toks := strings.Fields(line)
-		if len(toks) < 2 {
+		// An SSID may hold spaces, so the field is everything before the last blank run.
+		line = strings.TrimSpace(line)
+		i := strings.LastIndexAny(line, " \t")
+		if i < 0 {
 			continue
 		}
-		field := toks[0]
-		state := toks[len(toks)-1]
+		field := strings.TrimSpace(line[:i])
+		state := line[i+1:]
 		if strings.HasPrefix(state, "nvs") {
 			states[field] = "nvs"
 		} else {

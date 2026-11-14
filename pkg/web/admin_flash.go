@@ -36,6 +36,9 @@ var (
 	flashTenantPushed         = adminFlashOK("pushed", "Push finished.")
 	flashTenantDeleted        = adminFlashOK("tenant_deleted", "Tenant deleted.")
 	flashTenantPushedMix      = adminFlashOK("pushed_partial", "Push finished with devices unreachable, rejected, or skipped. Counts are in the log.")
+	flashWaitlistConverted    = adminFlashOK("waitlist_converted", "Converted to an account.")
+	flashWaitlistDeleted      = adminFlashOK("waitlist_deleted", "Waitlist entry deleted.")
+	flashUserResetSent        = adminFlashOK("reset_sent", "Password reset mail sent.")
 
 	flashAdminUserCap         = adminFlashErr("user_cap", "This tenant is at its user cap.")
 	flashAdminDeviceCap       = adminFlashErr("device_cap", "That tenant is at its device cap.")
@@ -88,6 +91,14 @@ var (
 	flashTenantDeleteFailed   = adminFlashErr("tenant_delete_failed", "Tenant delete failed. The cause is in the log.")
 	flashTenantIncomplete     = adminFlashErr("tenant_teardown_incomplete", "The broker may still accept some device certificates, or some devices cannot re-enroll yet. The device ids are in the audit log.")
 	flashTenantTargets        = adminFlashErr("target_lookup_failed", "Could not list the devices that inherit this default.")
+	flashWaitlistConvert      = adminFlashErr("waitlist_convert_failed", "Convert failed. The cause is in the log.")
+	flashWaitlistDelete       = adminFlashErr("waitlist_delete_failed", "Delete failed. The cause is in the log.")
+	flashUserEmailRequired    = adminFlashErr("email_required", "Email is required.")
+	flashUserCreateFailed     = adminFlashErr("user_create_failed", "Could not create that user. The address may already have an account.")
+	flashUserDeleteSelf       = adminFlashErr("cannot_delete_self", "You cannot delete your own account.")
+	flashUserDeleteSuper      = adminFlashErr("cannot_delete_super_admin", "A super-admin account cannot be deleted here.")
+	flashUserResetLink        = adminFlashErr("reset_link_failed", "Could not create a reset link.")
+	flashUserResetSMTP        = adminFlashErr("reset_smtp_failed", "The reset mail could not be sent.")
 )
 
 func adminFlashOK(code, text string) adminFlashCode { return registerAdminFlash("ok", code, text) }

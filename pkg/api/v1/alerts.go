@@ -6,6 +6,7 @@
 package v1
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -60,7 +61,8 @@ type subCreateRequest struct {
 // handleSubsCreate adds an alert subscription for the calling user. Validates
 // channel + min_severity up front (400) so a bad value is not a DB constraint
 // 500, and verifies a supplied device_pk belongs to the user's tenant (404).
-// in: writer, POST /alert-subscriptions. out: 201 / 400 / 404.
+// A channel kind the user has not set up is 409.
+// in: writer, POST /alert-subscriptions. out: 201 / 400 / 404 / 409.
 func (s *Server) handleSubsCreate(w http.ResponseWriter, r *http.Request) {
 	u := authmw.CurrentUser(r)
 	var req subCreateRequest
@@ -95,6 +97,10 @@ func (s *Server) handleSubsCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.services.Alerts.CreateSubscription(r.Context(), u.TenantID, u.ID, req.DevicePK, req.Channel, req.MinSeverity, req.Destination); err != nil {
+		if errors.Is(err, service.ErrNoChannel) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "add a " + req.Channel + " channel first"})
+			return
+		}
 		slog.Error("api subs create failed", "user_id", u.ID, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "subscription failed"})
 		return

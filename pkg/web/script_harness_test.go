@@ -32,10 +32,20 @@ func TestMqttScriptKeepsOneSocket(t *testing.T) {
 	}, "/admin/mqtt/ws", "testdata/mqtt_script.js")
 }
 
-// runScriptHarness renders page, pulls the inline script containing marker
-// and runs it under node with the harness. Skips when node is missing,
-// fails instead when THESADA_REQUIRE_NODE is set (CI).
-func runScriptHarness(t *testing.T, page string, data map[string]interface{}, marker, harnessPath string) {
+// An operator on a managed slot gets the root block, so a handover saves
+// the rules on the canvas instead of an empty script.
+func TestTenantRulesScriptSeedsRootForHandover(t *testing.T) {
+	node := nodeOrSkip(t)
+	script, err := staticFS.ReadFile("static/js/blockly-tenant-rules.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runNodeHarness(t, node, string(script), "testdata/tenant_rules_script.js")
+}
+
+// nodeOrSkip finds node. Skips when it is missing, fails instead when
+// THESADA_REQUIRE_NODE is set (CI).
+func nodeOrSkip(t *testing.T) string {
 	t.Helper()
 	// THESADA_NODE (set by make) names the pinned download, else PATH.
 	node, err := exec.LookPath(os.Getenv("THESADA_NODE"))
@@ -48,6 +58,14 @@ func runScriptHarness(t *testing.T, page string, data map[string]interface{}, ma
 		}
 		t.Skip("node not on PATH")
 	}
+	return node
+}
+
+// runScriptHarness renders page, pulls the inline script containing marker
+// and runs it under node with the harness.
+func runScriptHarness(t *testing.T, page string, data map[string]interface{}, marker, harnessPath string) {
+	t.Helper()
+	node := nodeOrSkip(t)
 	s := &Server{}
 	s.parseTemplates()
 	data["User"] = &service.User{ID: uuid.New(), TenantID: "acme"}
@@ -66,6 +84,12 @@ func runScriptHarness(t *testing.T, page string, data map[string]interface{}, ma
 	if script == "" {
 		t.Fatalf("script with %q not found in %s", marker, page)
 	}
+	runNodeHarness(t, node, script, harnessPath)
+}
+
+// runNodeHarness runs harnessPath under node with script as its argument.
+func runNodeHarness(t *testing.T, node, script, harnessPath string) {
+	t.Helper()
 	// Read the harness here so go test's cache sees it change.
 	harness, err := os.ReadFile(harnessPath)
 	if err != nil {

@@ -432,6 +432,16 @@
   fetch("/admin/devices/" + deviceID + "/rules/workspace?slot=" + encodeURIComponent(ruleSlot), {
     headers: {"X-CSRF-Token": csrfToken}
   }).then(parseJSON).then(function(res) {
+    if (res.exists && res.source === "tenant") {
+      // Tenant-editor blocks are not defined here: lock writes, point there.
+      workspace = injectWorkspace({seed: false});
+      writesAllowed = false;
+      setWriteControls(false);
+      wireWorkspace();
+      document.getElementById("btn-use-starter").classList.remove("hidden");
+      status("these rules were made in the tenant editor at /devices/" + deviceID + "/rules, edit them there or use the starter to take them back", false);
+      return;
+    }
     var savedState = null;
     if (res.exists && res.workspace_json) {
       try { savedState = JSON.parse(res.workspace_json); }

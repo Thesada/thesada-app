@@ -43,7 +43,12 @@ func TestAdminDeviceSecretsProvision_Integration(t *testing.T) {
 
 	fd := mqtttest.NewFakeDevice(t, broker, prefix)
 	got := map[string]string{}
-	fd.Handle("secret.set", func(_ string, raw []byte) []mqtttest.Response {
+	var unwrapped int
+	fd.Handle("secret.set", func(args string, raw []byte) []mqtttest.Response {
+		// Enveloped with a req_id, so the reply correlates. args is "" on the raw path.
+		if args != "" {
+			unwrapped++
+		}
 		// Payload is "<fwField>\n<value>" - split on the first newline only.
 		if i := strings.IndexByte(string(raw), '\n'); i >= 0 {
 			got[string(raw[:i])] = string(raw[i+1:])
@@ -65,6 +70,9 @@ func TestAdminDeviceSecretsProvision_Integration(t *testing.T) {
 		}
 		if fd.Calls("secret.set") != 2 {
 			t.Errorf("secret.set calls = %d, want 2", fd.Calls("secret.set"))
+		}
+		if unwrapped != 2 {
+			t.Errorf("enveloped secret.set calls = %d, want 2", unwrapped)
 		}
 		if got["mqtt.password"] != "mp" || got["web.password"] != "wp" {
 			t.Errorf("pushed = %v, want mqtt.password=mp web.password=wp", got)

@@ -33,6 +33,7 @@ var deviceSendSites = map[string]string{
 	"ownerCertClear":             "cert.revoke",
 	"deviceSecretState":          "read only (secret.info presence)",
 	"recoveryPath":               "read only (dynsec client state)",
+	"runRulePush":                "rules.tenant_push, written at enqueue in handleDeviceRulesPush (staged write, then lua.reload)",
 }
 
 func TestDeviceSendSitesAreAudited(t *testing.T) {

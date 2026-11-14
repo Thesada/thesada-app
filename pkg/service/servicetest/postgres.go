@@ -20,6 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -185,6 +188,27 @@ func OpenAs(t *testing.T, baseURL, role string) *db.Pool {
 	pool, err := db.Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("open %s pool: %v", role, err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// OpenAsTraced is OpenAs with a pgx query tracer, for tests that count statements.
+// in: testing.T, base URL, role, tracer. out: pool, closed on cleanup.
+func OpenAsTraced(t *testing.T, baseURL, role string, tracer pgx.QueryTracer) *db.Pool {
+	t.Helper()
+	dsn, err := roleURL(baseURL, role)
+	if err != nil {
+		t.Fatalf("build %s URL: %v", role, err)
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse %s URL: %v", role, err)
+	}
+	cfg.ConnConfig.Tracer = tracer
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("open traced %s pool: %v", role, err)
 	}
 	t.Cleanup(pool.Close)
 	return pool
