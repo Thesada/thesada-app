@@ -2,6 +2,9 @@ package service
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
+	"sort"
 	"testing"
 )
 
@@ -188,4 +191,52 @@ func TestBlankConfigSecrets(t *testing.T) {
 			}
 		}
 	})
+}
+
+// Empty secret leaves come back as storage fields, so the write guard can ask
+// the store which of them are real open networks (#88). An empty sensitive
+// leaf with no storage field is reported as unknown.
+func TestBlankSecretFields(t *testing.T) {
+	cases := []struct {
+		content string
+		fields  []string
+		unknown bool
+	}{
+		{`{"mqtt":{"password":"","host":"b"}}`, []string{"mqtt.password"}, false},
+		{`{"wifi":{"networks":[{"ssid":"home","password":""}]}}`, []string{"wifi.password:home"}, false},
+		{`{"wifi":{"networks":[{"ssid":"a","password":"pw"},{"ssid":"b","password":""}]}}`, []string{"wifi.password:b"}, false},
+		{`{"telegram":{"bot_token":""},"wifi":{"ap_password":""}}`, []string{"telegram.bot_token", "wifi.ap_password"}, false},
+		{`{"wifi":{"networks":[{"password":""}]}}`, nil, true},
+		{`{"ota":{"api_key":""}}`, nil, true},
+		{`{"mqtt":{"password":"s3cret","host":"b"}}`, nil, false},
+		{`{"mqtt":{"host":"b"}}`, nil, false},
+		{`{"wifi":{"networks":[{"ssid":"home","password":"pw"}]},"web":{}}`, nil, false},
+	}
+	// Anything that is not one JSON object must never reach the device as config.json.
+	for _, bad := range []string{`not json at all`, `[]`, `null`, `42`, `"x"`, ``, `{"mqtt":`} {
+		if _, _, err := BlankSecretFields(bad); err == nil {
+			t.Errorf("%q: want an error, got none", bad)
+		}
+	}
+	for _, c := range cases {
+		fields, unknown, err := BlankSecretFields(c.content)
+		if err != nil {
+			t.Fatalf("%s: %v", c.content, err)
+		}
+		sort.Strings(fields)
+		if !slices.Equal(fields, c.fields) || unknown != c.unknown {
+			t.Errorf("%s: got %v unknown=%v, want %v unknown=%v", c.content, fields, unknown, c.fields, c.unknown)
+		}
+	}
+}
+
+// Device reads record every WiFi network, an empty password as "" so the store
+// can tell an open network from one it never saw (#88).
+func TestDeviceConfigSecrets(t *testing.T) {
+	got := deviceConfigSecrets(`{"mqtt":{"password":"m"},"web":{"password":""},` +
+		`"wifi":{"networks":[{"ssid":"home","password":"pw"},{"ssid":"cafe","password":""},{"password":""}]}}`)
+	want := map[string]string{"mqtt.password": "m", "wifi.password:home": "pw", "wifi.password:cafe": ""}
+	if !maps.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
 }

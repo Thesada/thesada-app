@@ -20,9 +20,39 @@ import (
 // tables introduced by migration 0012. Replaces ConfigSnapshotService for
 // new code paths.
 type DeviceFilesService struct {
-	cfg   *config.Config
-	pools db.Pools
+	cfg     *config.Config
+	pools   db.Pools
+	secrets *SecretService
 }
+
+// UpsertFromDevice is Upsert for content read from the device itself (config.dump,
+// the drift pull). Before config.json is blanked it hands every secret, and
+// every open WiFi network as "", to the encrypted store, so the write guard
+// can tell an open network from a blanked one (#88). Operator-supplied content
+// goes through plain Upsert and never reaches the store.
+// in: ctx, tenantID, devicePk, path, content, sha256, source, createdBy. out: error.
+func (s *DeviceFilesService) UpsertFromDevice(ctx context.Context, tenantID string, devicePk uuid.UUID, path, content, sha256hex, source string, createdBy *uuid.UUID) error {
+	if isConfigJSON(path) && s.secrets != nil && s.secrets.Enabled() {
+		for field, value := range deviceConfigSecrets(content) {
+			// A value the store already resolves to stays as it is, so a device on the
+			// tenant default keeps inheriting instead of turning into an override.
+			cur, origin, err := s.secrets.Resolve(ctx, tenantID, devicePk, field)
+			if err != nil {
+				return fmt.Errorf("resolve device secret %s: %w", field, err)
+			}
+			if origin != OriginUnset && cur == value {
+				continue
+			}
+			// Fail before the snapshot is blanked, or the value is lost to the store.
+			if err := s.secrets.SetSecret(ctx, tenantID, devicePk, field, value); err != nil {
+				return fmt.Errorf("store device secret %s: %w", field, err)
+			}
+		}
+	}
+	return s.Upsert(ctx, tenantID, devicePk, path, content, sha256hex, source, createdBy)
+}
+
+func isConfigJSON(path string) bool { return path == "config.json" || path == "/config.json" }
 
 // Upsert writes the canonical current state for (devicePk, path) and, if
 // the sha differs from the prior canonical row, appends a history entry
@@ -42,7 +72,7 @@ func (s *DeviceFilesService) Upsert(ctx context.Context, tenantID string, device
 	// sha256hex is left as the device fingerprint (drift key) - blanking the
 	// stored copy must not read as drift - and the real values live encrypted
 	// in device_config_secrets.
-	if path == "config.json" || path == "/config.json" {
+	if isConfigJSON(path) {
 		blanked, _, err := blankConfigSecrets(content)
 		if err != nil {
 			return fmt.Errorf("blank config secrets: %w", err)

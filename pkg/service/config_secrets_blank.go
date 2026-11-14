@@ -217,3 +217,93 @@ func blankSensitiveLeaves(v any) bool {
 	}
 	return changed
 }
+
+// deviceConfigSecrets is extractConfigSecrets for content read from the device
+// itself: it also records each WiFi network with an empty password as "", so
+// the store can tell an open network from one it never saw (#88).
+// in: config.json content from a device read. out: field -> value.
+func deviceConfigSecrets(content string) map[string]string {
+	out := extractConfigSecrets(content)
+	var m map[string]any
+	if json.Unmarshal([]byte(content), &m) != nil {
+		return out
+	}
+	for _, ssid := range WifiNetworkSSIDs(m) {
+		if pw, ok := wifiNetworkPassword(m, ssid); ok && pw == "" {
+			out[WifiSecretField(ssid)] = ""
+		}
+	}
+	return out
+}
+
+// BlankSecretFields lists the empty secret leaves in config.json content, the
+// shape blankConfigSecrets leaves in snapshots and the editor. Writing such
+// content to a device erases those secrets unless the field really is empty
+// on the device. fields are storage keys (scalars and wifi.password:<ssid>),
+// unknown is an empty sensitive leaf the store has no field for.
+// Content that is not one JSON object fails closed with an error: a config.json
+// write must never replace the device config with something it cannot parse.
+// in: raw config.json content. out: empty fields, unknown empty leaf found, error.
+func BlankSecretFields(content string) ([]string, bool, error) {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(content)), &m); err != nil {
+		return nil, false, fmt.Errorf("config.json must be one JSON object: %w", err)
+	}
+	if m == nil {
+		return nil, false, fmt.Errorf("config.json must be one JSON object, got null")
+	}
+	var fields []string
+	for _, dotted := range ScalarSecretFields {
+		segs := strings.Split(dotted, ".")
+		if v, ok := readPath(m, segs); ok && v == "" {
+			fields = append(fields, dotted)
+			deletePath(m, segs)
+		}
+	}
+	for _, net := range wifiNetworks(m) {
+		pw, ok := net["password"].(string)
+		ssid, _ := net["ssid"].(string)
+		if ok && pw == "" && ssid != "" {
+			fields = append(fields, WifiSecretField(ssid))
+			delete(net, "password")
+		}
+	}
+	// Whatever empty sensitive leaf is left has no storage field.
+	return fields, hasBlankSensitiveLeaf(m), nil
+}
+
+// deletePath removes the leaf at segs, the counterpart of readPath.
+func deletePath(m map[string]any, segs []string) {
+	for _, seg := range segs[:len(segs)-1] {
+		child, ok := m[seg].(map[string]any)
+		if !ok {
+			return
+		}
+		m = child
+	}
+	delete(m, segs[len(segs)-1])
+}
+
+func hasBlankSensitiveLeaf(v any) bool {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			if s, ok := val.(string); ok {
+				if s == "" && sensitiveConfigKeyRE.MatchString(k) {
+					return true
+				}
+				continue
+			}
+			if hasBlankSensitiveLeaf(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range t {
+			if hasBlankSensitiveLeaf(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
