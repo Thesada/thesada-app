@@ -47,6 +47,9 @@ func (c *Client) devicePaired(tenant string, devicePk uuid.UUID) bool {
 // driftCLIFallback bounds a drift round trip on a Client built without config.
 const driftCLIFallback = 15 * time.Second
 
+// driftUpsertTimeout bounds the store refresh and snapshot write of one drift pull.
+const driftUpsertTimeout = 10 * time.Second
+
 // driftCLI runs one drift-pull CLI round trip under cfg.CLIRequestTimeout, so
 // a cellular device gets the same budget as an operator command.
 // in: topic prefix, command, payload. out: response, error.
@@ -132,6 +135,8 @@ func (c *Client) discoverAndSnapshotScripts(tenant string, devicePk uuid.UUID, t
 // in: tenant id, device pk, topic prefix, file path, source label, expected
 // sha (empty string when caller has no reference hash). out: none.
 func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix, path, source, expectedSha string) {
+	// Taken before the device answers: a write landing meanwhile makes this pull stale.
+	token := c.services.DeviceFiles.ReadToken(devicePk)
 	var content string
 	if path == "config.json" {
 		resp, err := c.driftCLI(topicPrefix, "config.dump", "")
@@ -195,7 +200,9 @@ func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix,
 		return
 	}
 
-	if err := c.services.DeviceFiles.Upsert(context.Background(), tenant, devicePk, path, content, hashHex, source, nil); err != nil {
+	uctx, cancel := context.WithTimeout(context.Background(), driftUpsertTimeout)
+	defer cancel()
+	if err := c.services.DeviceFiles.UpsertFromDevice(uctx, tenant, devicePk, path, content, hashHex, source, nil, token); err != nil {
 		slog.Error("drift file upsert failed", "path", path, "err", err)
 	} else {
 		slog.Info("device_file saved", "path", path, "source", source, "sha256", hashHex[:12])
