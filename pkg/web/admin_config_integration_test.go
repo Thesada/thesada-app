@@ -274,6 +274,50 @@ func TestAdminConfigWrite_ChunksAndSnapshots(t *testing.T) {
 	})
 }
 
+// TestAdminConfigWrite_RefreshesTheSecretStore: a device reported "cafe" open, then an
+// operator writes a password for it. The write updates the store at once, so a later
+// write with an empty "cafe" password is refused instead of erasing the new one.
+func TestAdminConfigWrite_RefreshesTheSecretStore(t *testing.T) {
+	env := servicetest.Start(t)
+	broker := mqtttest.StartMosquitto(t)
+	s := startWebBrokerServer(t, env, broker)
+
+	const tenant = "webcfg-open"
+	env.SeedTenant(t, tenant)
+	prefix := "thesada/" + tenant + "/dev3"
+	ctx := context.Background()
+	pk, err := env.Services.Devices.Upsert(tenant, "dev3", "", "", "", prefix)
+	if err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	device, err := env.Services.Devices.GetByIDAny(ctx, pk)
+	if err != nil || device == nil {
+		t.Fatalf("fetch device: %v", err)
+	}
+	if err := env.Services.Secrets.SetSecret(ctx, tenant, pk, "wifi.password:cafe", ""); err != nil {
+		t.Fatalf("seed open marker: %v", err)
+	}
+	fd := mqtttest.NewFakeDevice(t, broker, prefix)
+	serveDeviceFS(fd, map[string]string{"/config.json": `{}`})
+
+	written := `{"wifi":{"networks":[{"ssid":"cafe","password":"now-locked"}]}}`
+	reqID := s.cliRequests.enqueue()
+	claim, _ := s.claimDeviceWrite(device.ID, time.Minute)
+	s.runCLIWrite(ctx, reqID, claim, device, prefix, "/config.json", written, nil)
+	if entry := s.cliRequests.get(reqID); entry == nil || entry.Status != reqStatusDone {
+		t.Fatalf("store entry = %+v, want done", entry)
+	}
+
+	got, found, err := env.Services.Secrets.Reveal(ctx, tenant, pk, "wifi.password:cafe")
+	if err != nil || !found || got != "now-locked" {
+		t.Fatalf("store after write = %q found=%v err=%v, want now-locked", got, found, err)
+	}
+	blank := `{"wifi":{"networks":[{"ssid":"cafe","password":""}]}}`
+	if msg := configWriteRefusal("/config.json", blank, s.openWifiLookup(ctx, device)); msg == "" {
+		t.Error("an empty cafe password after the write must be refused")
+	}
+}
+
 // TestAdminConfigWrite_SecondWriteToTheDeviceIs409 posts a second write while
 // the first is still on the device: it is refused before anything is sent,
 // and the device takes writes again once the first one finished.

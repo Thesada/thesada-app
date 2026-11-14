@@ -6,8 +6,11 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -20,9 +23,108 @@ import (
 // tables introduced by migration 0012. Replaces ConfigSnapshotService for
 // new code paths.
 type DeviceFilesService struct {
-	cfg   *config.Config
-	pools db.Pools
+	cfg     *config.Config
+	pools   db.Pools
+	secrets *SecretService
+
+	// Per-device write generation: a device read stores secrets only when no write
+	// landed since it started. In memory, which holds for one app instance.
+	orderMu sync.Mutex
+	gens    map[uuid.UUID]uint64
 }
+
+// ReadToken is taken before a device read asks for content, and handed to
+// UpsertFromDevice with what the read returned. out: the device's write generation.
+func (s *DeviceFilesService) ReadToken(devicePk uuid.UUID) uint64 {
+	s.orderMu.Lock()
+	defer s.orderMu.Unlock()
+	return s.gens[devicePk]
+}
+
+// WriteLanded marks a write the device confirmed. Reads that started before it
+// keep their snapshot but no longer touch the store. out: the token for the write's own upsert.
+func (s *DeviceFilesService) WriteLanded(devicePk uuid.UUID) uint64 {
+	s.orderMu.Lock()
+	defer s.orderMu.Unlock()
+	if s.gens == nil {
+		s.gens = make(map[uuid.UUID]uint64)
+	}
+	s.gens[devicePk]++
+	return s.gens[devicePk]
+}
+
+// UpsertFromDevice is Upsert for content read from the device itself (config.dump,
+// the drift pull) or written to it and confirmed. Before config.json is blanked it
+// hands every secret, and every open WiFi network as "", to the encrypted store, so
+// the write guard can tell an open network from a blanked one (#88). token comes
+// from ReadToken or WriteLanded: content older than the last landed write leaves
+// the store alone. Operator-supplied content goes through plain Upsert.
+// in: ctx, tenantID, devicePk, path, content, sha256, source, createdBy, token. out: error.
+func (s *DeviceFilesService) UpsertFromDevice(ctx context.Context, tenantID string, devicePk uuid.UUID, path, content, sha256hex, source string, createdBy *uuid.UUID, token uint64) error {
+	if isConfigJSON(path) && s.secrets != nil && s.secrets.Enabled() {
+		if err := s.storeDeviceSecrets(ctx, tenantID, devicePk, content, token); err != nil {
+			return err
+		}
+	}
+	return s.Upsert(ctx, tenantID, devicePk, path, content, sha256hex, source, createdBy)
+}
+
+// storeDeviceSecrets runs under orderMu, so a write cannot land between the token
+// check and the stores. in: ctx, tenant, device, content, token. out: error.
+func (s *DeviceFilesService) storeDeviceSecrets(ctx context.Context, tenantID string, devicePk uuid.UUID, content string, token uint64) error {
+	s.orderMu.Lock()
+	defer s.orderMu.Unlock()
+	if s.gens[devicePk] != token {
+		slog.Info("device read older than the last write, secrets left as they are", "device", devicePk)
+		return nil
+	}
+	for field, value := range deviceConfigSecrets(content) {
+		// A value the store already resolves to stays as it is, so a device on the
+		// tenant default keeps inheriting instead of turning into an override.
+		cur, origin, err := s.secrets.Resolve(ctx, tenantID, devicePk, field)
+		if err != nil {
+			return fmt.Errorf("resolve device secret %s: %w", field, err)
+		}
+		if origin != OriginUnset && cur == value {
+			continue
+		}
+		// Fail before the snapshot is blanked, or the value is lost to the store.
+		if err := s.secrets.SetSecret(ctx, tenantID, devicePk, field, value); err != nil {
+			return fmt.Errorf("store device secret %s: %w", field, err)
+		}
+	}
+	return nil
+}
+
+// ForgetOpenNetworks drops the open-network markers of every WiFi network named in
+// content. After a write whose store refresh failed, an unknown network is refused,
+// a stale "open" would not be. Stored passwords stay. in: ctx, tenant, device, content. out: error.
+func (s *DeviceFilesService) ForgetOpenNetworks(ctx context.Context, tenantID string, devicePk uuid.UUID, content string) error {
+	if s.secrets == nil || !s.secrets.Enabled() {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(content), &m); err != nil {
+		return fmt.Errorf("forget open networks: %w", err)
+	}
+	s.orderMu.Lock()
+	defer s.orderMu.Unlock()
+	for _, ssid := range WifiNetworkSSIDs(m) {
+		field := WifiSecretField(ssid)
+		v, found, err := s.secrets.Reveal(ctx, tenantID, devicePk, field)
+		if err != nil {
+			return fmt.Errorf("forget open networks: %w", err)
+		}
+		if found && v == "" {
+			if _, err := s.secrets.ClearDeviceSecret(ctx, tenantID, devicePk, field); err != nil {
+				return fmt.Errorf("forget open networks: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func isConfigJSON(path string) bool { return path == "config.json" || path == "/config.json" }
 
 // Upsert writes the canonical current state for (devicePk, path) and, if
 // the sha differs from the prior canonical row, appends a history entry
@@ -42,7 +144,7 @@ func (s *DeviceFilesService) Upsert(ctx context.Context, tenantID string, device
 	// sha256hex is left as the device fingerprint (drift key) - blanking the
 	// stored copy must not read as drift - and the real values live encrypted
 	// in device_config_secrets.
-	if path == "config.json" || path == "/config.json" {
+	if isConfigJSON(path) {
 		blanked, _, err := blankConfigSecrets(content)
 		if err != nil {
 			return fmt.Errorf("blank config secrets: %w", err)

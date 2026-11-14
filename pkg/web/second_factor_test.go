@@ -15,6 +15,7 @@ func TestSecondFactorOffer(t *testing.T) {
 		{"lookup failed", false, false, true, true, true, false, false},
 		{"passkey only, passkeys off", false, true, false, false, false, false, true},
 		{"both, passkeys off", true, true, false, false, true, false, false},
+		{"no factor left", false, false, true, false, false, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

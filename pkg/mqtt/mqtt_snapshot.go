@@ -132,6 +132,8 @@ func (c *Client) discoverAndSnapshotScripts(tenant string, devicePk uuid.UUID, t
 // in: tenant id, device pk, topic prefix, file path, source label, expected
 // sha (empty string when caller has no reference hash). out: none.
 func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix, path, source, expectedSha string) {
+	// Taken before the device answers: a write landing meanwhile makes this pull stale.
+	token := c.services.DeviceFiles.ReadToken(devicePk)
 	var content string
 	if path == "config.json" {
 		resp, err := c.driftCLI(topicPrefix, "config.dump", "")
@@ -195,7 +197,7 @@ func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix,
 		return
 	}
 
-	if err := c.services.DeviceFiles.Upsert(context.Background(), tenant, devicePk, path, content, hashHex, source, nil); err != nil {
+	if err := c.services.DeviceFiles.UpsertFromDevice(context.Background(), tenant, devicePk, path, content, hashHex, source, nil, token); err != nil {
 		slog.Error("drift file upsert failed", "path", path, "err", err)
 	} else {
 		slog.Info("device_file saved", "path", path, "source", source, "sha256", hashHex[:12])

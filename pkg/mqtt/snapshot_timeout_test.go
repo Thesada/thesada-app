@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"thesada.app/app/pkg/service"
 )
 
 // A drift pull waits CLIRequestTimeout per round trip, not a fixed 10 or 15 s,
@@ -24,7 +26,8 @@ func TestDriftPull_UsesConfiguredCLITimeout(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := &Client{c: silent, cliTimeout: 50 * time.Millisecond}
+			c := &Client{c: silent, cliTimeout: 50 * time.Millisecond,
+				services: &service.Services{DeviceFiles: &service.DeviceFilesService{}}}
 			start := time.Now()
 			pull(c)
 			if took := time.Since(start); took > 2*time.Second {
