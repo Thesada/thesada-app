@@ -274,6 +274,124 @@ func TestAdminConfigWrite_ChunksAndSnapshots(t *testing.T) {
 	})
 }
 
+// TestAdminConfigWrite_RefreshesTheSecretStore: a device reported "cafe" open, then an
+// operator writes a password for it. The write updates the store at once, so a later
+// write with an empty "cafe" password is refused instead of erasing the new one.
+func TestAdminConfigWrite_RefreshesTheSecretStore(t *testing.T) {
+	env := servicetest.Start(t)
+	broker := mqtttest.StartMosquitto(t)
+	s := startWebBrokerServer(t, env, broker)
+
+	const tenant = "webcfg-open"
+	env.SeedTenant(t, tenant)
+	prefix := "thesada/" + tenant + "/dev3"
+	ctx := context.Background()
+	pk, err := env.Services.Devices.Upsert(tenant, "dev3", "", "", "", prefix)
+	if err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	device, err := env.Services.Devices.GetByIDAny(ctx, pk)
+	if err != nil || device == nil {
+		t.Fatalf("fetch device: %v", err)
+	}
+	if err := env.Services.Secrets.SetSecret(ctx, tenant, pk, "wifi.password:cafe", ""); err != nil {
+		t.Fatalf("seed open marker: %v", err)
+	}
+	fd := mqtttest.NewFakeDevice(t, broker, prefix)
+	serveDeviceFS(fd, map[string]string{"/config.json": `{}`})
+
+	written := `{"wifi":{"networks":[{"ssid":"cafe","password":"now-locked"}]}}`
+	reqID := s.cliRequests.enqueue()
+	claim, _ := s.claimDeviceWrite(device.ID, time.Minute)
+	s.runCLIWrite(ctx, reqID, claim, device, prefix, "/config.json", written, nil)
+	if entry := s.cliRequests.get(reqID); entry == nil || entry.Status != reqStatusDone {
+		t.Fatalf("store entry = %+v, want done", entry)
+	}
+
+	got, found, err := env.Services.Secrets.Reveal(ctx, tenant, pk, "wifi.password:cafe")
+	if err != nil || !found || got != "now-locked" {
+		t.Fatalf("store after write = %q found=%v err=%v, want now-locked", got, found, err)
+	}
+	blank := `{"wifi":{"networks":[{"ssid":"cafe","password":""}]}}`
+	if msg := configWriteRefusal("/config.json", blank, s.openWifiLookup(ctx, device)); msg == "" {
+		t.Error("an empty cafe password after the write must be refused")
+	}
+}
+
+// TestAdminConfigCmd_ConfigRenameDropsOpenMarkers: an fs.mv over config.json changes the
+// config past the store, so the open markers go and the guard refuses an empty password.
+func TestAdminConfigCmd_ConfigRenameDropsOpenMarkers(t *testing.T) {
+	env := servicetest.Start(t)
+	broker := mqtttest.StartMosquitto(t)
+	s := startWebBrokerServer(t, env, broker)
+
+	const tenant = "webcfg-mv"
+	env.SeedTenant(t, tenant)
+	prefix := "thesada/" + tenant + "/dev5"
+	ctx := context.Background()
+	pk, err := env.Services.Devices.Upsert(tenant, "dev5", "", "", "", prefix)
+	if err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	device, err := env.Services.Devices.GetByIDAny(ctx, pk)
+	if err != nil || device == nil {
+		t.Fatalf("fetch device: %v", err)
+	}
+	if err := env.Services.Secrets.SetSecret(ctx, tenant, pk, "wifi.password:cafe", ""); err != nil {
+		t.Fatalf("seed open marker: %v", err)
+	}
+	blank := `{"wifi":{"networks":[{"ssid":"cafe","password":""}]}}`
+	if msg := configWriteRefusal("/config.json", blank, s.openWifiLookup(ctx, device)); msg != "" {
+		t.Fatalf("precondition: an open cafe must pass the guard, got %q", msg)
+	}
+
+	fd := mqtttest.NewFakeDevice(t, broker, prefix)
+	serveDeviceFS(fd, map[string]string{
+		"/config.json":     `{}`,
+		"/config.json.bak": `{"wifi":{"networks":[{"ssid":"cafe","password":"locked"}]}}`,
+	})
+	reqID := s.cliRequests.enqueue()
+	s.runCLICmd(ctx, reqID, device, prefix, "fs.mv", "/config.json.bak /config.json", nil)
+	if entry := s.cliRequests.get(reqID); entry == nil || entry.Status != reqStatusDone {
+		t.Fatalf("store entry = %+v, want done", entry)
+	}
+
+	if _, found, _ := env.Services.Secrets.Reveal(ctx, tenant, pk, "wifi.password:cafe"); found {
+		t.Error("the cafe open marker survived the rename")
+	}
+	if msg := configWriteRefusal("/config.json", blank, s.openWifiLookup(ctx, device)); msg == "" {
+		t.Error("an empty cafe password after the rename must be refused")
+	}
+}
+
+// TestAdminConfigWrite_DistrustedMarkersRefuseEmpty: after a config change the store could
+// not follow, a marker still in the store no longer lets an empty password through.
+func TestAdminConfigWrite_DistrustedMarkersRefuseEmpty(t *testing.T) {
+	env := servicetest.Start(t)
+	broker := mqtttest.StartMosquitto(t)
+	s := startWebBrokerServer(t, env, broker)
+
+	const tenant = "webcfg-dist"
+	env.SeedTenant(t, tenant)
+	ctx := context.Background()
+	pk, err := env.Services.Devices.Upsert(tenant, "dev6", "", "", "", "thesada/"+tenant+"/dev6")
+	if err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	device, err := env.Services.Devices.GetByIDAny(ctx, pk)
+	if err != nil || device == nil {
+		t.Fatalf("fetch device: %v", err)
+	}
+	if err := env.Services.Secrets.SetSecret(ctx, tenant, pk, "wifi.password:cafe", ""); err != nil {
+		t.Fatalf("seed open marker: %v", err)
+	}
+	env.Services.DeviceFiles.DistrustOpenNetworks(pk)
+	blank := `{"wifi":{"networks":[{"ssid":"cafe","password":""}]}}`
+	if msg := configWriteRefusal("/config.json", blank, s.openWifiLookup(ctx, device)); msg == "" {
+		t.Error("a distrusted open marker let an empty password through")
+	}
+}
+
 // TestAdminConfigWrite_SecondWriteToTheDeviceIs409 posts a second write while
 // the first is still on the device: it is refused before anything is sent,
 // and the device takes writes again once the first one finished.

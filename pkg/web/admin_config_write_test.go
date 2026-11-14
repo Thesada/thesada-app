@@ -483,3 +483,40 @@ func TestStagedWrite_RenameTimeoutReadsBackTheOutcome(t *testing.T) {
 		})
 	}
 }
+
+// Config snapshots are keyed "config.json" without a slash. Restoring one must
+// write the device's /config.json: firmware refuses a path without the slash.
+func TestStagedWrite_SnapshotKeyWritesRootConfig(t *testing.T) {
+	fs := newFakeFS(map[string]string{"/config.json": oldConfig})
+	if err := stagedWrite(context.Background(), fs, time.Second, "p", "config.json", []byte(`{"restored":true}`)); err != nil {
+		t.Fatalf("stagedWrite: %v", err)
+	}
+	for _, c := range fs.calls {
+		if _, arg, _ := strings.Cut(c, " "); !strings.HasPrefix(arg, "/") {
+			t.Fatalf("call %q sends a path without the leading slash", c)
+		}
+	}
+	if fs.files["/config.json"] != `{"restored":true}` {
+		t.Fatalf("/config.json = %q, want the restored snapshot", fs.files["/config.json"])
+	}
+}
+
+func TestChangesConfig(t *testing.T) {
+	for _, tc := range []struct {
+		cmd, payload string
+		want         bool
+	}{
+		{"config.dump", "", false},
+		{"fs.cat", "/config.json 0 2048", false},
+		{"fs.ls", "/", false},
+		{"config.set", "wifi.networks []", true},
+		{"fs.mv", "/config.json.bak /config.json", true},
+		{"fs.rm", "/config.json", true},
+		{"fs.write", "/scripts/main.lua", false},
+		{"sys.reboot", "", false},
+	} {
+		if got := changesConfig(tc.cmd, tc.payload); got != tc.want {
+			t.Errorf("changesConfig(%q, %q) = %v, want %v", tc.cmd, tc.payload, got, tc.want)
+		}
+	}
+}

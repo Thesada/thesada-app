@@ -5,6 +5,8 @@
   <h1 class="text-2xl font-semibold mt-1">Edit user</h1>
   <p class="text-sm text-slate-500 font-mono">{{.EditUser.Email}}</p>
 </div>
+{{if .Flash}}<div class="mb-4 rounded-md bg-emerald-50 border border-emerald-200 p-3 text-sm text-emerald-800">{{.Flash}}</div>{{end}}
+{{if .FlashErr}}<div class="mb-4 rounded-md bg-rose-50 border border-rose-200 p-3 text-sm text-rose-800">{{.FlashErr}}</div>{{end}}
 
 <div class="bg-white border border-slate-200 rounded-xl p-5 mb-6">
   <form method="POST" action="/admin/tenants/{{.Tenant.ID}}/users/{{.EditUser.ID}}/edit" class="flex flex-col gap-3 max-w-md">

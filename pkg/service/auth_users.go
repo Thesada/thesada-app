@@ -328,20 +328,6 @@ func (s *AuthService) UpdateDisplayName(tenantID string, userID uuid.UUID, displ
 	})
 }
 
-// UpdateTelegramChatID updates a user's Telegram chat ID (self-service).
-// in: tenant_id, user_id, chat_id (empty string clears). out: error.
-func (s *AuthService) UpdateTelegramChatID(tenantID string, userID uuid.UUID, chatID string) error {
-	var cid interface{}
-	if chatID != "" {
-		cid = chatID
-	}
-	ctx := context.Background()
-	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE users SET telegram_chat_id = $1 WHERE id = $2`, cid, userID)
-		return err
-	})
-}
-
 // UpdateUser updates a user's display name and admin flag.
 // in: tenant_id, user_id, display_name, is_admin. out: error.
 func (s *AuthService) UpdateUser(tenantID string, userID uuid.UUID, displayName string, isAdmin bool) error {

@@ -17,16 +17,17 @@ const (
 	totpSetupCookie   = "totp_setup"
 )
 
-// continueLocalLogin opens a session, or a TOTP challenge when the account enrolled one.
+// continueLocalLogin opens a session, or a second-factor challenge when the
+// account enrolled TOTP or a passkey.
 // in: writer, request, user, session method. out: redirect or 500.
 func (s *Server) continueLocalLogin(w http.ResponseWriter, r *http.Request, u *service.User, method string) {
-	_, required, err := s.services.Auth.EnrolledTOTP(u.TenantID, u.ID)
+	secret, keys, err := s.services.Auth.SecondFactors(u.TenantID, u.ID)
 	if err != nil {
 		slog.Error("auth.totp.lookup_failed", "user_id", u.ID, "err", err)
 		http.Error(w, "login failed", http.StatusInternalServerError)
 		return
 	}
-	if !required {
+	if secret == "" && !keys {
 		s.startSessionAndRedirect(w, r, u, method, "/devices")
 		return
 	}
@@ -46,14 +47,50 @@ func (s *Server) continueLocalLogin(w http.ResponseWriter, r *http.Request, u *s
 	http.Redirect(w, r, "/login/totp", http.StatusFound)
 }
 
-// handleTOTPForm renders the code form when a challenge cookie is present.
+// handleTOTPForm renders the second-factor page when a challenge cookie is present.
+// It offers the code form, the passkey button, or both, per what the account enrolled.
 // in: writer, GET /login/totp. out: HTML or redirect to /login.
 func (s *Server) handleTOTPForm(w http.ResponseWriter, r *http.Request) {
-	if _, err := r.Cookie(totpPendingCookie); err != nil {
+	c, err := r.Cookie(totpPendingCookie)
+	if err != nil || c.Value == "" {
 		http.Redirect(w, r, "/login", http.StatusFound)
 		return
 	}
-	s.render(w, r, "login-totp.html", nil)
+	s.render(w, r, "login-totp.html", s.secondFactorData(c.Value, nil))
+}
+
+// secondFactorData tells the second-factor page which methods to show.
+// An unknown or expired challenge shows the code form, the submit then sends the user back to /login.
+// in: challenge token, extra fields. out: template data.
+func (s *Server) secondFactorData(token string, extra map[string]interface{}) map[string]interface{} {
+	totpOn, keys, err := s.services.Auth.PendingFactorsAny(token)
+	if err != nil && !errors.Is(err, service.ErrExpired) {
+		slog.Error("auth.totp.factors_failed", "err", err)
+	}
+	hasTOTP, hasPasskey, msg := secondFactorOffer(totpOn, keys, s.services.Auth.PasskeysEnabled(), err != nil)
+	data := map[string]interface{}{"HasTOTP": hasTOTP, "HasPasskey": hasPasskey}
+	if msg != "" {
+		data["Error"] = msg
+	}
+	for k, v := range extra {
+		data[k] = v
+	}
+	return data
+}
+
+// secondFactorOffer picks what the second-factor page offers. A failed lookup
+// shows the code form and a passkey-only account with passkeys off gets an
+// error, so the page never skips a factor and never renders empty.
+// in: totp on, has passkeys, passkeys enabled, lookup failed. out: offers, error text.
+func secondFactorOffer(totpOn, keys, passkeysOn, lookupFailed bool) (hasTOTP, hasPasskey bool, msg string) {
+	hasTOTP, hasPasskey = totpOn || lookupFailed, keys && passkeysOn
+	if !hasTOTP && !hasPasskey && keys {
+		msg = "This account signs in with a passkey, and passkeys are turned off on this server. Ask an administrator."
+	} else if !hasTOTP && !hasPasskey {
+		// The last factor was removed in another session while this challenge was open.
+		msg = "This sign-in step is no longer available. Sign in again."
+	}
+	return hasTOTP, hasPasskey, msg
 }
 
 // handleTOTPSubmit checks the challenge cookie and opens the session.
@@ -66,8 +103,11 @@ func (s *Server) handleTOTPSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := s.clientIP(r)
 	if !s.services.Auth.AllowTOTPAttempt(ip) {
-		w.WriteHeader(http.StatusTooManyRequests)
-		s.render(w, r, "login-totp.html", map[string]interface{}{"Error": "Too many attempts. Wait a few minutes and try again."})
+		data := map[string]interface{}{"Error": "Too many attempts. Wait a few minutes and try again.", "HasTOTP": true}
+		if c, cerr := r.Cookie(totpPendingCookie); cerr == nil && c.Value != "" {
+			data = s.secondFactorData(c.Value, map[string]interface{}{"Error": data["Error"]})
+		}
+		s.renderStatus(w, r, http.StatusTooManyRequests, "login-totp.html", data)
 		return
 	}
 	c, err := r.Cookie(totpPendingCookie)
@@ -78,7 +118,7 @@ func (s *Server) handleTOTPSubmit(w http.ResponseWriter, r *http.Request) {
 	u, method, err := s.services.Auth.FinishTOTPLoginAny(c.Value, r.PostFormValue("code"))
 	if err != nil {
 		if errors.Is(err, service.ErrBadCredentials) {
-			s.render(w, r, "login-totp.html", map[string]interface{}{"Error": "That code is not valid."})
+			s.render(w, r, "login-totp.html", s.secondFactorData(c.Value, map[string]interface{}{"Error": "That code is not valid."}))
 			return
 		}
 		if errors.Is(err, service.ErrExpired) {

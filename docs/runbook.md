@@ -66,6 +66,7 @@ Assume broker credentials and/or the dynsec store are untrusted.
 2. Check it: `SELECT pg_has_role('thesada_app', 'thesada_app_admin', 'MEMBER');` returns `t`.
 3. Without it, 0040 and 0041 fail with `permission denied to set role "thesada_app_admin"` and the deploy stops with the old binary still serving. Grant, then rerun `thesada-app migrate`.
 4. An `UPDATE` or `DELETE` without the switch does not fail, it changes 0 rows. An `INSERT` without it fails the RLS `WITH CHECK` policy, which stops the migration with an error. `go test ./migrations/` refuses either (`TestMigrations_RLSDataStepsSetRole`).
+5. A migration that creates a table and then writes it as `thesada_app_admin` grants that table to `thesada_app_admin` explicitly (0038, 0043). The default privileges from 0001 cover only tables `thesada_app` creates, so under a superuser migrator (`pkg/db` RLS test, a hand-run `psql`) the data step fails with `permission denied for table`.
 
 ## Magic-link mail broken
 
