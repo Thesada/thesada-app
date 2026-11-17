@@ -57,6 +57,15 @@ Assume broker credentials and/or the dynsec store are untrusted.
 4. If migrations are stuck: `thesada-app migrate` on the host. See [Migrations](#migrations) for the role grant they need.
 5. Restore path (if the DB itself is lost): TimescaleDB restores must be **version-matched** to the dump.
 
+## Self-host upgrade
+
+`deploy/startup.sh` creates the timescaledb extension when it is missing, then runs `ALTER EXTENSION timescaledb UPDATE` before the migrations.
+
+1. Docker Compose 2.17 or newer is required (`up --wait`). The script stops on an older one.
+2. Rerunning it on a live stack recreates the database container when the image changed. The app loses its database for that restart, and the ALTER takes catalog locks against live sessions. Run it in a quiet window.
+3. Rolling the image back to an older timescaledb than the volume holds fails the ALTER, and the script stops before the migrations with the old stack untouched. Restore the newer image, or restore the database from a backup made before the upgrade.
+4. The release PR runs `make release-pin RELEASE=<version>`, so the compose file in a release tag runs that release. `go test ./deploy/` fails when the pin is older than the newest tag.
+
 ## Migrations
 
 `thesada-app migrate` runs as `thesada_app`, the owner of every table. Tenant tables are `FORCE ROW LEVEL SECURITY`, so the owner sees no rows: a data step (`UPDATE` / `INSERT` / `DELETE`) on one switches to the BYPASSRLS role with `SET LOCAL ROLE thesada_app_admin`. Since 0040 that switch needs a membership grant.

@@ -273,7 +273,8 @@ func (s *Server) handleAdminTenantSecretsProvision(w http.ResponseWriter, r *htt
 		http.Redirect(w, r, flashTenantDecrypt.on(dest), http.StatusFound)
 		return
 	}
-	if !found {
+	// An empty default is never pushed: secret.set with "" clears NVS.
+	if !found || value == "" {
 		http.Redirect(w, r, flashTenantNoneSet.on(dest), http.StatusFound)
 		return
 	}

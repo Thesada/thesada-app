@@ -43,7 +43,7 @@ func TestDispatch_MigratedUserGetsEachChannelOnce(t *testing.T) {
 	}
 	mctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	for _, f := range []string{"0043_notification_channels.sql", "0044_channel_follows_account.sql"} {
+	for _, f := range []string{"0043_notification_channels.sql", "0044_channel_follows_account.sql", "0047_channel_email_confirm.sql"} {
 		body, err := migrations.FS.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)

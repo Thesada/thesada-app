@@ -76,7 +76,7 @@ func New(accounts Accounts, send MIMESender, baseURL string) *Mail {
 		byIP:     ratelimit.New(window, maxPerIP),
 		slots:    make(chan struct{}, maxInFlight),
 	}
-	names := []string{"login_link", "reset_link"}
+	names := []string{"login_link", "reset_link", "channel_confirm"}
 	m.emailText = make(map[string]*texttemplate.Template, len(names))
 	m.emailHTML = make(map[string]*template.Template, len(names))
 	for _, name := range names {
@@ -147,6 +147,12 @@ func (m *Mail) Drain(ctx context.Context) error {
 // in: recipient, absolute link. out: render or send error.
 func (m *Mail) SendResetLink(to, link string) error {
 	return m.sendTemplate(to, "Your thesada password reset link", "reset_link", link)
+}
+
+// SendChannelConfirm emails the confirm link of an alert email channel.
+// The caller applies the per-user cap. in: recipient, raw token. out: render or send error.
+func (m *Mail) SendChannelConfirm(to, token string) error {
+	return m.sendTemplate(to, "Confirm thesada alert emails", "channel_confirm", m.baseURL+"/alerts/channels/confirm?token="+token)
 }
 
 func (m *Mail) request(email, ip, tmpl, subject, path string, login bool) error {

@@ -86,6 +86,9 @@ func secondFactorOffer(totpOn, keys, passkeysOn, lookupFailed bool) (hasTOTP, ha
 	hasTOTP, hasPasskey = totpOn || lookupFailed, keys && passkeysOn
 	if !hasTOTP && !hasPasskey && keys {
 		msg = "This account signs in with a passkey, and passkeys are turned off on this server. Ask an administrator."
+	} else if !hasTOTP && !hasPasskey {
+		// The last factor was removed in another session while this challenge was open.
+		msg = "This sign-in step is no longer available. Sign in again."
 	}
 	return hasTOTP, hasPasskey, msg
 }

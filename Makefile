@@ -114,8 +114,8 @@ test: ## Unit tests, no database
 	$(GO) test ./...
 
 .PHONY: test-integration
-test-integration: ## DB-backed tests via testcontainers (needs Docker, 600s timeout)
-	$(GO) test -tags integration -timeout 600s ./...
+test-integration: ## DB-backed tests via testcontainers (needs Docker, 1200s timeout)
+	$(GO) test -tags integration -timeout 1200s ./...
 
 .PHONY: cover
 cover: ## Coverage of the security packages on the integration lane (needs Docker)
@@ -153,6 +153,12 @@ sec-static: ## Fail on HIGH gosec findings
 
 .PHONY: sec
 sec: sec-vuln sec-static ## govulncheck, then the HIGH gosec gate
+
+# The release PR sets the self-host compose image to the version it releases.
+.PHONY: release-pin
+release-pin: ## Pin deploy/docker-compose.yml to RELEASE (make release-pin RELEASE=26.11.5)
+	@echo "$(RELEASE)" | grep -Eq '^[0-9]{2}\.[0-9]{1,2}\.[0-9]+$$' || { echo "usage: make release-pin RELEASE=YY.MM.N"; exit 1; }
+	sed -i.bak -E 's|(ghcr\.io/thesada/thesada-app:)[0-9.]+|\1$(RELEASE)|' deploy/docker-compose.yml && rm deploy/docker-compose.yml.bak
 
 .PHONY: ci
 ci: lint pools test test-integration coverage sec ## Local CI: lint, pools guard, unit and integration tests, coverage, vuln and gosec gates

@@ -122,6 +122,11 @@ func seedCrossTenant(t *testing.T) crossTenantFixture {
 		}
 		channels[name] = id
 	}
+	resend, err := env.Services.Alerts.CreateChannel(ctx, ctTenantA, ownerID, "email", "other@ct-a.test", "resend")
+	if err != nil {
+		t.Fatalf("seed channel resend: %v", err)
+	}
+	channels["resend"] = resend
 	rules := map[string]uuid.UUID{}
 	for _, name := range []string{"toggle", "delete"} {
 		id, err := env.Services.Alerts.CreateTrendRule(ctx, ctTenantA, service.TrendRule{
@@ -411,6 +416,21 @@ func TestCrossTenant_WebRoutes(t *testing.T) {
 			postAuthed(t, f.srv, path, url.Values{}, f.owner, "")
 			if f.count(t, rows, ch) != 0 {
 				t.Fatal("owner removal left the channel; the check cannot fire")
+			}
+		},
+		"POST /settings/channels/{id}/resend": func(t *testing.T) {
+			ch := f.channels["resend"]
+			path := "/settings/channels/" + ch.String() + "/resend"
+			rows := `SELECT count(*) FROM notification_channels WHERE id = $1 AND confirm_token_hash IS NOT NULL`
+			if rec := postAuthed(t, f.srv, path, url.Values{}, f.out, ""); rec.Code != http.StatusNotFound {
+				t.Fatalf("outsider status = %d, want 404", rec.Code)
+			}
+			if f.count(t, rows, ch) != 0 {
+				t.Fatal("outsider issued a confirm link on tenant A's channel")
+			}
+			postAuthed(t, f.srv, path, url.Values{}, f.owner, "")
+			if f.count(t, rows, ch) != 1 {
+				t.Fatal("owner resend issued no link; the check cannot fire")
 			}
 		},
 		"POST /settings/oauth/{id}/unlink": func(t *testing.T) {

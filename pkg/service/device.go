@@ -326,6 +326,15 @@ func (s *DeviceService) Reassign(ctx context.Context, id uuid.UUID, targetTenant
 		if err := quotaAllowDevice(ctx, tx, targetTenant, deviceID, max); err != nil {
 			return err
 		}
+		// Rows tagged with the old tenant would block every later read under RLS. Device
+		// secrets are AAD-bound to the old tenant, so they go and the new tenant provisions anew.
+		if _, err := tx.Exec(ctx,
+			`UPDATE device_open_networks SET tenant_id = $1 WHERE device_pk = $2`, targetTenant, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM device_config_secrets WHERE device_pk = $1`, id); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx,
 			`UPDATE devices SET tenant_id = $1 WHERE id = $2`, targetTenant, id)
 		return err

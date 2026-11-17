@@ -471,6 +471,7 @@ func (n *Notifier) loadRecipients(ctx context.Context, tx pgx.Tx, alertID int64)
 		JOIN alert_subscriptions s
 		  ON (s.device_pk = a.device_pk OR s.device_pk IS NULL)
 		JOIN notification_channels c ON c.id = s.channel_id AND c.enabled
+		 AND (c.kind <> 'email' OR c.follows_account OR c.confirmed_at IS NOT NULL)
 		JOIN users u ON u.id = c.user_id
 		WHERE a.id = $1
 		  AND (CASE a.severity WHEN 'info' THEN 0 WHEN 'warn' THEN 1 WHEN 'crit' THEN 2 END)

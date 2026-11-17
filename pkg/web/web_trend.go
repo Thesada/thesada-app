@@ -10,8 +10,51 @@ import (
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/authz"
 	"thesada.app/app/pkg/service"
 )
+
+// canEditTrendRule applies the Lua rules check: canEditRules for a device rule, an
+// operator or a tenant admin for a tenant-wide one. nil device means tenant-wide.
+func canEditTrendRule(me *service.User, tenantID string, d *service.Device) bool {
+	if d != nil {
+		return canEditRules(me, d)
+	}
+	return me != nil && (authz.Can(me, authz.RulesTenantPush) || (me.IsAdmin && me.TenantID == tenantID))
+}
+
+// errTrendForbidden: the caller may not change this rule.
+var errTrendForbidden = errors.New("forbidden")
+
+// authorizeTrendRule checks the caller may change an existing rule.
+// in: request, tenant, rule id. out: nil, errTrendForbidden, ErrTrendRuleNotFound or a lookup error.
+func (s *Server) authorizeTrendRule(r *http.Request, tenantID string, id uuid.UUID) error {
+	pk, err := s.services.Alerts.TrendRuleDevice(r.Context(), tenantID, id)
+	if err != nil {
+		return err
+	}
+	d, found, err := s.trendRuleDevice(tenantID, pk)
+	if err != nil {
+		return err
+	}
+	if !found || !canEditTrendRule(authmw.CurrentUser(r), tenantID, d) {
+		return errTrendForbidden
+	}
+	return nil
+}
+
+// trendRuleDevice loads the device a rule targets, nil for a tenant-wide rule.
+// in: tenant, device pk or nil. out: device, found, error.
+func (s *Server) trendRuleDevice(tenantID string, pk *uuid.UUID) (*service.Device, bool, error) {
+	if pk == nil {
+		return nil, true, nil
+	}
+	d, err := s.services.Devices.GetByID(*pk, tenantID)
+	if err != nil {
+		return nil, false, err
+	}
+	return d, d != nil, nil
+}
 
 // trendUnitSeconds maps the window unit picker to seconds.
 var trendUnitSeconds = map[string]int{"min": 60, "h": 3600}
@@ -49,6 +92,20 @@ func (s *Server) handleTrendRuleAdd(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rule.DevicePK = &pk
+	}
+	d, found, err := s.trendRuleDevice(tenantID, rule.DevicePK)
+	if err != nil {
+		slog.Error("alerts.trend_save_failed", "part", "device", "tenant", tenantID, "err", err)
+		http.Redirect(w, r, "/alerts?err=rules#rules", http.StatusSeeOther)
+		return
+	}
+	if !found {
+		http.Error(w, "device not found", http.StatusBadRequest)
+		return
+	}
+	if !canEditTrendRule(authmw.CurrentUser(r), tenantID, d) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
 	}
 	_, err = s.services.Alerts.CreateTrendRule(r.Context(), tenantID, rule)
 	switch {
@@ -93,8 +150,13 @@ func (s *Server) trendRuleChange(w http.ResponseWriter, r *http.Request, change 
 		return
 	}
 	tenantID := authmw.EffectiveTenantID(r)
-	err = change(tenantID, id)
+	err = s.authorizeTrendRule(r, tenantID, id)
+	if err == nil {
+		err = change(tenantID, id)
+	}
 	switch {
+	case errors.Is(err, errTrendForbidden):
+		http.Error(w, "forbidden", http.StatusForbidden)
 	case errors.Is(err, service.ErrTrendRuleNotFound):
 		http.Error(w, "rule not found", http.StatusNotFound)
 	case err != nil:
