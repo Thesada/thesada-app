@@ -95,7 +95,7 @@ func (s *AlertService) AlertCoverage(ctx context.Context, tenantID string) (bool
 			SELECT EXISTS (SELECT 1 FROM devices WHERE tenant_id = $1 AND paired_at IS NOT NULL),
 			       (SELECT count(DISTINCT s.user_id) FROM alert_subscriptions s
 			          JOIN users u ON u.id = s.user_id
-			          JOIN notification_channels c ON c.id = s.channel_id AND c.enabled
+			          JOIN notification_channels c ON c.id = s.channel_id AND c.enabled AND `+channelConfirmedSQL+`
 			         WHERE u.tenant_id = $1 AND `+subCoversPaired+`)`, tenantID).Scan(&paired, &subs)
 	})
 	return paired, subs, err

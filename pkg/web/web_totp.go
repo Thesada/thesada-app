@@ -68,12 +68,18 @@ func (s *Server) secondFactorData(token string, extra map[string]interface{}) ma
 		slog.Error("auth.totp.factors_failed", "err", err)
 	}
 	hasTOTP, hasPasskey, msg := secondFactorOffer(totpOn, keys, s.services.Auth.PasskeysEnabled(), err != nil)
+	return secondFactorPage(hasTOTP, hasPasskey, msg, extra)
+}
+
+// secondFactorPage builds the page data. With no factor to offer, its message beats
+// an error from extra, as there is no form left to retry. in: offers, message, extra. out: data.
+func secondFactorPage(hasTOTP, hasPasskey bool, msg string, extra map[string]interface{}) map[string]interface{} {
 	data := map[string]interface{}{"HasTOTP": hasTOTP, "HasPasskey": hasPasskey}
-	if msg != "" {
-		data["Error"] = msg
-	}
 	for k, v := range extra {
 		data[k] = v
+	}
+	if msg != "" {
+		data["Error"] = msg
 	}
 	return data
 }
@@ -86,6 +92,9 @@ func secondFactorOffer(totpOn, keys, passkeysOn, lookupFailed bool) (hasTOTP, ha
 	hasTOTP, hasPasskey = totpOn || lookupFailed, keys && passkeysOn
 	if !hasTOTP && !hasPasskey && keys {
 		msg = "This account signs in with a passkey, and passkeys are turned off on this server. Ask an administrator."
+	} else if !hasTOTP && !hasPasskey {
+		// The last factor was removed in another session while this challenge was open.
+		msg = "This sign-in step is no longer available. Sign in again."
 	}
 	return hasTOTP, hasPasskey, msg
 }

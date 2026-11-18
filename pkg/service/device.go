@@ -297,7 +297,7 @@ func (s *DeviceService) ListAllForAdmin(ctx context.Context) ([]Device, error) {
 // the UPDATE: the new tenant_id never matches the GUC (whichever tenant
 // was set, the row is being moved to a different one).
 // An unrecorded broker identity is pinned to the old tenant first, the one
-// it was issued under, so the move cannot rename it.
+// it was issued under, so the move cannot rename it. A reassign to the device's own tenant writes nothing.
 // in: ctx, device pk, target tenant slug. out: error.
 func (s *DeviceService) Reassign(ctx context.Context, id uuid.UUID, targetTenant string) error {
 	return db.WithAdminAudit(ctx, s.pools.Admin, "device.reassign", func(tx pgx.Tx) error {
@@ -307,6 +307,10 @@ func (s *DeviceService) Reassign(ctx context.Context, id uuid.UUID, targetTenant
 			`SELECT device_id, tenant_id, broker_tenant_id FROM devices WHERE id = $1 FOR UPDATE`,
 			id).Scan(&deviceID, &oldTenant, &pinned); err != nil {
 			return err
+		}
+		// Nothing moves, so the tenant-bound secrets stay valid.
+		if oldTenant == targetTenant {
+			return nil
 		}
 		if pinned == nil {
 			_, err := reserveBrokerIdentityTx(ctx, tx, oldTenant, deviceID)
@@ -324,6 +328,15 @@ func (s *DeviceService) Reassign(ctx context.Context, id uuid.UUID, targetTenant
 			max = s.cfg.QuotaDevices
 		}
 		if err := quotaAllowDevice(ctx, tx, targetTenant, deviceID, max); err != nil {
+			return err
+		}
+		// Rows tagged with the old tenant would block every later read under RLS. Device
+		// secrets are AAD-bound to the old tenant, so they go and the new tenant provisions anew.
+		if _, err := tx.Exec(ctx,
+			`UPDATE device_open_networks SET tenant_id = $1 WHERE device_pk = $2`, targetTenant, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM device_config_secrets WHERE device_pk = $1`, id); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx,

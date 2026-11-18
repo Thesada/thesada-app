@@ -266,69 +266,41 @@
 
   /* ---- config ---- */
 
-  /* Chunked fs.cat /config.json instead of single-shot config.dump.
-     On cellular the single-shot publish of a multi-KB config JSON
-     overflows the SIM7080 AT-bus line buffer (cellATWrite logs "line
-     overflow - dropping"). fs.cat takes offset + chunkSize args and
-     the firmware streams ~2KB per response - cellular-friendly and
-     identical to the proven file editor read path. */
+  /* Load from device: the server reads /config.json with chunked fs.cat
+     (single-shot config.dump overflows the SIM7080 line buffer on cellular)
+     and stores it as a device read, which refreshes the open-network markers. */
   window.loadConfig = function() {
     statusPending("Loading config from device (chunked, up to " + cliTimeoutSeconds + "s per chunk on cellular)...");
-    var path = "/config.json";
-    var content = "";
-    var offset = 0;
-    var chunkSize = 2048;
-    function readChunk() {
-      postCmd("fs.cat", path + " " + offset + " " + chunkSize).then(function(resp) {
-        if (!resp.ok) {
-          status("Load failed: " + (resp.output || []).join(" "), false);
-          return;
-        }
-        content += resp.data || "";
-        offset += resp.length || 0;
-        if (resp.total) {
-          statusPending("Loading config: " + offset + " / " + resp.total + " bytes...");
-        }
-        if (!resp.done) {
-          readChunk();
-        } else {
-          var pretty = content;
-          try {
-            var obj = JSON.parse(content);
-            pretty = JSON.stringify(obj, null, 2);
-            originalConfig = obj;
-          } catch (e) {
-            originalConfig = null;
-            status("Load completed but JSON parse failed: " + e.message, false);
-            document.getElementById("config-editor").value = content;
-            return;
-          }
-          document.getElementById("config-editor").value = pretty;
-          var notice = document.getElementById("snapshot-notice");
-          if (notice) { notice.remove(); }
-          /* Record the assembled content as a snapshot row. The previous
-             single-shot config.dump path did this implicitly server-side
-             via snapshotFromCmdResponse; chunked fs.cat needs an explicit
-             upsert because the backend only sees per-chunk responses. */
-          fetch("/admin/devices/" + deviceID + "/config/snapshot", {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
-            body: JSON.stringify({ path: "config.json", content: content, source: "read" })
-          }).then(readJSON).then(function(r) {
-            if (!r.ok) {
-              console.warn("snapshot upsert returned non-ok:", r);
-            }
-          }).catch(function(e) {
-            console.warn("snapshot upsert failed:", e);
-          });
-          status("Config loaded (" + content.length + " bytes)", true);
-        }
-      }).catch(function(e) {
-        status("Error: " + (e.message || e), false);
-      });
-    }
-    readChunk();
+    fetch("/admin/devices/" + deviceID + "/config/load", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: "{}"
+    }).then(readJSON).then(function(enq) {
+      if (!enq.request_id) {
+        throw new Error("enqueue failed: " + JSON.stringify(enq));
+      }
+      return pollResult(enq.request_id, enq.timeout_seconds || cliTimeoutSeconds);
+    }).then(function(resp) {
+      var content = resp.data || "";
+      var pretty = content;
+      try {
+        var obj = JSON.parse(content);
+        pretty = JSON.stringify(obj, null, 2);
+        originalConfig = obj;
+      } catch (e) {
+        originalConfig = null;
+        status("Load completed but JSON parse failed: " + e.message, false);
+        document.getElementById("config-editor").value = content;
+        return;
+      }
+      document.getElementById("config-editor").value = pretty;
+      var notice = document.getElementById("snapshot-notice");
+      if (notice) { notice.remove(); }
+      status("Config loaded (" + content.length + " bytes)", true);
+    }).catch(function(e) {
+      status("Error: " + (e.message || e), false);
+    });
   };
 
   window.saveConfig = function() {

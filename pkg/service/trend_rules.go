@@ -307,6 +307,20 @@ func (s *AlertService) CreateTrendRule(ctx context.Context, tenantID string, r T
 // ErrTrendRuleNotFound: no such rule in this tenant.
 var ErrTrendRuleNotFound = errors.New("rule not found")
 
+// TrendRuleDevice returns the device a rule watches, nil for a tenant-wide rule.
+// in: ctx, tenant, rule id. out: device pk or nil, ErrTrendRuleNotFound.
+func (s *AlertService) TrendRuleDevice(ctx context.Context, tenantID string, id uuid.UUID) (*uuid.UUID, error) {
+	var pk *uuid.UUID
+	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `SELECT device_pk FROM alert_rules WHERE id = $1 AND kind = 'trend'`, id).Scan(&pk)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrTrendRuleNotFound
+		}
+		return err
+	})
+	return pk, err
+}
+
 // SetTrendRuleEnabled switches a rule on or off. Switching off clears its open alerts.
 // in: ctx, tenant, rule id, enabled. out: error.
 func (s *AlertService) SetTrendRuleEnabled(ctx context.Context, tenantID string, id uuid.UUID, enabled bool) error {

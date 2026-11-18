@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -87,6 +88,7 @@ func (s *Server) loadSettingsData(r *http.Request) (map[string]interface{}, erro
 		"Subscriptions":   subs,
 		"Channels":        channels,
 		"SavedSection":    r.URL.Query().Get("saved"),
+		"ConfirmState":    r.URL.Query().Get("confirm"),
 		"OAuthIdentities": identities,
 		"OAuthProviders":  providers,
 		"OAuthError":      r.URL.Query().Get("err"),
@@ -133,7 +135,7 @@ func (s *Server) handleSettingsChannelAdd(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid channel type", http.StatusBadRequest)
 		return
 	}
-	_, err := s.services.Alerts.CreateChannel(r.Context(), u.TenantID, u.ID, kind, r.PostFormValue("target"), r.PostFormValue("label"))
+	id, err := s.services.Alerts.CreateChannel(r.Context(), u.TenantID, u.ID, kind, r.PostFormValue("target"), r.PostFormValue("label"))
 	if errors.Is(err, service.ErrBadChannelTarget) || errors.Is(err, service.ErrBadWebhook) {
 		http.Error(w, channelTargetHint(kind), http.StatusBadRequest)
 		return
@@ -143,7 +145,93 @@ func (s *Server) handleSettingsChannelAdd(w http.ResponseWriter, r *http.Request
 		http.Redirect(w, r, "/settings?err=channels#notifications", http.StatusSeeOther)
 		return
 	}
-	http.Redirect(w, r, "/settings?saved=channels#notifications", http.StatusSeeOther)
+	state, _ := s.sendChannelConfirm(r, u, id, false)
+	http.Redirect(w, r, "/settings?saved=channels"+state+"#notifications", http.StatusSeeOther)
+}
+
+// channelConfirmWindow and channelConfirmMax cap confirm mails per user.
+const (
+	channelConfirmWindow = time.Hour
+	channelConfirmMax    = 3
+)
+
+// sendChannelConfirm mails a confirm link when the channel needs one.
+// in: request, user, channel id, resend. out: query suffix for the redirect, ErrNotFound when not the user's.
+func (s *Server) sendChannelConfirm(r *http.Request, u *service.User, id uuid.UUID, resend bool) (string, error) {
+	target, token, err := s.services.Alerts.IssueChannelConfirm(r.Context(), u.TenantID, u.ID, id, resend,
+		func() bool { return s.channelConfirms.Allow(u.ID.String()) })
+	switch {
+	case errors.Is(err, service.ErrConfirmLimited):
+		slog.Warn("settings.channel_confirm.rate_limited", "user_id", u.ID, "channel_id", id)
+		return "&confirm=later", nil
+	case errors.Is(err, service.ErrNotFound):
+		return "", err
+	case err != nil:
+		slog.Error("settings.channel_confirm.issue_failed", "user_id", u.ID, "channel_id", id, "err", err)
+		return "&confirm=failed", err
+	case token == "":
+		return "", nil
+	}
+	if s.notes != nil {
+		if err := s.notes.SendChannelConfirm(target, token); err != nil {
+			slog.Error("settings.channel_confirm.send_failed", "user_id", u.ID, "channel_id", id, "err", err)
+			return "&confirm=failed", err
+		}
+	}
+	return "&confirm=sent", nil
+}
+
+// handleSettingsChannelResend mails a new confirm link for an unconfirmed email channel.
+// in: writer, path id. out: redirect, 404 when not the user's channel.
+func (s *Server) handleSettingsChannelResend(w http.ResponseWriter, r *http.Request) {
+	u := authmw.CurrentUser(r)
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "invalid channel", http.StatusBadRequest)
+		return
+	}
+	state, err := s.sendChannelConfirm(r, u, id, true)
+	if errors.Is(err, service.ErrNotFound) {
+		http.Error(w, "channel not found", http.StatusNotFound)
+		return
+	}
+	http.Redirect(w, r, "/settings?saved=channels"+state+"#notifications", http.StatusSeeOther)
+}
+
+// handleChannelConfirmForm shows the confirm button. It changes nothing, so a
+// mail scanner following the link confirms nothing.
+// in: writer, query token. out: HTML page.
+func (s *Server) handleChannelConfirmForm(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	token := r.URL.Query().Get("token")
+	ok := false
+	if token != "" {
+		var err error
+		if ok, err = s.services.Alerts.ChannelConfirmValid(r.Context(), token); err != nil {
+			slog.Error("channel_confirm.check_failed", "err", err)
+			http.Error(w, "confirm failed", http.StatusInternalServerError)
+			return
+		}
+	}
+	s.render(w, r, "channel-confirm.html", map[string]interface{}{"Token": token, "Invalid": !ok})
+}
+
+// handleChannelConfirm uses the confirm link. Unknown, used and expired links
+// all get the same page.
+// in: writer, POST form (token). out: HTML page.
+func (s *Server) handleChannelConfirm(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	token := r.PostFormValue("token")
+	err := service.ErrNotFound
+	if token != "" {
+		err = s.services.Alerts.ConfirmChannel(r.Context(), token)
+	}
+	if err != nil && !errors.Is(err, service.ErrNotFound) {
+		slog.Error("channel_confirm.failed", "err", err)
+		http.Error(w, "confirm failed", http.StatusInternalServerError)
+		return
+	}
+	s.render(w, r, "channel-confirm.html", map[string]interface{}{"Confirmed": err == nil, "Invalid": err != nil})
 }
 
 // channelTargetHint is the 400 text for a target that does not fit its kind.
@@ -182,7 +270,8 @@ func (s *Server) handleSettingsChannelUpdate(w http.ResponseWriter, r *http.Requ
 		slog.Error("settings.save_failed", "part", "channel_update", "user_id", u.ID, "err", err)
 		http.Redirect(w, r, "/settings?err=channels#notifications", http.StatusSeeOther)
 	default:
-		http.Redirect(w, r, "/settings?saved=channels#notifications", http.StatusSeeOther)
+		state, _ := s.sendChannelConfirm(r, u, id, false)
+		http.Redirect(w, r, "/settings?saved=channels"+state+"#notifications", http.StatusSeeOther)
 	}
 }
 

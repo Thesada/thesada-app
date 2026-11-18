@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -20,9 +21,16 @@ import (
 // tables introduced by migration 0012. Replaces ConfigSnapshotService for
 // new code paths.
 type DeviceFilesService struct {
-	cfg   *config.Config
-	pools db.Pools
+	cfg     *config.Config
+	pools   db.Pools
+	secrets *SecretService
 }
+
+// IsConfigJSON reports whether path names the root config.json, however the
+// slashes and dots are spelled. in: device file path. out: true for config.json.
+func IsConfigJSON(p string) bool { return path.Clean("/"+p) == "/config.json" }
+
+func isConfigJSON(p string) bool { return IsConfigJSON(p) }
 
 // Upsert writes the canonical current state for (devicePk, path) and, if
 // the sha differs from the prior canonical row, appends a history entry
@@ -36,62 +44,71 @@ type DeviceFilesService struct {
 // in:  ctx, tenantID, devicePk, path, content, sha256, source, createdBy (nil for system)
 // out: error if either table write failed
 func (s *DeviceFilesService) Upsert(ctx context.Context, tenantID string, devicePk uuid.UUID, path, content, sha256hex, source string, createdBy *uuid.UUID) error {
-	// Never persist plaintext device-config secrets. Blank the sensitive
-	// fields in config.json before it reaches device_files / history; every
-	// write + ingest path funnels through here, so this is the one chokepoint.
-	// sha256hex is left as the device fingerprint (drift key) - blanking the
-	// stored copy must not read as drift - and the real values live encrypted
-	// in device_config_secrets.
-	if path == "config.json" || path == "/config.json" {
-		blanked, _, err := blankConfigSecrets(content)
-		if err != nil {
-			return fmt.Errorf("blank config secrets: %w", err)
-		}
-		content = blanked
+	content, err := blankedContent(path, content)
+	if err != nil {
+		return err
 	}
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
-		// Read prior canonical sha (NULL if first insert).
-		var prev *string
-		err := tx.QueryRow(ctx,
-			`SELECT sha256 FROM device_files WHERE device_pk = $1 AND path = $2`,
-			devicePk, path).Scan(&prev)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
+		return upsertTx(ctx, tx, devicePk, path, content, sha256hex, source, createdBy)
+	})
+}
 
-		// Upsert canonical row.
+// blankedContent empties config.json secret leaves before any store. The caller keeps the device
+// sha, so blanking never reads as drift. in: path, content. out: content to store, error.
+func blankedContent(path, content string) (string, error) {
+	if !isConfigJSON(path) {
+		return content, nil
+	}
+	blanked, _, err := blankConfigSecrets(content)
+	if err != nil {
+		return "", fmt.Errorf("blank config secrets: %w", err)
+	}
+	return blanked, nil
+}
+
+// upsertTx is Upsert inside an open tenant tx, content already blanked.
+func upsertTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, path, content, sha256hex, source string, createdBy *uuid.UUID) error {
+	// Read prior canonical sha (NULL if first insert).
+	var prev *string
+	err := tx.QueryRow(ctx,
+		`SELECT sha256 FROM device_files WHERE device_pk = $1 AND path = $2`,
+		devicePk, path).Scan(&prev)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+
+	// Upsert canonical row.
+	_, err = tx.Exec(ctx,
+		`INSERT INTO device_files (device_pk, path, content, sha256, source, updated_at, updated_by)
+		 VALUES ($1, $2, $3, $4, $5, NOW(), $6)
+		 ON CONFLICT (device_pk, path) DO UPDATE
+		   SET content = EXCLUDED.content,
+		       sha256 = EXCLUDED.sha256,
+		       source = EXCLUDED.source,
+		       updated_at = EXCLUDED.updated_at,
+		       updated_by = EXCLUDED.updated_by`,
+		devicePk, path, content, sha256hex, source, createdBy)
+	if err != nil {
+		return err
+	}
+
+	// Append history on sha change OR whenever the source is an operator-
+	// initiated write. First-ever-write counts as change (prev is nil, so
+	// prev != current). Operator writes always log even with identical
+	// bytes so the audit trail records the human action - re-pushing the
+	// same config after a device round-trip would otherwise silently
+	// dedupe against the prior read snapshot and disappear from history.
+	if prev == nil || *prev != sha256hex || source == "write" {
 		_, err = tx.Exec(ctx,
-			`INSERT INTO device_files (device_pk, path, content, sha256, source, updated_at, updated_by)
-			 VALUES ($1, $2, $3, $4, $5, NOW(), $6)
-			 ON CONFLICT (device_pk, path) DO UPDATE
-			   SET content = EXCLUDED.content,
-			       sha256 = EXCLUDED.sha256,
-			       source = EXCLUDED.source,
-			       updated_at = EXCLUDED.updated_at,
-			       updated_by = EXCLUDED.updated_by`,
-			devicePk, path, content, sha256hex, source, createdBy)
+			`INSERT INTO device_file_history
+			   (device_pk, path, content, sha256, prev_sha256, source, created_by, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+			devicePk, path, content, sha256hex, prev, source, createdBy)
 		if err != nil {
 			return err
 		}
-
-		// Append history on sha change OR whenever the source is an operator-
-		// initiated write. First-ever-write counts as change (prev is nil, so
-		// prev != current). Operator writes always log even with identical
-		// bytes so the audit trail records the human action - re-pushing the
-		// same config after a device round-trip would otherwise silently
-		// dedupe against the prior read snapshot and disappear from history.
-		if prev == nil || *prev != sha256hex || source == "write" {
-			_, err = tx.Exec(ctx,
-				`INSERT INTO device_file_history
-				   (device_pk, path, content, sha256, prev_sha256, source, created_by, created_at)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
-				devicePk, path, content, sha256hex, prev, source, createdBy)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // Latest returns the canonical current row for (devicePk, path), or nil

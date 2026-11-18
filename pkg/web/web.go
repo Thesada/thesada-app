@@ -55,7 +55,9 @@ type Server struct {
 	waitlistNotify *ratelimit.Limiter
 	// claimLimits bounds self-service device claim attempts per user.
 	claimLimits *ratelimit.Limiter
-	cliRequests *cliRequestStore
+	// channelConfirms bounds email channel confirm mails per user.
+	channelConfirms *ratelimit.Limiter
+	cliRequests     *cliRequestStore
 	// rulePushes are tenant rule pushes, rulePushOwner maps each to its device.
 	rulePushes    *requestStore[*rulePushResult]
 	rulePushOwner sync.Map
@@ -73,18 +75,19 @@ type Server struct {
 // in: cfg, services bundle, mailer. out: ready *Server.
 func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mqttClient *mqtt.Client, ca *pki.CA, notes *notify.Mail) *Server {
 	s := &Server{
-		cfg:            cfg,
-		services:       services,
-		mailer:         mail,
-		notes:          notes,
-		mqtt:           mqttClient,
-		ca:             ca,
-		mux:            http.NewServeMux(),
-		waitlistNotify: ratelimit.New(24*time.Hour, 1),
-		claimLimits:    newClaimLimiter(cfg),
-		cliRequests:    newCLIRequestStore(cfg.CLIRequestTimeout+60*time.Second, nil),
-		jobs:           newRequestStore[jobResult](10*time.Minute, nil),
-		rulePushes:     newRequestStore[*rulePushResult](cfg.CLIRequestTimeout+10*time.Minute, nil),
+		cfg:             cfg,
+		services:        services,
+		mailer:          mail,
+		notes:           notes,
+		mqtt:            mqttClient,
+		ca:              ca,
+		mux:             http.NewServeMux(),
+		waitlistNotify:  ratelimit.New(24*time.Hour, 1),
+		claimLimits:     newClaimLimiter(cfg),
+		channelConfirms: ratelimit.New(channelConfirmWindow, channelConfirmMax),
+		cliRequests:     newCLIRequestStore(cfg.CLIRequestTimeout+60*time.Second, nil),
+		jobs:            newRequestStore[jobResult](10*time.Minute, nil),
+		rulePushes:      newRequestStore[*rulePushResult](cfg.CLIRequestTimeout+10*time.Minute, nil),
 	}
 	s.parseTemplates()
 	s.routes()
@@ -94,6 +97,7 @@ func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mq
 	// unbounded. context.Background: sweepers live for the process lifetime.
 	s.waitlistNotify.StartSweeper(context.Background())
 	s.claimLimits.StartSweeper(context.Background())
+	s.channelConfirms.StartSweeper(context.Background())
 
 	return s
 }
@@ -122,7 +126,7 @@ func (s *Server) parseTemplates() {
 	pages := []string{
 		"login.html", "login-totp.html", "login-verify.html", "devices.html", "device-detail.html", "device-rules.html", "alerts.html",
 		"device-claim.html",
-		"signup.html", "settings.html", "forgot.html", "reset.html",
+		"signup.html", "settings.html", "forgot.html", "reset.html", "channel-confirm.html",
 		"admin-index.html", "admin-tenants.html", "admin-job.html",
 		"admin-tenant-users.html", "admin-tenant-user-edit.html",
 		"admin-devices.html",
@@ -198,6 +202,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /settings/channels/{id}/update", authmw.RequireAuth(s.handleSettingsChannelUpdate))
 	s.mux.HandleFunc("POST /settings/channels/{id}/toggle", authmw.RequireAuth(s.handleSettingsChannelToggle))
 	s.mux.HandleFunc("POST /settings/channels/{id}/delete", authmw.RequireAuth(s.handleSettingsChannelDelete))
+	s.mux.HandleFunc("POST /settings/channels/{id}/resend", authmw.RequireAuth(s.handleSettingsChannelResend))
+	s.mux.HandleFunc("GET /alerts/channels/confirm", s.handleChannelConfirmForm)
+	s.mux.HandleFunc("POST /alerts/channels/confirm", s.handleChannelConfirm)
 	s.mux.HandleFunc("POST /settings/notifications/add", authmw.RequireAuth(s.handleSettingsNotificationAdd))
 	s.mux.HandleFunc("POST /settings/notifications/delete", authmw.RequireAuth(s.handleSettingsNotificationDelete))
 	s.mux.HandleFunc("GET /auth/oidc/{slug}/start", s.handleOIDCStart)
@@ -235,7 +242,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/devices/{id}/config/cmd", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigCmd))
 	s.mux.HandleFunc("GET /admin/devices/{id}/config/cmd/result", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigCmdResult))
 	s.mux.HandleFunc("POST /admin/devices/{id}/config/write", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigWrite))
-	s.mux.HandleFunc("POST /admin/devices/{id}/config/snapshot", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigSnapshot))
+	s.mux.HandleFunc("POST /admin/devices/{id}/config/load", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigLoad))
 	s.mux.HandleFunc("GET /admin/devices/{id}/config/history", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigHistory))
 	s.mux.HandleFunc("GET /admin/devices/{id}/rules", authmw.RequireSuperAdmin(s.handleAdminDeviceRules))
 	s.mux.HandleFunc("GET /admin/devices/{id}/rules/workspace", authmw.RequireSuperAdmin(s.handleAdminDeviceRulesWorkspaceGET))
@@ -246,6 +253,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /admin/devices/{id}/secrets", authmw.RequireSuperAdmin(s.handleAdminDeviceSecrets))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/set", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsSet))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/clear", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsClear))
+	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/clear-device", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsClearDevice))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/provision", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsProvision))
 	s.mux.HandleFunc("GET /admin/tenants/{slug}/secrets", authmw.RequireSuperAdmin(s.handleAdminTenantSecrets))
 	s.mux.HandleFunc("POST /admin/tenants/{slug}/secrets/set", authmw.RequireSuperAdmin(s.handleAdminTenantSecretsSet))

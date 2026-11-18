@@ -654,7 +654,8 @@ func provisionDeviceSecrets(fields []string, ssid string,
 			out.AbortMsg = "secret+decrypt+failed"
 			return out
 		}
-		if !found {
+		// secret.set with "" clears NVS on the firmware (C1), so empty counts as unset.
+		if !found || value == "" {
 			out.SkippedUnset = append(out.SkippedUnset, field)
 			continue
 		}
@@ -679,6 +680,10 @@ func provisionDeviceSecrets(fields []string, ssid string,
 // in: ctx, topic prefix, firmware field key, plaintext value.
 // out: user-facing short message (if !ok), ok flag.
 func (s *Server) pushSecret(ctx context.Context, topicPrefix, fwField, value string) (string, bool) {
+	// Never sent empty: the firmware takes that as a clear, which is secret.clear's job.
+	if value == "" {
+		return "secret+empty+not+sent", false
+	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 

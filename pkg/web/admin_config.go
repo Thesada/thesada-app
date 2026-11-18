@@ -145,6 +145,17 @@ func (s *Server) handleAdminDeviceConfigCmd(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// A config change must not run beside a staged write that already passed the guard.
+	claim := uuid.Nil
+	if changesConfig(req.Command, req.Payload) {
+		var ok bool
+		claim, ok = s.claimDeviceWrite(device.ID, cmdClaimTTL(s.cfg.CLIRequestTimeout))
+		if !ok {
+			http.Error(w, "a write to this device is already running", http.StatusConflict)
+			return
+		}
+	}
+
 	topicPrefix := s.deviceTopicPrefix(device)
 	user := authmw.CurrentUser(r)
 	slog.Info("admin config cmd enqueue",
@@ -166,7 +177,7 @@ func (s *Server) handleAdminDeviceConfigCmd(w http.ResponseWriter, r *http.Reque
 	// the request's context values while shedding its cancellation.
 	cliCtx := context.WithoutCancel(r.Context())
 	s.goCLI(reqID, "web.cli_cmd", device.DeviceID, func() {
-		s.runCLICmd(cliCtx, reqID, device, topicPrefix, req.Command, req.Payload, &user.ID)
+		s.runCLICmd(cliCtx, reqID, claim, device, topicPrefix, req.Command, req.Payload, &user.ID)
 	})
 
 	w.Header().Set("Content-Type", "application/json")
@@ -191,20 +202,50 @@ func (s *Server) guardCLI(reqID uuid.UUID, site, deviceID string, body func()) {
 	}
 }
 
-// runCLICmd is the goroutine body for an enqueued CLI request. Bounded by
-// cfg.CLIRequestTimeout. On success it also fires the snapshot-on-read path
-// that the synchronous handler used to run inline.
-// in: request id, device, topic prefix, command, payload, user id. out: none (writes to store).
+// runCLICmd is the goroutine body for an enqueued CLI request. A config-changing command holds
+// claim (uuid.Nil otherwise) and marks the config changed before and after it runs.
+// in: request id, claim, device, topic prefix, command, payload, user id. out: none (writes to store).
 // parentCtx is a request-derived but non-cancellable context
 // (context.WithoutCancel) - the async CLI proxy outlives the HTTP request
 // so it must not inherit r.Context() cancellation, but it should keep the
 // request's values (trace/correlation IDs) and is the base for the
 // CLIRequestTimeout deadline below.
-func (s *Server) runCLICmd(parentCtx context.Context, reqID uuid.UUID, device *service.Device, topicPrefix, command, payload string, userID *uuid.UUID) {
+func (s *Server) runCLICmd(parentCtx context.Context, reqID, claim uuid.UUID, device *service.Device, topicPrefix, command, payload string, userID *uuid.UUID) {
+	changes := claim != uuid.Nil
+	if changes {
+		defer s.releaseDeviceWrite(device.ID, claim)
+		if !s.renewDeviceWrite(device.ID, claim, cmdClaimTTL(s.cfg.CLIRequestTimeout)) {
+			s.cliRequests.markError(reqID, reqStatusError, "another write took over this device, nothing was sent")
+			return
+		}
+		// Reads already running turn stale. Without the mark the command is not sent.
+		if err := s.markConfigChanging(parentCtx, device, cmdClaimTTL(s.cfg.CLIRequestTimeout)); err != nil {
+			s.releaseDeviceWrite(device.ID, claim)
+			s.cliRequests.markError(reqID, reqStatusError, "could not record the config change, nothing was sent")
+			return
+		}
+	}
+	var readStart time.Time
+	if command == "config.dump" {
+		start, err := s.readStart(parentCtx, device)
+		if err != nil {
+			s.cliRequests.markError(reqID, reqStatusError, "could not start the device read, nothing was sent")
+			return
+		}
+		readStart = start
+	}
+
 	ctx, cancel := context.WithTimeout(parentCtx, s.cfg.CLIRequestTimeout)
 	defer cancel()
-
 	resp, err := s.mqtt.CLIRequest(ctx, topicPrefix, command, payload)
+	if changes {
+		// A read served while the command ran is stale too.
+		if merr := s.markConfigChanged(parentCtx, device); merr != nil {
+			slog.Error("mark config changed after a CLI command", "device", device.DeviceID, "err", merr)
+		}
+		// Released before the entry turns terminal, so a write posted on done is not a 409.
+		s.releaseDeviceWrite(device.ID, claim)
+	}
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			s.cliRequests.markError(reqID, reqStatusTimeout,
@@ -216,9 +257,40 @@ func (s *Server) runCLICmd(parentCtx context.Context, reqID uuid.UUID, device *s
 	}
 	s.cliRequests.markDone(reqID, resp)
 
-	if resp.OK {
-		s.snapshotFromCmdResponse(ctx, device.TenantID, device.ID, command, payload, resp, userID)
+	if resp.OK && command == "config.dump" {
+		s.snapshotFromCmdResponse(parentCtx, device.TenantID, device.ID, resp, userID, readStart)
 	}
+}
+
+// cmdClaimTTL outlasts one config-changing CLI command and its two change marks.
+func cmdClaimTTL(step time.Duration) time.Duration {
+	return step + 2*snapshotUpsertTimeout + time.Minute
+}
+
+// markConfigChanged records a config.json change on the device under its own deadline.
+// in: parent ctx, device. out: error.
+func (s *Server) markConfigChanged(parentCtx context.Context, device *service.Device) error {
+	return s.markConfigChanging(parentCtx, device, 0)
+}
+
+// markConfigChanging is markConfigChanged for a change that may land within window, the
+// claim it runs under. A later markConfigChanged closes the window. out: error.
+func (s *Server) markConfigChanging(parentCtx context.Context, device *service.Device, window time.Duration) error {
+	ctx, cancel := context.WithTimeout(parentCtx, snapshotUpsertTimeout)
+	defer cancel()
+	return s.services.DeviceFiles.MarkConfigChanging(ctx, device.TenantID, device.ID, window)
+}
+
+// readStart is DeviceFiles.ReadStart under its own deadline, logged on failure.
+// in: parent ctx, device. out: read start, error.
+func (s *Server) readStart(parentCtx context.Context, device *service.Device) (time.Time, error) {
+	ctx, cancel := context.WithTimeout(parentCtx, snapshotUpsertTimeout)
+	defer cancel()
+	t, err := s.services.DeviceFiles.ReadStart(ctx, device.TenantID)
+	if err != nil {
+		slog.Error("device read start failed", "device", device.DeviceID, "err", err)
+	}
+	return t, err
 }
 
 // handleAdminDeviceConfigCmdResult returns the terminal status of an
@@ -259,29 +331,34 @@ func (s *Server) handleAdminDeviceConfigCmdResult(w http.ResponseWriter, r *http
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// snapshotFromCmdResponse saves a config snapshot if the CLI command was a
-// config.dump or a chunked fs.cat read. Non-blocking (runs in goroutine).
-// in: device pk, command, payload, response, user id. out: none.
-func (s *Server) snapshotFromCmdResponse(ctx context.Context, tenantID string, devicePk uuid.UUID, command, payload string, resp *mqtt.CLIResponse, userID *uuid.UUID) {
-	var path, content string
+// changesConfig reports whether a CLI command can rewrite config.json on the device.
+// fs.format wipes it with the rest of the filesystem. A glob can match it, so it counts too.
+func changesConfig(command, payload string) bool {
 	switch command {
-	case "config.dump":
-		path = "config.json"
-		content = joinOutput(resp.Output)
-	case "fs.cat":
-		// Only snapshot complete reads (done=true with offset 0 won't happen
-		// from chunked reads - the frontend assembles. Skip partial chunks.)
-		return
-	default:
-		return
+	case "config.dump", "fs.cat", "fs.ls", "fs.df":
+		return false
+	case "fs.format":
+		return true
 	}
+	return strings.HasPrefix(command, "config.") ||
+		(strings.HasPrefix(command, "fs.") &&
+			(strings.Contains(payload, configSnapshotKey) || strings.ContainsAny(payload, "*?")))
+}
+
+// snapshotFromCmdResponse stores a config.dump answer through the device read
+// path, under its own deadline rather than what the CLI round trip left over.
+// in: parent ctx, tenant, device pk, response, user id, read start. out: none.
+func (s *Server) snapshotFromCmdResponse(parentCtx context.Context, tenantID string, devicePk uuid.UUID, resp *mqtt.CLIResponse, userID *uuid.UUID, readStart time.Time) {
+	content := joinOutput(resp.Output)
 	if content == "" {
 		return
 	}
+	ctx, cancel := context.WithTimeout(parentCtx, snapshotUpsertTimeout)
+	defer cancel()
 	h := sha256.Sum256([]byte(content))
 	hashHex := hex.EncodeToString(h[:])
-	if err := s.services.DeviceFiles.Upsert(ctx, tenantID, devicePk, path, content, hashHex, "read", userID); err != nil {
-		slog.Error("device_file upsert failed", "path", path, "err", err)
+	if err := s.services.DeviceFiles.UpsertFromDevice(ctx, tenantID, devicePk, configSnapshotKey, content, hashHex, "read", userID, readStart); err != nil {
+		slog.Error("device_file upsert failed", "path", configSnapshotKey, "err", err)
 	}
 }
 
@@ -337,11 +414,16 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 		http.Error(w, "path and content required", http.StatusBadRequest)
 		return
 	}
-
 	// Two writes would share <path>.new and interleave their chunks on the device.
 	claim, ok := s.claimDeviceWrite(device.ID, writeClaimTTL(s.cfg.CLIRequestTimeout, len(req.Content)))
 	if !ok {
 		http.Error(w, "a write to this device is already running", http.StatusConflict)
+		return
+	}
+	// Checked under the claim, so no other write can change the store in between.
+	if msg := configWriteRefusal(req.Path, req.Content, s.openWifiLookup(r.Context(), device)); msg != "" {
+		s.releaseDeviceWrite(device.ID, claim)
+		http.Error(w, msg, http.StatusUnprocessableEntity)
 		return
 	}
 
@@ -389,12 +471,40 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID, claim uuid.UUID, 
 		s.cliRequests.markError(reqID, reqStatusError, "another write took over this device, nothing was sent")
 		return
 	}
+	configPath := service.IsConfigJSON(path)
+	// Again at write time: the markers may have gone stale since the enqueue check.
+	if configPath {
+		if msg := configWriteRefusal(path, content, s.openWifiLookup(parentCtx, device)); msg != "" {
+			s.releaseDeviceWrite(device.ID, claim)
+			s.cliRequests.markError(reqID, reqStatusError, msg)
+			return
+		}
+		// The lookup may have outlived the claim, so a write that took it over owns the device.
+		if !s.renewDeviceWrite(device.ID, claim, writeClaimTTL(s.cfg.CLIRequestTimeout, len(content))) {
+			s.cliRequests.markError(reqID, reqStatusError, "another write took over this device, nothing was sent")
+			return
+		}
+		// After the guard, which needs the markers current. Without the mark nothing is sent.
+		// It spans the claim, so a read of the old file stays stale if the mark after the rename fails.
+		if err := s.markConfigChanging(parentCtx, device, writeClaimTTL(s.cfg.CLIRequestTimeout, len(content))); err != nil {
+			s.releaseDeviceWrite(device.ID, claim)
+			s.cliRequests.markError(reqID, reqStatusError, "could not record the config change, nothing was sent")
+			return
+		}
+	}
 	contentBytes := []byte(content)
 	if err := stagedWrite(parentCtx, s.mqtt, s.cfg.CLIRequestTimeout, topicPrefix, path, contentBytes); err != nil {
+		var f *writeFailure
+		errors.As(err, &f)
+		// Closes the window either way: an unknown rename counts as a change, a failed one changed nothing.
+		if configPath {
+			if merr := s.markConfigChanged(parentCtx, device); merr != nil {
+				slog.Error("mark config changed after a failed write", "device", device.DeviceID, "err", merr)
+			}
+		}
 		// Release before the entry turns terminal, so a write posted on 'done' is not a 409.
 		s.releaseDeviceWrite(device.ID, claim)
-		var f *writeFailure
-		if errors.As(err, &f) {
+		if f != nil {
 			s.cliRequests.markError(reqID, f.status, f.msg)
 		} else {
 			s.cliRequests.markError(reqID, reqStatusError, err.Error())
@@ -404,11 +514,22 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID, claim uuid.UUID, 
 
 	h := sha256.Sum256(contentBytes)
 	hashHex := hex.EncodeToString(h[:])
-	uctx, cancel := context.WithTimeout(parentCtx, snapshotUpsertTimeout)
-	if err := s.services.DeviceFiles.Upsert(uctx, device.TenantID, device.ID, path, content, hashHex, "write", userID); err != nil {
+	// stagedWrite verified the bytes on the device, so they are device truth from here on.
+	if err := s.storeWritten(parentCtx, device, path, content, hashHex, userID); err != nil {
 		slog.Error("write device_file upsert failed", "path", path, "err", err)
+		// Only config.json feeds the guard. Elsewhere the row is a snapshot and the write stands.
+		if configPath {
+			// Once more, so Load from device is not held off until the window ends.
+			if merr := s.markConfigChanged(parentCtx, device); merr != nil {
+				slog.Error("mark config changed after a failed store", "device", device.DeviceID, "err", merr)
+			}
+			s.releaseDeviceWrite(device.ID, claim)
+			s.cliRequests.markError(reqID, reqStatusError, fmt.Sprintf(
+				"%d bytes written to config.json on the device, but the app could not record them. "+
+					"Load from device on the config page to refresh", len(contentBytes)))
+			return
+		}
 	}
-	cancel()
 	s.releaseDeviceWrite(device.ID, claim)
 
 	s.cliRequests.markDone(reqID, &mqtt.CLIResponse{
@@ -418,6 +539,24 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID, claim uuid.UUID, 
 			fmt.Sprintf("%d bytes in %d chunk(s)", len(contentBytes), writeChunkCount(len(contentBytes))),
 		},
 	})
+}
+
+// storeWritten stores confirmed written content. config.json is marked changed first, in its
+// own tx, so a failed refresh still leaves older markers stale. out: error.
+func (s *Server) storeWritten(parentCtx context.Context, device *service.Device, path, content, hashHex string, userID *uuid.UUID) error {
+	ctx, cancel := context.WithTimeout(parentCtx, snapshotUpsertTimeout)
+	defer cancel()
+	if !service.IsConfigJSON(path) {
+		return s.services.DeviceFiles.Upsert(ctx, device.TenantID, device.ID, path, content, hashHex, "write", userID)
+	}
+	if err := s.services.DeviceFiles.MarkConfigChanged(ctx, device.TenantID, device.ID); err != nil {
+		return err
+	}
+	start, err := s.services.DeviceFiles.ReadStart(ctx, device.TenantID)
+	if err != nil {
+		return err
+	}
+	return s.services.DeviceFiles.UpsertFromDevice(ctx, device.TenantID, device.ID, path, content, hashHex, "write", userID, start)
 }
 
 // writeClaim is one running write: the token its owner releases with, and
@@ -505,10 +644,59 @@ func writeSteps(n int) int {
 	return writeChunkCount(n) + 3 + max(1, (n+readbackChunkSize-1)/readbackChunkSize)
 }
 
+// configWriteRefusal stops a config.json write whose secret fields are empty: snapshots and the
+// editor carry blanked secrets, and writing them would erase the device's secrets (#85). An empty
+// WiFi password passes only when isOpen says the device reported that network open (#88).
+// in: path, content, isOpen (nil refuses every empty secret). out: refusal message, or "" to let the write through.
+func configWriteRefusal(path, content string, isOpen func(field string) (bool, error)) string {
+	if !service.IsConfigJSON(path) {
+		return ""
+	}
+	fields, unknown, err := service.BlankSecretFields(content)
+	if err != nil {
+		return "config.json is not one JSON object, nothing was sent"
+	}
+	const refusal = "config.json has empty secret fields (snapshots and the editor never show secrets), " +
+		"writing it would erase the device's secrets. Change settings with Push config keys, nothing was sent"
+	if unknown || (len(fields) > 0 && isOpen == nil) {
+		return refusal
+	}
+	for _, f := range fields {
+		if !service.IsWifiPasswordField(f) {
+			return refusal
+		}
+		if open, err := isOpen(f); err != nil || !open {
+			return refusal
+		}
+	}
+	return ""
+}
+
+// openWifiLookup reports whether a device read showed a WiFi network open after the
+// device's last config change. Nil when the store is off, so the guard refuses every
+// empty secret. in: ctx, device. out: lookup func or nil.
+func (s *Server) openWifiLookup(ctx context.Context, device *service.Device) func(string) (bool, error) {
+	if !s.services.Secrets.Enabled() {
+		return nil
+	}
+	return func(field string) (bool, error) {
+		ssid, ok := strings.CutPrefix(field, service.WifiPasswordPrefix)
+		if !ok || ssid == "" {
+			return false, nil
+		}
+		// A timed-out lookup is an error, which refuses the write.
+		qctx, cancel := context.WithTimeout(ctx, snapshotUpsertTimeout)
+		defer cancel()
+		return s.services.DeviceFiles.OpenNetworkCurrent(qctx, device.TenantID, device.ID, ssid)
+	}
+}
+
 // writeFailure is a failed stagedWrite: the request store status plus the UI message.
+// liveMayHaveChanged is set when the rename was sent and its outcome is unknown.
 type writeFailure struct {
-	status requestStatus
-	msg    string
+	status             requestStatus
+	msg                string
+	liveMayHaveChanged bool
 }
 
 func (f *writeFailure) Error() string { return f.msg }
@@ -526,15 +714,15 @@ func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration
 	}
 	// The shell splits fs.mv and fs.rm args on blanks and globs * and ?.
 	if strings.ContainsAny(path, " \t\r\n*?") {
-		return &writeFailure{reqStatusError, "path must not contain whitespace, * or ?"}
+		return &writeFailure{status: reqStatusError, msg: "path must not contain whitespace, * or ?"}
 	}
 	// FAT rename refuses an existing target, so /sd has no atomic replace.
 	if path == "/sd" || strings.HasPrefix(path, "/sd/") {
-		return &writeFailure{reqStatusError, "files on /sd cannot be replaced atomically, the FAT rename refuses an existing file"}
+		return &writeFailure{status: reqStatusError, msg: "files on /sd cannot be replaced atomically, the FAT rename refuses an existing file"}
 	}
 	staged := path + stagedSuffix
 	if len(staged) >= fwPathCap {
-		return &writeFailure{reqStatusError, fmt.Sprintf("path too long: the device takes paths up to %d bytes, and the staging copy adds %d",
+		return &writeFailure{status: reqStatusError, msg: fmt.Sprintf("path too long: the device takes paths up to %d bytes, and the staging copy adds %d",
 			fwPathCap-1-len(stagedSuffix), len(stagedSuffix))}
 	}
 	total := writeChunkCount(len(content))
@@ -545,11 +733,11 @@ func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration
 		resp, err := send(ctx)
 		switch {
 		case err != nil && ctx.Err() == context.DeadlineExceeded:
-			return nil, &writeFailure{reqStatusTimeout, fmt.Sprintf("%s timed out after %s", label, timeout)}
+			return nil, &writeFailure{status: reqStatusTimeout, msg: fmt.Sprintf("%s timed out after %s", label, timeout)}
 		case err != nil:
-			return nil, &writeFailure{reqStatusError, fmt.Sprintf("%s failed: %v", label, err)}
+			return nil, &writeFailure{status: reqStatusError, msg: fmt.Sprintf("%s failed: %v", label, err)}
 		case !resp.OK:
-			return resp, &writeFailure{reqStatusError, fmt.Sprintf("%s device error: %v", label, resp.Output)}
+			return resp, &writeFailure{status: reqStatusError, msg: fmt.Sprintf("%s device error: %v", label, resp.Output)}
 		}
 		return resp, nil
 	}
@@ -590,8 +778,7 @@ func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration
 			return cleanup(f)
 		}
 		if n, ok := ackedBytes(resp.Output, staged); !ok || n != len(chunk) {
-			return cleanup(&writeFailure{reqStatusError,
-				fmt.Sprintf("%s short write: device replied %q for %d bytes", label, strings.Join(resp.Output, " "), len(chunk))})
+			return cleanup(&writeFailure{status: reqStatusError, msg: fmt.Sprintf("%s short write: device replied %q for %d bytes", label, strings.Join(resp.Output, " "), len(chunk))})
 		}
 	}
 
@@ -609,7 +796,7 @@ func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration
 		if resp.Total != nil {
 			got = strconv.Itoa(*resp.Total) + " bytes"
 		}
-		return cleanup(&writeFailure{reqStatusError, fmt.Sprintf("%s: device holds %s, want %d", label, got, len(content))})
+		return cleanup(&writeFailure{status: reqStatusError, msg: fmt.Sprintf("%s: device holds %s, want %d", label, got, len(content))})
 	}
 
 	label = "rename " + staged + " to " + path
@@ -624,7 +811,7 @@ func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration
 	}
 	// fs.mv prints its failure with ok:true, so only the Renamed line counts.
 	if !outputHasPrefix(resp.Output, "Renamed ") {
-		return cleanup(&writeFailure{reqStatusError, fmt.Sprintf("%s failed: %s", label, strings.Join(resp.Output, " "))})
+		return cleanup(&writeFailure{status: reqStatusError, msg: fmt.Sprintf("%s failed: %s", label, strings.Join(resp.Output, " "))})
 	}
 	return nil
 }
@@ -641,7 +828,8 @@ func renameReadback(timedOut *writeFailure, step writeStep, cleanup func(*writeF
 			return cli.CLIRequest(ctx, topicPrefix, "fs.cat", fmt.Sprintf("%s %d %d", p, off, n))
 		})
 	}
-	unknown := &writeFailure{reqStatusTimeout, timedOut.msg + ", the rename outcome is unknown. Reload the file to check it"}
+	unknown := &writeFailure{status: reqStatusTimeout, msg: timedOut.msg + ", the rename outcome is unknown. Reload the file to check it",
+		liveMayHaveChanged: true}
 	size := len(content)
 	resp, f := read(staged, size, 1)
 	switch {
@@ -692,33 +880,19 @@ func outputHasPrefix(output []string, prefix string) bool {
 	return false
 }
 
-// cliSnapshotRequest is the JSON body for the /admin/devices/{id}/config/snapshot endpoint.
-type cliSnapshotRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-	Source  string `json:"source"`
-}
+// configLoadChunkCap bounds the poll budget of a Load from device, 64 chunks of 2 KB.
+const configLoadChunkCap = 64
 
-// handleAdminDeviceConfigSnapshot upserts a device_files row from content the
-// frontend assembled out of a chunked fs.cat read. The single-shot config.dump
-// path used to do this implicitly via snapshotFromCmdResponse, but on cellular
-// the single-shot publish overflows the SIM7080 AT-bus line buffer when the
-// config JSON gets large. Chunked fs.cat /config.json works around that and
-// this endpoint records the final assembled content as the canonical snapshot.
-//
-//	follow-up.
-//
-// in: writer, request (JSON body with path + content + source). out: JSON ok.
-func (s *Server) handleAdminDeviceConfigSnapshot(w http.ResponseWriter, r *http.Request) {
-	idStr := r.PathValue("id")
-	id, err := uuid.Parse(idStr)
+// handleAdminDeviceConfigLoad enqueues Load from device: a server-side chunked read of /config.json
+// through the device read path, so markers and the snapshot follow it. out: JSON enqueue ack.
+func (s *Server) handleAdminDeviceConfigLoad(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		http.Error(w, "bad device id", http.StatusBadRequest)
 		return
 	}
 	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
 	if err != nil {
-		// A real backend error must not masquerade as 404 (AGENTS.md: fail loud).
 		slog.Error("device lookup failed", "device", id, "err", err)
 		http.Error(w, "device lookup failed", http.StatusInternalServerError)
 		return
@@ -727,30 +901,49 @@ func (s *Server) handleAdminDeviceConfigSnapshot(w http.ResponseWriter, r *http.
 		http.NotFound(w, r)
 		return
 	}
-	var req cliSnapshotRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
-		return
-	}
-	if req.Path == "" || req.Content == "" {
-		http.Error(w, "path and content required", http.StatusBadRequest)
-		return
-	}
-	source := req.Source
-	if source == "" {
-		source = "read"
-	}
 	user := authmw.CurrentUser(r)
-	h := sha256.Sum256([]byte(req.Content))
-	hashHex := hex.EncodeToString(h[:])
-	if err := s.services.DeviceFiles.Upsert(r.Context(), device.TenantID, device.ID, req.Path, req.Content, hashHex, source, &user.ID); err != nil {
-		slog.Error("snapshot upsert failed",
-			"user", user.Email, "device", device.DeviceID, "path", req.Path, "err", err)
-		http.Error(w, "snapshot upsert failed", http.StatusInternalServerError)
+	// One row for the whole read, as the CLI box records each command.
+	s.audit(r.Context(), user, authz.DeviceCommand, service.AuditEntry{
+		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
+		Detail: map[string]any{"device_id": device.DeviceID, "command": "config.load", "payload_bytes": 0},
+	})
+	reqID := s.cliRequests.enqueue()
+	cliCtx := context.WithoutCancel(r.Context())
+	s.goCLI(reqID, "web.config_load", device.DeviceID, func() {
+		s.runConfigLoad(cliCtx, reqID, device, &user.ID)
+	})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(cliEnqueueResponse{
+		RequestID:      reqID.String(),
+		TimeoutSeconds: int(s.cfg.CLIRequestTimeout.Seconds()) * configLoadChunkCap,
+	})
+}
+
+// runConfigLoad stores the read, then hands the raw file to the editor in data.
+// A failed store is logged, the load stands.
+func (s *Server) runConfigLoad(parentCtx context.Context, reqID uuid.UUID, device *service.Device, userID *uuid.UUID) {
+	start, err := s.readStart(parentCtx, device)
+	if err != nil {
+		s.cliRequests.markError(reqID, reqStatusError, "could not start the device read, nothing was sent")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "bytes": len(req.Content)})
+	content, err := s.mqtt.ReadFileChunked(parentCtx, s.deviceTopicPrefix(device), "/"+configSnapshotKey, s.cfg.CLIRequestTimeout)
+	if err != nil {
+		s.cliRequests.markError(reqID, reqStatusError, "load failed: "+err.Error())
+		return
+	}
+	var probe map[string]any
+	if json.Unmarshal([]byte(content), &probe) == nil && probe != nil {
+		ctx, cancel := context.WithTimeout(parentCtx, snapshotUpsertTimeout)
+		h := sha256.Sum256([]byte(content))
+		if err := s.services.DeviceFiles.UpsertFromDevice(ctx, device.TenantID, device.ID, configSnapshotKey,
+			content, hex.EncodeToString(h[:]), "read", userID, start); err != nil {
+			slog.Error("config load upsert failed", "device", device.DeviceID, "err", err)
+		}
+		cancel()
+	}
+	done := true
+	s.cliRequests.markDone(reqID, &mqtt.CLIResponse{Cmd: "fs.cat", OK: true, Done: &done, Data: &content})
 }
 
 // handleAdminDeviceConfigHistory returns the version history for a device+path

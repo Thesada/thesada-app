@@ -28,7 +28,7 @@ services:
     networks: [thesada-broker]
 
   app:
-    image: ghcr.io/thesada/thesada-app:26.11.4
+    image: ghcr.io/thesada/thesada-app:26.11.5
     restart: unless-stopped
     # Shutdown drains requests for up to 15s and admin jobs for up to 18s
     # (jobBudget in cmd/thesada-app/main.go). Keep this above both.
