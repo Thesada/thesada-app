@@ -606,11 +606,8 @@ func (s *Server) runCLI(ctx context.Context, topicPrefix, command, payload strin
 	return "", true
 }
 
-// secretProvisionFields is the ordered storage-field list to provision to a
-// device: the scalars, then one wifi.password:<ssid> per configured network,
-// then the legacy bare wifi.password for any pre-per-SSID stored row. reveal
-// skips the ones that are not stored, so unconfigured / absent fields drop out.
-// out: field list, primary SSID (for the legacy remap; "" if no networks).
+// secretProvisionFields is the ordered storage-field list to provision: the scalars, then one
+// wifi.password:<ssid> per configured network. A bare legacy row is inert. out: fields, primary SSID.
 func secretProvisionFields(ssids []string) ([]string, string) {
 	fields := append([]string{}, service.ScalarSecretFields...)
 	for _, ssid := range ssids {
@@ -618,7 +615,6 @@ func secretProvisionFields(ssids []string) ([]string, string) {
 			fields = append(fields, f)
 		}
 	}
-	fields = append(fields, service.LegacyWifiPassword)
 	primary := ""
 	if len(ssids) > 0 {
 		primary = ssids[0]

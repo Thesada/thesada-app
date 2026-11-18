@@ -36,9 +36,8 @@ import (
 // row per network under the same key, so storage field == firmware field.
 const WifiPasswordPrefix = "wifi.password:"
 
-// LegacyWifiPassword is the bare storage field from before per-SSID support.
-// It carries no SSID, so provisioning appends the device's primary configured
-// SSID; new writes always use the per-SSID form.
+// LegacyWifiPassword is the bare storage field from before per-SSID support. It names no network,
+// so a current read or migrate-legacy-wifi re-keys it to the primary SSID. A bare row left is inert.
 const LegacyWifiPassword = "wifi.password"
 
 // ScalarSecretFields is the closed set of non-WiFi device-config secrets, each
@@ -181,6 +180,9 @@ func (s *SecretService) SetSecret(ctx context.Context, tenantID string, devicePk
 	}
 	if err := checkDeviceSecret(devicePk, field, value); err != nil {
 		return err
+	}
+	if field == LegacyWifiPassword {
+		return fmt.Errorf("secret: %q names no network, store %s<ssid>", LegacyWifiPassword, WifiPasswordPrefix)
 	}
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		// The device read path locks the row before its insert. The same order here, or the two deadlock.
@@ -611,12 +613,6 @@ func (s *SecretService) OriginStatus(ctx context.Context, tenantID string, devic
 // An overridden device is deliberately absent - rotating a default must not
 // disturb a device the operator has pinned.
 //
-// A pre-per-SSID device row (bare "wifi.password", still valid per migration
-// 0024) provisions onto wifi.password:<primary SSID>, the same NVS key a
-// per-SSID default writes. It counts as an override for any per-SSID WiFi
-// field, conservatively: skipping a device that may not have needed skipping
-// costs a re-provision, clobbering a pinned WiFi password costs the network.
-//
 // Devices that have never paired are excluded: there is no NVS to write and no
 // topic to reach them on, and pairing provisions from the store anyway.
 // in: ctx, tenant_id, field. out: device pks, error.
@@ -633,11 +629,9 @@ func (s *SecretService) ProvisionTargets(ctx context.Context, tenantID, field st
 			   AND d.paired_at IS NOT NULL
 			   AND NOT EXISTS (
 			       SELECT 1 FROM device_config_secrets s
-			        WHERE s.device_pk = d.id
-			          AND (s.field = $2
-			               OR ($2 LIKE $3 AND s.field = $4)))
+			        WHERE s.device_pk = d.id AND s.field = $2)
 			 ORDER BY d.last_seen_at DESC NULLS LAST`,
-			tenantID, field, WifiPasswordPrefix+"%", LegacyWifiPassword)
+			tenantID, field)
 		if err != nil {
 			return err
 		}
@@ -672,11 +666,9 @@ func (s *SecretService) ProvisionTargetCounts(ctx context.Context, tenantID stri
 			   AND d.paired_at IS NOT NULL
 			   AND NOT EXISTS (
 			       SELECT 1 FROM device_config_secrets o
-			        WHERE o.device_pk = d.id
-			          AND (o.field = t.field
-			               OR (t.field LIKE $2 AND o.field = $3)))
+			        WHERE o.device_pk = d.id AND o.field = t.field)
 			 WHERE t.device_pk IS NULL
-			 GROUP BY t.field`, tenantID, WifiPasswordPrefix+"%", LegacyWifiPassword)
+			 GROUP BY t.field`, tenantID)
 		if err != nil {
 			return err
 		}

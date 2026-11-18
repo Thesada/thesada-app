@@ -315,6 +315,13 @@ func configChangedAt(t *testing.T, env *servicetest.Env, device *service.Device)
 // openCafeConfig is a device config with cafe open, and a blank write of it.
 const openCafeConfig = `{"wifi":{"networks":[{"ssid":"cafe","password":""}]}}`
 
+// serveNothingInNVS answers secret.info with cafe not in NVS, which the open WiFi guard asks.
+func serveNothingInNVS(fd *mqtttest.FakeDevice) {
+	fd.Handle("secret.info", func(string, []byte) []mqtttest.Response {
+		return mqtttest.OK("wifi.password:cafe     config/none")
+	})
+}
+
 // TestAdminConfigWrite_RefreshesTheSecretStore: a device reported "cafe" open, then an
 // operator writes a password for it. The marker goes, so a blank cafe is refused after.
 func TestAdminConfigWrite_RefreshesTheSecretStore(t *testing.T) {
@@ -343,7 +350,7 @@ func TestAdminConfigWrite_RefreshesTheSecretStore(t *testing.T) {
 	if err != nil || !found || got != "now-locked" {
 		t.Fatalf("store after write = %q found=%v err=%v, want now-locked", got, found, err)
 	}
-	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device)); msg == "" {
+	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device, openCafeConfig)); msg == "" {
 		t.Error("an empty cafe password after the write must be refused")
 	}
 }
@@ -361,11 +368,11 @@ func TestAdminConfigCmd_ConfigRenameMakesMarkersStale(t *testing.T) {
 	ctx := context.Background()
 	device := seedDevice(t, env, tenant, "dev5", prefix)
 	deviceRead(t, env, device, openCafeConfig)
-	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device)); msg != "" {
+	fd := mqtttest.NewFakeDevice(t, broker, prefix)
+	serveNothingInNVS(fd)
+	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device, openCafeConfig)); msg != "" {
 		t.Fatalf("precondition: an open cafe must pass the guard, got %q", msg)
 	}
-
-	fd := mqtttest.NewFakeDevice(t, broker, prefix)
 	serveDeviceFS(fd, map[string]string{
 		"/config.json":     `{}`,
 		"/config.json.bak": `{"wifi":{"networks":[{"ssid":"cafe","password":"locked"}]}}`,
@@ -382,7 +389,7 @@ func TestAdminConfigCmd_ConfigRenameMakesMarkersStale(t *testing.T) {
 	if configChangedAt(t, env, device) == nil {
 		t.Error("the rename left config_changed_at unset")
 	}
-	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device)); msg == "" {
+	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device, openCafeConfig)); msg == "" {
 		t.Error("an empty cafe password after the rename must be refused")
 	}
 	if _, held := s.deviceWrites.Load(device.ID); held {
@@ -409,7 +416,7 @@ func TestAdminConfigWrite_StaleMarkerRefusedAfterRestart(t *testing.T) {
 		t.Fatalf("service.New: %v", err)
 	}
 	restarted := &Server{cfg: env.Cfg, services: fresh}
-	if msg := configWriteRefusal("/config.json", openCafeConfig, restarted.openWifiLookup(ctx, device)); msg == "" {
+	if msg := configWriteRefusal("/config.json", openCafeConfig, restarted.openWifiLookup(ctx, device, openCafeConfig)); msg == "" {
 		t.Error("a restarted server let a stale open marker through")
 	}
 }
@@ -429,9 +436,10 @@ func TestAdminConfigWrite_GuardRunsAgainAtWriteTime(t *testing.T) {
 	deviceRead(t, env, device, openCafeConfig)
 	fd := mqtttest.NewFakeDevice(t, broker, prefix)
 	serveDeviceFS(fd, map[string]string{"/config.json": `{}`})
+	serveNothingInNVS(fd)
 
 	claim, _ := s.claimDeviceWrite(device.ID, time.Minute)
-	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device)); msg != "" {
+	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device, openCafeConfig)); msg != "" {
 		t.Fatalf("precondition: the enqueue check passes, got %q", msg)
 	}
 	if err := env.Services.DeviceFiles.MarkConfigChanged(ctx, tenant, device.ID); err != nil {
@@ -556,7 +564,7 @@ func TestAdminConfigWrite_UnknownRenameMarksConfigChanged(t *testing.T) {
 	if configChangedAt(t, env, device) == nil {
 		t.Fatal("an unknown rename left config_changed_at unset")
 	}
-	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device)); msg == "" {
+	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device, openCafeConfig)); msg == "" {
 		t.Error("the marker from before the unknown rename still passes the guard")
 	}
 }
@@ -654,7 +662,7 @@ func TestAdminConfigWrite_FailedMarkAfterRenameKeepsMarkersStale(t *testing.T) {
 	if body, _ := dfs.file("/config.json"); body != written {
 		t.Fatalf("/config.json = %q, want the rename landed", body)
 	}
-	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device)); msg == "" {
+	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device, openCafeConfig)); msg == "" {
 		t.Error("a marker of the file the rename replaced passes the guard")
 	}
 }
@@ -707,6 +715,7 @@ func TestAdminConfigLoad_RefreshesMarkers(t *testing.T) {
 		strings.Repeat("x", 300) + `"}`
 	fd := mqtttest.NewFakeDevice(t, broker, prefix)
 	fd.ServeChunkedFile("/config.json", live, 100)
+	serveNothingInNVS(fd)
 
 	reqID := s.cliRequests.enqueue()
 	s.runConfigLoad(ctx, reqID, device, nil)
@@ -717,7 +726,7 @@ func TestAdminConfigLoad_RefreshesMarkers(t *testing.T) {
 	if n := fd.Calls("fs.cat"); n < 4 {
 		t.Errorf("fs.cat calls = %d, want the file read in chunks", n)
 	}
-	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device)); msg != "" {
+	if msg := configWriteRefusal("/config.json", openCafeConfig, s.openWifiLookup(ctx, device, openCafeConfig)); msg != "" {
 		t.Errorf("after a load cafe must pass the guard again, got %q", msg)
 	}
 	snap, err := env.Services.DeviceFiles.Latest(ctx, tenant, device.ID, "config.json")

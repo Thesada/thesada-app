@@ -275,7 +275,7 @@ func TestAdminDeviceSecretsClearDevice(t *testing.T) {
 	if loc := post("not.a.field"); !strings.Contains(loc, flashSecretField.query()) {
 		t.Errorf("Location = %q, want %s", loc, flashSecretField.query())
 	}
-	// No stored config, so the legacy bare key has no SSID to name.
+	// The bare legacy key is inert and names no device field.
 	if loc := post("wifi.password"); !strings.Contains(loc, flashSecretClearNVSNoSSID.query()) {
 		t.Errorf("legacy: Location = %q, want %s", loc, flashSecretClearNVSNoSSID.query())
 	}
@@ -303,7 +303,7 @@ func TestAdminDeviceSecretsClearDevice(t *testing.T) {
 }
 
 // TestAdminDeviceSecretsClearDevice_DropsWifiRow: a verified clear of a WiFi password drops
-// its device rows, so the next read marks the network open. An unverified or failed one keeps them.
+// its device rows. An unverified or failed one keeps them. Markers are file facts either way.
 func TestAdminDeviceSecretsClearDevice_DropsWifiRow(t *testing.T) {
 	env := servicetest.Start(t)
 	broker := mqtttest.StartMosquitto(t)
@@ -315,7 +315,7 @@ func TestAdminDeviceSecretsClearDevice_DropsWifiRow(t *testing.T) {
 	prefix := "thesada/" + tenant + "/dev1"
 	device := seedDevice(t, env, tenant, "dev1", prefix)
 	for f, v := range map[string]string{
-		"wifi.password:home": "pw", service.LegacyWifiPassword: "old", "wifi.password:two words": "tw",
+		"wifi.password:home": "pw", "wifi.password:two words": "tw",
 	} {
 		if err := env.Services.Secrets.SetSecret(ctx, tenant, device.ID, f, v); err != nil {
 			t.Fatalf("SetSecret %s: %v", f, err)
@@ -376,8 +376,8 @@ func TestAdminDeviceSecretsClearDevice_DropsWifiRow(t *testing.T) {
 	}
 
 	read()
-	if open("home") || open("two words") {
-		t.Fatal("a network with a stored password is marked open before any clear")
+	if !open("home") || !open("two words") {
+		t.Fatal("both networks read empty in the file, want both marked open whatever the store holds")
 	}
 
 	fd := mqtttest.NewFakeDevice(t, broker, prefix)
@@ -387,8 +387,8 @@ func TestAdminDeviceSecretsClearDevice_DropsWifiRow(t *testing.T) {
 	if loc := post("wifi.password:home"); !strings.HasSuffix(loc, "?"+flashSecretClearedNVS.query()) {
 		t.Fatalf("verified clear: Location = %q, want %s", loc, flashSecretClearedNVS.query())
 	}
-	if n := rows("wifi.password:home") + rows(service.LegacyWifiPassword); n != 0 {
-		t.Errorf("verified clear kept %d store rows for the primary SSID, want 0", n)
+	if n := rows("wifi.password:home"); n != 0 {
+		t.Errorf("verified clear kept %d store rows for home, want 0", n)
 	}
 	if row := lastAudit(t, env, "device_secret.clear_nvs"); row.detail["store_dropped"] != true {
 		t.Errorf("audit detail = %v, want store_dropped true", row.detail)
@@ -416,10 +416,7 @@ func TestAdminDeviceSecretsClearDevice_DropsWifiRow(t *testing.T) {
 	}
 
 	read()
-	if !open("home") {
-		t.Error("after a verified clear the next read does not mark home open")
-	}
-	if open("two words") {
-		t.Error("after an unverified clear the next read marks two words open")
+	if !open("home") || !open("two words") {
+		t.Error("a clear changed a file fact")
 	}
 }

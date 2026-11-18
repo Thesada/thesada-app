@@ -4,7 +4,7 @@ The load-bearing rules this application relies on. Every PR that
 touches a listed area must keep these true. Violations require this
 file to be updated with a justification, not silent landing.
 
-Dated 2026-11-17 (a verified Clear on device of a WiFi password drops its store rows, so the next read marks the network open. A chunked `fs.cat` read fails on a reply without the offset it asked for or for another one. Same day, earlier: the mark before a config write or command stamps the end of its claim, so a read during it stays stale when the closing mark fails, a CLI `fs.*` with a glob counts as a config change, a device-level legacy WiFi password counts as stored for the primary SSID, `SetSecret` locks the device row before its insert, and a `secret.info` key two fields share is not verified. Same day, earlier: an empty WiFi password in a device read is an open marker only when no password is stored for that SSID, a reassign to the device's own tenant writes nothing, a channel edit locks the row before it reads the old address, and the config write worker renews its claim after the guard). Previously 2026-11-16 (a device read of config.json only fills gaps in the secret store and never overwrites a stored secret, an open WiFi network is a marker in `device_open_networks`, staleness is `devices.config_changed_at` in the database, a stale read writes nothing, provisioning never sends an empty value, and Clear on device sends `secret.clear`). Previously 2026-11-11 (pairing a device into a tenant with no alert subscription subscribes the claiming user, else the oldest tenant admin, else the oldest user, to all devices at warn on their account email, once per tenant. The devices and alerts pages say so while a tenant with a paired device has no subscriber on an enabled channel. `cert.set` and `secret.set` travel in the req_id envelope and correlate on it, only `fs.write` and `fs.append` chunks stay raw. A dynsec reply is matched on its correlationData before it takes the waiter's slot. The retained-topics manifest is cached from a live delivery too. Every drift-pull CLI round trip runs under `THESADA_CLI_REQUEST_TIMEOUT`. A page renders into a buffer and is sent only when the whole template ran, so a template error answers a clean 500, and an error status page keeps its HTML Content-Type. Every admin redirect carries a registered flash code, the user edit page renders them, and the settings page names every `err` code it is sent. A write to the snapshot key `config.json` goes to the device as `/config.json`. `secret.info` fields keep SSIDs with spaces). Previously 2026-11-10 (templates carry no inline event handlers, the nonce CSP blocks them: forms confirm through `data-confirm` and a toggle submits through `data-autosubmit`, both handled by the nonced layout script). Previously 2026-11-10 (an operator handover in the tenant rules editor needs at least one rule: a save that parses to zero rules over a non-empty operator script answers 409 and the operator's script stays, and the editor seeds the rules block for an operator on a managed slot). Previously 2026-11-10 (a trend rule accepts a slash-separated metric such as `current/house_pump`, the name MQTT ingest stores for a sensor sub-path). Previously 2026-11-09 (a tenant rules editor at `/devices/{id}/rules` takes Blockly JSON only: the server parses it against a closed block set (`pkg/rulesgen`), generates the Lua, quotes every user string as a Lua literal, and pushes only Lua it generated again from the saved workspace. A tenant admin or the device owner may save and push, other tenant users only view. A slot an operator saved from the admin editor is neither shown nor overwritten by a tenant, and an operator saving in the tenant editor hands it over). Previously 2026-11-09 (a numeric reading checks the tenant's trend rules in one statement on ingest, a rule raises one `trend.<metric>` alert per episode, raises again after its window and clears when the move ends). Previously 2026-11-08 (the account's own email channel follows `users.email`: its target is read at send time, so an email change moves alerts with it, and only label and enabled are editable on it. User-added email channels stay plain targets). Previously 2026-11-08 (an alert goes to the user's enabled notification channel rows, once per channel. 0043 turned the account email, `users.telegram_chat_id` and each webhook destination into channel rows and linked every subscription. A telegram rule without a chat id stays unlinked, as it never sent. The old columns stay one release, read-only apart from the webhook mirror kept for a rollback). Previously 2026-11-08 (a password or magic-link login whose account holds a passkey challenges before any session, the web page offers the key, the code or both, and the JSON logins answer `passkey_required` for a passkey-only account instead of skipping the factor. A passkey assertion whose sign count did not grow is refused, and the guarded counter `UPDATE` is the single winner of two parallel assertions. Each ceremony is server side with a 5-minute TTL and is used once. Adding or removing a key re-checks the password). Previously 2026-11-08 (tenant delete reads the tenant uuid again after listing its devices and refuses a tenant created again under the slug, so a replacement's devices never enter the cascade. A link mail's account lookup and token insert share a 10 s deadline, so a stalled database frees its slot. The per-device delete lock lives only while held or awaited, and a job canceled while waiting for it starts nothing. A rename readback chunk must answer the offset asked for. 0041 fills only certs issued at or after the claim it takes the key from. A bulk OTA publish that timed out is reported unknown, not failed). Previously 2026-11-08 (a device delete holds a per-device lock from its fresh ownership read through the DB delete, and a reassign of that device is refused meanwhile. A broker identity lookup from a stale snapshot of an unpinned device is `ErrBrokerSnapshotStale`, so teardown deletes neither tenant's client and alerts. A timed-out `fs.mv` counts as landed only when the destination's bytes equal the content, and a write worker renews its claim before its first step or aborts. The boot orphan sweep has one 30 s budget across its retries. Link mails run at most 16 at once and drain on shutdown. Form bodies are capped by the same media type parser `ParseForm` uses. 0041 takes a key only from an enrollment claimed into the device's own tenant). Previously 2026-11-05 (a device's broker identity is recorded under the tenant it was issued in, every teardown uses that tenant, and a second device row can hold neither that identity nor its live CN). Previously 2026-11-05 (admin enrollment reset keeps a claim another tenant backs and clears orphan claims, boot sweeps those orphans under timeouts, and shutdown lets the device in progress finish before MQTT and the pools close). Previously 2026-11-05 (a device file write runs one per device, stages in `<path>.new`, and renames into place only after every chunk ack and the committed size check pass, so a failed or overlapping save never truncates `/config.json`). Previously 2026-11-05 (a retained sensor delivery is dropped before it can bump last_seen_at, clear absence or store telemetry, and every goroutine that device or request input reaches runs under `pkg/safego`, which logs a panic as `goroutine.panic` with its stack, and an alert dispatch that panics counts as one delivery attempt). Previously 2026-11-03 (bulk delete and tenant delete run their device cascade as a job on `/admin/jobs/{id}` that the page polls, so a long fleet cannot hit the edge proxy timeout). Previously 2026-11-03 (a broker teardown that fails on single, bulk or tenant delete is flagged on that device's `device.delete` audit row and on the page, because the device alert cascades away with the row, and the tenant delete form carries the serial recovery override). Previously 2026-11-03 (tenant delete walks every device through the device delete cascade first and the service refuses a tenant that still has devices, so a deleted tenant's serials answer revoked and its broker clients are torn down or named in the audit row). Previously 2026-10-06 (a tenant at its abuse cap cannot add a user, a new device, or another alert that day; updating a device that already exists still lands, and zero turns that one cap off). Previously 2026-09-29 (admin list, pair, and secret pages render flash from a registered code, so a crafted query cannot put words on the page). Previously 2026-09-29 (a device asks POST /devices/enroll/status with a signed serial and is told active, revoked, or unknown; only revoked for that serial wipes the cert, and a deleted device's serial is kept so the answer survives the row). Previously 2026-09-28 (the owner of a claimed device can revoke it; that path clears enrollment under a row lock that refuses another tenant's claim, before the cert revoke and cert.clear, and never hands the device to the fallback credential). Previously 2026-09-26 (ten wrong claim-form codes lock that device id until the earliest verified row announces the token already stored for it; an unverified or later key does not clear the lock). Previously 2026-09-25 (a device is told THESADA_MQTT_DEVICE_HOST, never the app's broker URL; a new claim token is stored as an HMAC when THESADA_CLAIM_HASH_KEY is set and a legacy SHA-256 still matches). Previously 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, an address rejection does not spend the client's cap, and the two caps are reserved together). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
+Dated 2026-11-18 (one state model for device WiFi credentials: an open marker is a fact about `config.json`, the write guard also asks a correlated `secret.info` that NVS holds nothing for the SSID, every device reply that feeds a stored fact needs the echoed `req_id`, a bare legacy `wifi.password` row is re-keyed once to the primary SSID and inert afterwards, and Clear on device refuses a tenant default and reports a failed row drop). Previously 2026-11-17 (a chunked `fs.cat` read fails on a reply without the offset it asked for or for another one. Same day, earlier: the mark before a config write or command stamps the end of its claim, so a read during it stays stale when the closing mark fails, a CLI `fs.*` with a glob counts as a config change, `SetSecret` locks the device row before its insert, and a `secret.info` key two fields share is not verified. Same day, earlier: a reassign to the device's own tenant writes nothing, a channel edit locks the row before it reads the old address, and the config write worker renews its claim after the guard). Previously 2026-11-16 (a device read of config.json only fills gaps in the secret store and never overwrites a stored secret, an open WiFi network is a marker in `device_open_networks`, staleness is `devices.config_changed_at` in the database, a stale read writes nothing, provisioning never sends an empty value, and Clear on device sends `secret.clear`). Previously 2026-11-11 (pairing a device into a tenant with no alert subscription subscribes the claiming user, else the oldest tenant admin, else the oldest user, to all devices at warn on their account email, once per tenant. The devices and alerts pages say so while a tenant with a paired device has no subscriber on an enabled channel. `cert.set` and `secret.set` travel in the req_id envelope and correlate on it, only `fs.write` and `fs.append` chunks stay raw. A dynsec reply is matched on its correlationData before it takes the waiter's slot. The retained-topics manifest is cached from a live delivery too. Every drift-pull CLI round trip runs under `THESADA_CLI_REQUEST_TIMEOUT`. A page renders into a buffer and is sent only when the whole template ran, so a template error answers a clean 500, and an error status page keeps its HTML Content-Type. Every admin redirect carries a registered flash code, the user edit page renders them, and the settings page names every `err` code it is sent. A write to the snapshot key `config.json` goes to the device as `/config.json`. `secret.info` fields keep SSIDs with spaces). Previously 2026-11-10 (templates carry no inline event handlers, the nonce CSP blocks them: forms confirm through `data-confirm` and a toggle submits through `data-autosubmit`, both handled by the nonced layout script). Previously 2026-11-10 (an operator handover in the tenant rules editor needs at least one rule: a save that parses to zero rules over a non-empty operator script answers 409 and the operator's script stays, and the editor seeds the rules block for an operator on a managed slot). Previously 2026-11-10 (a trend rule accepts a slash-separated metric such as `current/house_pump`, the name MQTT ingest stores for a sensor sub-path). Previously 2026-11-09 (a tenant rules editor at `/devices/{id}/rules` takes Blockly JSON only: the server parses it against a closed block set (`pkg/rulesgen`), generates the Lua, quotes every user string as a Lua literal, and pushes only Lua it generated again from the saved workspace. A tenant admin or the device owner may save and push, other tenant users only view. A slot an operator saved from the admin editor is neither shown nor overwritten by a tenant, and an operator saving in the tenant editor hands it over). Previously 2026-11-09 (a numeric reading checks the tenant's trend rules in one statement on ingest, a rule raises one `trend.<metric>` alert per episode, raises again after its window and clears when the move ends). Previously 2026-11-08 (the account's own email channel follows `users.email`: its target is read at send time, so an email change moves alerts with it, and only label and enabled are editable on it. User-added email channels stay plain targets). Previously 2026-11-08 (an alert goes to the user's enabled notification channel rows, once per channel. 0043 turned the account email, `users.telegram_chat_id` and each webhook destination into channel rows and linked every subscription. A telegram rule without a chat id stays unlinked, as it never sent. The old columns stay one release, read-only apart from the webhook mirror kept for a rollback). Previously 2026-11-08 (a password or magic-link login whose account holds a passkey challenges before any session, the web page offers the key, the code or both, and the JSON logins answer `passkey_required` for a passkey-only account instead of skipping the factor. A passkey assertion whose sign count did not grow is refused, and the guarded counter `UPDATE` is the single winner of two parallel assertions. Each ceremony is server side with a 5-minute TTL and is used once. Adding or removing a key re-checks the password). Previously 2026-11-08 (tenant delete reads the tenant uuid again after listing its devices and refuses a tenant created again under the slug, so a replacement's devices never enter the cascade. A link mail's account lookup and token insert share a 10 s deadline, so a stalled database frees its slot. The per-device delete lock lives only while held or awaited, and a job canceled while waiting for it starts nothing. A rename readback chunk must answer the offset asked for. 0041 fills only certs issued at or after the claim it takes the key from. A bulk OTA publish that timed out is reported unknown, not failed). Previously 2026-11-08 (a device delete holds a per-device lock from its fresh ownership read through the DB delete, and a reassign of that device is refused meanwhile. A broker identity lookup from a stale snapshot of an unpinned device is `ErrBrokerSnapshotStale`, so teardown deletes neither tenant's client and alerts. A timed-out `fs.mv` counts as landed only when the destination's bytes equal the content, and a write worker renews its claim before its first step or aborts. The boot orphan sweep has one 30 s budget across its retries. Link mails run at most 16 at once and drain on shutdown. Form bodies are capped by the same media type parser `ParseForm` uses. 0041 takes a key only from an enrollment claimed into the device's own tenant). Previously 2026-11-05 (a device's broker identity is recorded under the tenant it was issued in, every teardown uses that tenant, and a second device row can hold neither that identity nor its live CN). Previously 2026-11-05 (admin enrollment reset keeps a claim another tenant backs and clears orphan claims, boot sweeps those orphans under timeouts, and shutdown lets the device in progress finish before MQTT and the pools close). Previously 2026-11-05 (a device file write runs one per device, stages in `<path>.new`, and renames into place only after every chunk ack and the committed size check pass, so a failed or overlapping save never truncates `/config.json`). Previously 2026-11-05 (a retained sensor delivery is dropped before it can bump last_seen_at, clear absence or store telemetry, and every goroutine that device or request input reaches runs under `pkg/safego`, which logs a panic as `goroutine.panic` with its stack, and an alert dispatch that panics counts as one delivery attempt). Previously 2026-11-03 (bulk delete and tenant delete run their device cascade as a job on `/admin/jobs/{id}` that the page polls, so a long fleet cannot hit the edge proxy timeout). Previously 2026-11-03 (a broker teardown that fails on single, bulk or tenant delete is flagged on that device's `device.delete` audit row and on the page, because the device alert cascades away with the row, and the tenant delete form carries the serial recovery override). Previously 2026-11-03 (tenant delete walks every device through the device delete cascade first and the service refuses a tenant that still has devices, so a deleted tenant's serials answer revoked and its broker clients are torn down or named in the audit row). Previously 2026-10-06 (a tenant at its abuse cap cannot add a user, a new device, or another alert that day; updating a device that already exists still lands, and zero turns that one cap off). Previously 2026-09-29 (admin list, pair, and secret pages render flash from a registered code, so a crafted query cannot put words on the page). Previously 2026-09-29 (a device asks POST /devices/enroll/status with a signed serial and is told active, revoked, or unknown; only revoked for that serial wipes the cert, and a deleted device's serial is kept so the answer survives the row). Previously 2026-09-28 (the owner of a claimed device can revoke it; that path clears enrollment under a row lock that refuses another tenant's claim, before the cert revoke and cert.clear, and never hands the device to the fallback credential). Previously 2026-09-26 (ten wrong claim-form codes lock that device id until the earliest verified row announces the token already stored for it; an unverified or later key does not clear the lock). Previously 2026-09-25 (a device is told THESADA_MQTT_DEVICE_HOST, never the app's broker URL; a new claim token is stored as an HMAC when THESADA_CLAIM_HASH_KEY is set and a legacy SHA-256 still matches). Previously 2026-09-23 (magic-link limiter checks the client IP before the address cap, that cap sits above one client's budget, an address rejection does not spend the client's cap, and the two caps are reserved together). Previously 2026-09-05 (retained MQTT deliveries never act as live; legacy cli/response tap removed; revoke and delete gate on the recovery path. Prior: device CLI pulls gated on pairing state; hands-off
 recovery refuses to run when the shared fallback credential is not
 connectable; unauthenticated device enrollment surface; device-facing
 enrollment endpoints address the row by its primary key and the claim
@@ -60,7 +60,7 @@ push (`POST /devices/{id}/rules/push`), which runs the same `runCLIWrite`. One r
 at a time. A second write to a device while one runs gets 409 before
 anything is sent. The chunks go to `<path>.new`, never to `<path>`. The
 app sends `fs.mv <path>.new <path>` only after every chunk ack named the
-staged path with its full byte count and `fs.cat` reports a committed
+staged path with its full byte count and a correlated `fs.cat` reports a committed
 size equal to the content, and LittleFS applies that rename as one
 metadata commit. A failed, short or unanswered step removes
 `<path>.new` with `fs.rm` and marks the request failed, so
@@ -86,6 +86,50 @@ How enforced: `claimDeviceWrite` and `stagedWrite` in
 (command sequence, every failure step, ack path, size check, `/sd`) and
 `admin_config_integration_test.go` (the same over a real broker, plus
 the 409 for an overlapping write).
+
+### A stored device reply echoes its request id
+
+A device reply that feeds a stored fact (a snapshot, a store row, a marker,
+a row delete, a write-landed decision) counts only when it echoes the
+request's `req_id`. The rule lives in one place: `CLIRequest` sets
+`CLIResponse.Correlated` when every page of the reply carried this
+request's id, and `CLIRequestStateful` / `CLIRequestFieldsStateful` return
+`ErrUncorrelated` otherwise. A payload that cannot travel in the envelope
+is never sent on the stateful path.
+
+| Caller | On an uncorrelated reply |
+|---|---|
+| every `ReadFileChunked` chunk (drift script pull, Load from device) | the read fails, nothing stored |
+| drift `config.dump` | nothing stored |
+| CLI box `config.dump` | the box shows the reply, no snapshot |
+| `secret.info` after Provision to device or a blank-SSID clear, and in the write guard | not verified, the guard refuses |
+| `secret.clear` and the empty `secret.set` of Clear on device | not confirmed, the store row stays (`nvs_clear_uncorrelated`) |
+| the write's size check of `<path>.new` | the write fails, no rename |
+| the readback after a timed-out `fs.mv` | the outcome is unknown |
+
+Raw `fs.write` and `fs.append` chunks stay matched on the command name:
+JSON escaping would grow a chunk past the device input buffer. The secrets
+page's own `secret.info` display read accepts any reply. Firmware without
+the `req_id` echo gets display-only CLI.
+
+How verified: `pkg/mqtt/correlation_integration_test.go`
+(`an_uncorrelated_config_dump_is_not_stored`,
+`an_uncorrelated_fs_cat_chunk_fails_the_read`,
+`a_correlated_read_still_stores`,
+`cli_request_stateful_refuses_an_uncorrelated_reply`),
+`pkg/web/correlation_integration_test.go`
+(`cli_box_config_dump_shows_output_but_stores_no_snapshot`,
+`uncorrelated_secret_info_verifies_nothing`,
+`uncorrelated_secret_clear_keeps_the_store_row`,
+`uncorrelated_secret_info_after_a_blank_ssid_clear_keeps_the_row`,
+`uncorrelated_size_check_fails_the_write`),
+`pkg/web/admin_config_write_test.go`
+(`TestStagedWrite_UncorrelatedSizeCheckDoesNotRename`, the readback case
+`destination chunk without req_id`), `pkg/mqtt/paged_response_test.go`
+(`TestAwaitPagedCLIResponse_MixedReqIDsClearTheID`).
+
+Source: `pkg/mqtt/mqtt_cli.go`, `pkg/mqtt/mqtt_snapshot.go`,
+`pkg/web/admin_config.go`, `pkg/web/admin_secrets.go`.
 
 ### The device enrollment surface is an oracle for nothing
 
@@ -823,18 +867,19 @@ a default is one write plus a fan-out; devices with an override are
 excluded from that fan-out by `ProvisionTargets`, so a pinned device is
 never quietly re-pointed by a tenant-level rotation.
 
-The legacy bare `wifi.password` is device-level only, on both sides:
-`SetTenantSecret` refuses to write it and `Resolve` refuses to inherit
-it, so a row planted by an older build or by direct SQL stays inert. The
-reason is that the bare key carries no SSID, so provisioning appends the
-DEVICE's primary SSID (`FirmwareSecretField`) - a tenant-level row would
-land on `wifi.password:<ssid>`, the same NVS key a device's own per-SSID
-override writes, and clobber it. The mirror case is handled in
-`ProvisionTargets` / `ProvisionTargetCounts`: a device holding a bare row
-counts as overridden for ANY per-SSID WiFi default, conservatively,
-because that row provisions onto the same key. Tenant WiFi defaults are
-therefore always per-SSID, and the operator names the network on the
-tenant page rather than typing a storage key.
+The legacy bare `wifi.password` names no network. A current device read
+re-keys a device's bare row once to `wifi.password:<primary SSID>` of that
+read: decrypt under the old AAD, encrypt under the new one, delete the bare
+row, in one tx under the device row lock. `thesada-app migrate-legacy-wifi`
+does the same from each device's stored `config.json`. When a per-SSID row
+for the primary already exists it wins and the bare row is deleted, logged
+with device and field. A bare row left behind (no SSID known, or it does not
+decrypt) is inert: not provisioned, not counted by reads or
+`ProvisionTargets` / `ProvisionTargetCounts`, listed on the secrets page for
+Clear. `SetSecret` and `SetTenantSecret` refuse the bare field, and `Resolve`
+never inherits a bare tenant row planted by an older build or by SQL.
+Tenant WiFi defaults are always per-SSID, and the operator names the network
+on the tenant page rather than typing a storage key.
 
 Config hygiene: the write path never persists plaintext secrets in
 `device_files` / `device_file_history` (legacy pre-backfill
@@ -927,56 +972,87 @@ Source: `pkg/secrets/secrets.go`, `pkg/service/secret.go`
 (`service.New` error surface, `backfill-secrets` + `rotate-kek`),
 `docs/security.md` (operator runbook).
 
-### A device read only fills gaps in the secret store, and an open WiFi network is a marker, never a secret
+### Device WiFi credentials: one state model over NVS, config.json and the app store
 
 The firmware resolves every secret from NVS first and falls back to
 `config.json` only when NVS is empty, and `secret.set <field> ""` clears
-NVS. So `config.json` is not the device's effective secret, and the app
-store mirrors NVS, not the file (C1, #99).
+NVS. So `config.json` is not the device's effective secret: the app store
+mirrors NVS, an open marker describes the file, and the write guard asks
+the device about NVS live (C1, #99, Q1 to Q6 of the 2026-11-18 design pass).
+
+Facts, one per place:
+
+| Place | Fact the app holds | Written by | Current when |
+|---|---|---|---|
+| Device NVS | nothing stored. Asked live through `secret.info` | provisioning (`secret.set`), Clear on device | the correlated `secret.info` answer of this request |
+| Device `config.json` | an open marker in `device_open_networks` (device, SSID, `seen_at`, source) per SSID whose password the file holds as `""`, plus the blanked snapshot | a current device read: drift pull, CLI box `config.dump`, Load from device, a confirmed write | `seen_at` newer than `devices.config_changed_at` |
+| App store `device_config_secrets` | a device override or a tenant default per `wifi.password:<ssid>`, never `""` | Set on the secrets page, gap fill from a read, legacy re-key | always. It is what provisioning sends |
+
+Transitions:
+
+| Event | NVS | `config.json` fact | App store |
+|---|---|---|---|
+| Current device read | unchanged | markers replaced by exactly the read's `""` SSIDs, whatever the store holds | gap fill only for a field with no device row and no tenant default. A bare legacy row is re-keyed to the read's primary SSID first |
+| Stale read (started at or before `config_changed_at` or before `config_read_at`) | unchanged | nothing written | nothing written |
+| Set on the secrets page | unchanged until provisioned | unchanged | device row upserted. `""` and the bare `wifi.password` refused |
+| Provision (pair, Provision to device, tenant rotation) | `secret.set` per resolved value, never `""` | unchanged | unchanged. Provision to device then checks `secret.info` |
+| Clear on device, verified | field cleared | unchanged | the device's one row for the field dropped in one tx. A failed drop is flashed and audited `store_dropped: false` |
+| Clear on device over a tenant default | refused, nothing sent | unchanged | unchanged |
+| Clear (override) on the secrets page | unchanged | unchanged | device row deleted, the device falls back to the tenant default |
+| `config.json` write, config-changing CLI command, rename | maybe changed | `config_changed_at` stamped, every marker stale until a newer read. A confirmed write refreshes as a read | a confirmed write refreshes as a read |
+| SSID change on the device | unchanged | the next current read marks the new set | rows stay under their own SSID. Only a bare row moves, and only once |
+| `migrate-legacy-wifi` | unchanged | unchanged | each bare row re-keyed to the stored config's primary SSID, dropped beside an existing per-SSID row, else left inert |
+| Device reassign | unchanged | markers move to the new tenant | device-level secrets deleted (AAD-bound to the old tenant) |
+
+Rules:
 
 | Rule | Why |
 |---|---|
-| A device read of `config.json` (drift pull, raw `config.dump`, Load from device, a confirmed write) stores a secret only for a field the store has nothing for: no device row and no tenant default the device inherits | a stale plaintext or an explicit `""` in `config.json` must never replace the value NVS holds. A device on the tenant default stays inherited |
+| A device read stores a secret only for a field the store has nothing for: no device row and no tenant default the device inherits | a stale plaintext or an explicit `""` in `config.json` must never replace the value NVS holds. A device on the tenant default stays inherited |
 | `device_config_secrets` never holds `""`: `SetSecret` and `SetTenantSecret` return `ErrEmptySecret`, and a CHECK refuses a 28-byte blob (the AES-GCM sealing of nothing) | an empty value used to count as an override, so tenant rotation skipped the device and provisioning pushed the empty value |
-| An open network is a row in `device_open_networks` (device, SSID, `seen_at`, source). A current read replaces the device's markers with exactly the networks it shows with an explicit `""` password and no stored password (device row or tenant default, and for the first configured SSID the device-level legacy `wifi.password`, which provisioning sends there) | a non-empty password for that SSID in a current read removes its marker. A stored password is in NVS, which the firmware reads before the file's `""` |
-| The `config.json` write guard passes an empty WiFi password only for a marker with `seen_at` newer than `devices.config_changed_at` | the marker must describe the config the write replaces |
+| A marker is a fact about the file only. `SetSecret`, provisioning and Clear on device never touch markers | what NVS holds is the guard's own question, asked at write time |
+| The `config.json` write guard passes an empty WiFi password only for a current marker and a correlated `secret.info` reporting nothing in NVS for that field, one round trip per check. NVS holding it, `secret.info` failing, answering without the `req_id` or not telling two SSIDs apart refuses with its own message | the marker describes the file the write replaces, NVS is what the firmware reads first |
+| The guard runs at enqueue and again in the worker under the claim, right before the first chunk, each time with its own `secret.info`. A marker lookup has a 10 s deadline, `secret.info` 5 s, and the worker renews its claim after the guard or sends nothing | a marker can go stale and NVS can gain a password while a write waits, and a stalled lookup must not let a second write take the device |
 | `config_changed_at` is set by every `config.json` write (after the write-time guard and before the first chunk, nothing is sent when that fails, and again once the rename is confirmed, before its own refresh), every config-changing CLI command (before it is sent and again after it answers) and a failed or unknown rename. The mark before sending stamps now plus the claim's lifetime, the later marks stamp now | a write whose refresh then fails still leaves every older marker stale, and a read of the old file during the change stays stale when the mark after it fails, so the guard fails closed |
+| A device read carries its start, taken from the database clock before the request goes out. A stale read writes nothing and is logged as `device.read.stale_dropped` | the check, the legacy re-key, the gap fill, the markers and the snapshot run in one transaction under `SELECT ... FOR UPDATE` on the device row, so a change cannot land between them, and a refresh that fails part way rolls back whole |
 | A failed store after a confirmed `config.json` write marks the request failed. For any other file the snapshot row is not load-bearing: the failure is logged and the write stands, so the rules push still reloads | the guard depends on the `config.json` refresh, nothing depends on a script snapshot |
-| A device read carries its start, taken from the database clock before the request goes out. A read that started at or before `config_changed_at`, or before `devices.config_read_at` (the newest stored read), writes nothing: no gap fill, no marker, no snapshot. Logged as `device.read.stale_dropped` | the check and every write run in one transaction under `SELECT ... FOR UPDATE` on the device row, so a change cannot land between them, and a refresh that fails part way rolls back whole |
 | A config-changing CLI command (`config.*` apart from `config.dump`, `fs.format`, any `fs.*` naming `config.json` or holding `*` or `?`, since a glob in a `/.` directory reaches past the firmware's root skip) takes the device write claim, 409 while a write holds it | a staged write that already passed the guard cannot be overtaken by a command that sets a password |
-| The guard runs at enqueue and again in the worker under the claim, right before the first chunk. Each marker lookup has a 10 s deadline, and the worker renews its claim after the guard or sends nothing | a marker can go stale while a write waits, and a stalled lookup must not let a second write take the device |
-| Provisioning (pair, Provision to device, tenant rotation) never sends an empty or unset value, and `pushSecret` refuses `""` itself | `secret.set <field> ""` clears NVS and can take a remote device off WiFi |
-| Clearing a field on the device is its own action, Clear on device on the secrets page, behind a confirm, only with the store on, audited as `device_secret.clear_nvs`. The app store keeps every other field. A verified clear of a WiFi password (the `secret cleared` line, or `secret.info` not reporting it in NVS) deletes the device's row for that field, and for the primary SSID the legacy bare `wifi.password` row, so the next read marks the network open. An unverified or failed clear keeps the rows, and the audit row carries `store_dropped`. A field without blanks goes as `secret.clear <field>`, and only its `secret cleared` line counts. A field whose SSID holds a blank goes as binary `secret.set` with an empty value (`Secret::set` clears on empty), then `secret.info` must not report it in NVS | the device shell splits `secret.clear` on blanks, and every `secret.set` reply says stored, a clear too |
+| The bare legacy `wifi.password` row is re-keyed once to `wifi.password:<primary SSID>`: decrypt under the old AAD, encrypt under the new one, delete the bare row, in one tx under the device row lock. A per-SSID row already there wins and the bare row is deleted, logged with device and field. A bare row left (no SSID known, or it does not decrypt) is inert: not provisioned, not read, no override in `ProvisionTargets` / `ProvisionTargetCounts`, listed on the secrets page for Clear, refused by Clear on device | the bare key names no network, and three operations each used to infer one |
+| Provisioning never sends an empty or unset value, and `pushSecret` refuses `""` itself | `secret.set <field> ""` clears NVS and can take a remote device off WiFi |
+| Clear on device is its own action on the secrets page, behind a confirm, only with the store on, audited as `device_secret.clear_nvs` with `verified` and `store_dropped`. A field without blanks goes as `secret.clear <field>`, and only its `secret cleared` line counts. A field whose SSID holds a blank goes as binary `secret.set` with an empty value (`Secret::set` clears on empty), then `secret.info` must not report it in NVS. An unverified, uncorrelated or failed clear keeps the row. A WiFi password that resolves to a tenant default is refused before anything is sent: set a device override or clear the tenant default first | the device shell splits `secret.clear` on blanks, every `secret.set` reply says stored, a clear too, and a tenant default has no device row to drop and comes back on the next provision |
+| After Provision to device the app reads `secret.info` and reports every pushed field the device does not hold in NVS. No answer, an uncorrelated answer, a key the report repeats, or two fields one key stands for (SSIDs that differ only by trailing blanks) are reported as not verified | every transport answers `secret stored in NVS`, also for a clear |
 | A device reassign moves its open markers to the new tenant and deletes its device-level secrets, in the same admin transaction. A reassign to the device's own tenant writes nothing | rows tagged with the old tenant would make every later read for the device fail under RLS, and the secrets are AAD-bound to the old tenant. The new tenant provisions anew |
-| After Provision to device the app reads `secret.info` and reports every pushed field the device does not hold in NVS. No answer, a key the report repeats, or two fields one key stands for (SSIDs that differ only by trailing blanks) are reported as not verified | every transport answers `secret stored in NVS`, also for a clear |
+
+Every device reply in this model that feeds a stored fact needs the echoed
+`req_id`, see "A stored device reply echoes its request id" above.
 
 The order lives in the database, so a restart or a second app instance
-sees it. Markers and gap fill need the store (KEK set). Without a KEK the
-store is off, the guard refuses every empty secret, snapshots are still
-blanked and stale reads are still dropped. Not covered: pair and tenant
-rotation trust the `secret.set` reply and do not read `secret.info`, and
-a write can still land an empty password for a network a drift pull saw
-locked after the guard ran. A tenant default WiFi password survives Clear
-on device, so a device that inherits one keeps that network unmarked.
+sees it. Markers, gap fill and the legacy re-key need the store (KEK set).
+Without a KEK the store is off, the guard refuses every empty secret,
+snapshots are still blanked and stale reads are still dropped. Not covered:
+pair and tenant rotation trust the `secret.set` reply and do not read
+`secret.info`, a write can still land an empty password for a network a
+drift pull saw locked after the guard ran, and a device whose bare row no
+read or sweep has re-keyed yet provisions no WiFi password until one does.
 
-How verified: `pkg/service/device_files_secrets_integration_test.go`
-(gap fill, empty or stale plaintext never overwrites, tenant default
-stays inherited, marker recorded and cleared, no marker over a stored
-password, a same-tenant reassign keeps secrets, marker older than a change,
-a new service instance, stale read writes nothing, older read after a
-newer one, rollback on a failed refresh, feature off, legacy password for the
-primary SSID, `SetSecret` beside a read),
-`pkg/web/admin_config_integration_test.go` (write refresh, rename, restart,
-guard at write time, 409 for a CLI command, unknown rename, a failed mark
-after a rename, Load from device), `pkg/web/admin_secrets_provision_integration_test.go`
-(`secret.info` check, no empty `secret.set`, clear action and audit, a
-verified WiFi clear drops the store rows and the next read marks it open),
-`pkg/web/provision_test.go`, `migrations/open_networks_integration_test.go`.
+How verified, per cell:
+
+| Cell | Tests |
+|---|---|
+| Current read: gap fill, markers, re-key | `pkg/service/device_files_secrets_integration_test.go` (`a_read_fills_gaps_and_records_open_networks`, `an_empty_or_stale_password_never_overwrites_a_stored_one`, `an_empty_password_is_marked_open_whatever_the_store_holds`, `tenant_default_stays_inherited`, `a_password_in_a_current_read_clears_the_marker`, `a_legacy_password_is_rekeyed_to_the_primary_ssid`, `a_failed_refresh_rolls_back_whole`, `feature_off_still_blanks_and_orders`) |
+| Stale read | `a_stale_read_writes_nothing`, `an_older_read_after_a_newer_one_is_dropped`, `a_marker_older_than_a_config_change_does_not_count`, `a_new_service_instance_still_refuses_a_stale_marker`, `TestLegacyWifi/a_stale_read_rekeys_nothing` |
+| Set | `set_secret_does_not_change_the_file_fact`, `set_secret_beside_a_read_does_not_deadlock`, `an_empty_value_is_not_a_secret`, `TestLegacyWifi/set_secret_refuses_the_bare_field` |
+| Guard | `pkg/web/open_wifi_guard_integration_test.go` (`guard_passes_when_secret_info_reports_nothing_in_nvs`, `guard_refuses_when_nvs_holds_a_password`, `guard_refuses_when_secret_info_is_uncorrelated`, `guard_refuses_when_secret_info_fails`, `a_password_provisioned_after_the_open_read_is_refused_at_write_time`), `pkg/web/admin_config_integration_test.go` (`TestAdminConfigWrite_GuardRunsAgainAtWriteTime`, `TestAdminConfigWrite_StaleMarkerRefusedAfterRestart`, `TestAdminConfigLoad_RefreshesMarkers`), `pkg/web/admin_config_restore_test.go` |
+| Write, CLI command, rename | `TestAdminConfigWrite_RefreshesTheSecretStore`, `TestAdminConfigCmd_ConfigRenameMakesMarkersStale`, `TestAdminConfigCmd_ConfigChangeIs409WhileAWriteRuns`, `TestAdminConfigWrite_UnknownRenameMarksConfigChanged`, `TestAdminConfigWrite_MarksChangeBeforeSending`, `TestAdminConfigWrite_FailedMarkAfterRenameKeepsMarkersStale`, `TestAdminConfigWrite_SnapshotFailureKeepsOtherWrites` |
+| Provision | `pkg/web/provision_test.go`, `TestAdminDeviceSecretsProvision_Integration` |
+| Clear on device | `TestAdminDeviceSecretsClearDevice`, `TestAdminDeviceSecretsClearDevice_DropsWifiRow`, `pkg/web/clear_on_device_integration_test.go` (`a_tenant_default_password_is_refused`, `an_override_over_a_tenant_default_is_cleared_and_dropped`, `a_failed_row_drop_is_reported`) |
+| Legacy re-key and sweep | `pkg/service/legacy_wifi_integration_test.go` (`TestLegacyWifi`, `TestLegacyWifiSweep`: with and without a snapshot, with and without a per-SSID row, idempotent), `pkg/service/secret_tenant_integration_test.go` (`a_bare_device_row_is_not_an_override_for_a_per_SSID_default`, `a_planted_bare_tenant_default_is_never_inherited`) |
+| Reassign | `a_reassign_to_the_same_tenant_keeps_device_secrets`, `a_read_after_a_reassign_stores_under_the_new_tenant`, `migrations/open_networks_integration_test.go` |
 
 Source: `pkg/service/device_config_state.go`, `pkg/service/secret.go`,
-`pkg/web/admin_config.go`, `pkg/web/admin_pair.go`,
-`pkg/web/admin_secrets.go`, `pkg/mqtt/mqtt_snapshot.go`,
-`migrations/0048_device_open_networks.sql`.
+`pkg/service/secret_legacy_wifi.go`, `pkg/web/admin_config.go`,
+`pkg/web/admin_pair.go`, `pkg/web/admin_secrets.go`,
+`pkg/mqtt/mqtt_snapshot.go`, `migrations/0048_device_open_networks.sql`.
 
 ### Passwords use bcrypt at default cost (10)
 

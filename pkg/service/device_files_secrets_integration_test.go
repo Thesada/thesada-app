@@ -125,8 +125,8 @@ func TestUpsertFromDevice(t *testing.T) {
 		}
 	})
 
-	// NVS holds the stored password, so an empty one in config.json is not an open network.
-	t.Run("an_empty_password_with_a_stored_one_is_not_open", func(t *testing.T) {
+	// A marker is a fact about the file. What NVS holds is the write guard's secret.info question.
+	t.Run("an_empty_password_is_marked_open_whatever_the_store_holds", func(t *testing.T) {
 		pk := mustUpsert(t, svcs.Devices, tA, "dfs-dev-14", "", "", "", "")
 		if err := sec.SetSecret(ctx, tA, pk, "wifi.password:cafe", "pw"); err != nil {
 			t.Fatalf("seed: %v", err)
@@ -136,11 +136,25 @@ func TestUpsertFromDevice(t *testing.T) {
 		}
 		read(t, pk, `{"wifi":{"networks":[{"ssid":"cafe","password":""},{"ssid":"office","password":""},`+
 			`{"ssid":"park","password":""}]}}`, "sha-s", start(t))
-		if open(t, df, pk, "cafe") || open(t, df, pk, "office") {
-			t.Error("a network with a stored password was recorded open")
+		for _, ssid := range []string{"cafe", "office", "park"} {
+			if !open(t, df, pk, ssid) {
+				t.Errorf("%s reads empty in the file, want it marked open", ssid)
+			}
 		}
-		if !open(t, df, pk, "park") {
-			t.Error("park has no stored password and reads empty, want it open")
+		if v, _ := reveal(t, pk, "wifi.password:cafe"); v != "pw" {
+			t.Errorf("cafe = %q, want the stored password kept", v)
+		}
+	})
+
+	// Storing a password changes NVS only once it is provisioned, never the file the marker describes.
+	t.Run("set_secret_does_not_change_the_file_fact", func(t *testing.T) {
+		pk := mustUpsert(t, svcs.Devices, tA, "dfs-dev-18", "", "", "", "")
+		read(t, pk, openCafe, "sha-f", start(t))
+		if err := sec.SetSecret(ctx, tA, pk, "wifi.password:cafe", "later"); err != nil {
+			t.Fatalf("SetSecret: %v", err)
+		}
+		if !open(t, df, pk, "cafe") {
+			t.Error("SetSecret changed the file fact")
 		}
 	})
 
@@ -304,22 +318,19 @@ func TestUpsertFromDevice(t *testing.T) {
 		}
 	})
 
-	// Provisioning pushes the bare row to wifi.password:<primary SSID>, so NVS holds it there.
-	t.Run("a_legacy_password_counts_for_the_primary_ssid", func(t *testing.T) {
+	// A bare legacy row moves to the primary SSID on a current read, and a stale plaintext never replaces it.
+	t.Run("a_legacy_password_is_rekeyed_to_the_primary_ssid", func(t *testing.T) {
 		pk := mustUpsert(t, svcs.Devices, tA, "dfs-dev-16", "", "", "", "")
-		if err := sec.SetSecret(ctx, tA, pk, service.LegacyWifiPassword, "legacy-pw"); err != nil {
+		if err := sec.PlantLegacyWifi(ctx, tA, pk, "legacy-pw"); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 		read(t, pk, `{"wifi":{"networks":[{"ssid":"home","password":""},{"ssid":"park","password":""}]}}`, "sha-l", start(t))
-		if open(t, df, pk, "home") {
-			t.Error("the primary SSID was recorded open over a stored legacy password")
-		}
-		if !open(t, df, pk, "park") {
-			t.Error("park has no stored password, want it open")
+		if !open(t, df, pk, "home") || !open(t, df, pk, "park") {
+			t.Error("both networks read empty in the file, want both marked open")
 		}
 		read(t, pk, `{"wifi":{"networks":[{"ssid":"home","password":"stale"}]}}`, "sha-l2", start(t))
-		if _, found := reveal(t, pk, "wifi.password:home"); found {
-			t.Error("a read filled wifi.password:home over a stored legacy password")
+		if v, _ := reveal(t, pk, "wifi.password:home"); v != "legacy-pw" {
+			t.Errorf("wifi.password:home = %q, want the re-keyed legacy value", v)
 		}
 	})
 

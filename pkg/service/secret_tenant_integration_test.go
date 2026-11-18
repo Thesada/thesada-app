@@ -298,17 +298,14 @@ func TestTenantSecretDefaults(t *testing.T) {
 		}
 	})
 
-	// A pre-per-SSID device row provisions onto wifi.password:<primary SSID>,
-	// so a per-SSID tenant default aimed at the same NVS key must treat that
-	// device as already pinned. Otherwise the fan-out drops the device off its
-	// network, which is the loudest possible failure for a vacuum.
-	t.Run("legacy_device_row_counts_as_an_override_for_a_per_SSID_default", func(t *testing.T) {
+	// A bare device row is inert, so it does not pin the device against a per-SSID default.
+	t.Run("a_bare_device_row_is_not_an_override_for_a_per_SSID_default", func(t *testing.T) {
 		const tL = "tsec-legacy"
 		env.SeedTenant(t, tL)
 		legacy := mustUpsert(t, dev, tL, "tsec-l-legacy", "", "", "", "")
 		plain := mustUpsert(t, dev, tL, "tsec-l-plain", "", "", "", "")
-		if err := sec.SetSecret(ctx, tL, legacy, service.LegacyWifiPassword, "pinned-wifi"); err != nil {
-			t.Fatalf("SetSecret legacy: %v", err)
+		if err := sec.PlantLegacyWifi(ctx, tL, legacy, "pinned-wifi"); err != nil {
+			t.Fatalf("plant legacy: %v", err)
 		}
 		if err := sec.SetTenantSecret(ctx, tL, service.WifiSecretField("SiteNet"), "site-wifi"); err != nil {
 			t.Fatalf("SetTenantSecret: %v", err)
@@ -322,13 +319,8 @@ func TestTenantSecretDefaults(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProvisionTargets: %v", err)
 		}
-		for _, id := range targets {
-			if id == legacy {
-				t.Error("a device pinned via the legacy bare wifi.password must not be a per-SSID fan-out target")
-			}
-		}
-		if len(targets) != 1 || targets[0] != plain {
-			t.Errorf("targets = %v, want exactly [%v]", targets, plain)
+		if len(targets) != 2 {
+			t.Errorf("targets = %v, want both devices", targets)
 		}
 		counts, err := sec.ProvisionTargetCounts(ctx, tL)
 		if err != nil {

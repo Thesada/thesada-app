@@ -257,7 +257,11 @@ func (s *Server) runCLICmd(parentCtx context.Context, reqID, claim uuid.UUID, de
 	}
 	s.cliRequests.markDone(reqID, resp)
 
-	if resp.OK && command == "config.dump" {
+	// The box shows any reply. Only one that echoed the req_id is stored as a device read.
+	if resp.OK && command == "config.dump" && !resp.Correlated {
+		slog.Warn("config.dump reply without req_id, not stored", "device", device.DeviceID)
+	}
+	if resp.OK && command == "config.dump" && resp.Correlated {
 		s.snapshotFromCmdResponse(parentCtx, device.TenantID, device.ID, resp, userID, readStart)
 	}
 }
@@ -421,7 +425,7 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 		return
 	}
 	// Checked under the claim, so no other write can change the store in between.
-	if msg := configWriteRefusal(req.Path, req.Content, s.openWifiLookup(r.Context(), device)); msg != "" {
+	if msg := configWriteRefusal(req.Path, req.Content, s.openWifiLookup(r.Context(), device, req.Content)); msg != "" {
 		s.releaseDeviceWrite(device.ID, claim)
 		http.Error(w, msg, http.StatusUnprocessableEntity)
 		return
@@ -474,7 +478,7 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID, claim uuid.UUID, 
 	configPath := service.IsConfigJSON(path)
 	// Again at write time: the markers may have gone stale since the enqueue check.
 	if configPath {
-		if msg := configWriteRefusal(path, content, s.openWifiLookup(parentCtx, device)); msg != "" {
+		if msg := configWriteRefusal(path, content, s.openWifiLookup(parentCtx, device, content)); msg != "" {
 			s.releaseDeviceWrite(device.ID, claim)
 			s.cliRequests.markError(reqID, reqStatusError, msg)
 			return
@@ -618,6 +622,7 @@ func (s *Server) releaseDeviceWrite(id, token uuid.UUID) {
 // cliSender is the part of *mqtt.Client that stagedWrite drives.
 type cliSender interface {
 	CLIRequest(ctx context.Context, topicPrefix, command, payload string) (*mqtt.CLIResponse, error)
+	CLIRequestStateful(ctx context.Context, topicPrefix, command, payload string) (*mqtt.CLIResponse, error)
 	CLIRequestRaw(ctx context.Context, topicPrefix, command string, rawPayload []byte) (*mqtt.CLIResponse, error)
 }
 
@@ -644,10 +649,8 @@ func writeSteps(n int) int {
 	return writeChunkCount(n) + 3 + max(1, (n+readbackChunkSize-1)/readbackChunkSize)
 }
 
-// configWriteRefusal stops a config.json write whose secret fields are empty: snapshots and the
-// editor carry blanked secrets, and writing them would erase the device's secrets (#85). An empty
-// WiFi password passes only when isOpen says the device reported that network open (#88).
-// in: path, content, isOpen (nil refuses every empty secret). out: refusal message, or "" to let the write through.
+// configWriteRefusal stops a config.json write with empty secret fields, which would erase the device's secrets (#85).
+// An empty WiFi password passes only when isOpen says so (#88). in: path, content, isOpen (nil refuses all). out: message or "".
 func configWriteRefusal(path, content string, isOpen func(field string) (bool, error)) string {
 	if !service.IsConfigJSON(path) {
 		return ""
@@ -666,19 +669,29 @@ func configWriteRefusal(path, content string, isOpen func(field string) (bool, e
 			return refusal
 		}
 		if open, err := isOpen(f); err != nil || !open {
+			var r guardRefusal
+			if errors.As(err, &r) {
+				return string(r)
+			}
 			return refusal
 		}
 	}
 	return ""
 }
 
-// openWifiLookup reports whether a device read showed a WiFi network open after the
-// device's last config change. Nil when the store is off, so the guard refuses every
-// empty secret. in: ctx, device. out: lookup func or nil.
-func (s *Server) openWifiLookup(ctx context.Context, device *service.Device) func(string) (bool, error) {
+// guardRefusal is a write guard refusal with its own message.
+type guardRefusal string
+
+func (g guardRefusal) Error() string { return string(g) }
+
+// openWifiLookup: a current read showed "" for the SSID in config.json, and one correlated secret.info for
+// content's empty fields shows nothing in NVS for it. Nil with the store off. in: ctx, device, content. out: lookup.
+func (s *Server) openWifiLookup(ctx context.Context, device *service.Device, content string) func(string) (bool, error) {
 	if !s.services.Secrets.Enabled() {
 		return nil
 	}
+	var nvs map[string]string
+	asked, reachable := false, false
 	return func(field string) (bool, error) {
 		ssid, ok := strings.CutPrefix(field, service.WifiPasswordPrefix)
 		if !ok || ssid == "" {
@@ -686,8 +699,27 @@ func (s *Server) openWifiLookup(ctx context.Context, device *service.Device) fun
 		}
 		// A timed-out lookup is an error, which refuses the write.
 		qctx, cancel := context.WithTimeout(ctx, snapshotUpsertTimeout)
-		defer cancel()
-		return s.services.DeviceFiles.OpenNetworkCurrent(qctx, device.TenantID, device.ID, ssid)
+		open, err := s.services.DeviceFiles.OpenNetworkCurrent(qctx, device.TenantID, device.ID, ssid)
+		cancel()
+		if err != nil || !open {
+			return false, err
+		}
+		if !asked {
+			asked = true
+			fields, _, _ := service.BlankSecretFields(content)
+			nvs, reachable = s.verifiedSecretState(ctx, device, fields)
+		}
+		switch {
+		case !reachable:
+			return false, guardRefusal(fmt.Sprintf("the device did not confirm over secret.info, with the request id, "+
+				"that NVS holds no password for %q, nothing was sent", ssid))
+		case nvs[field] == "nvs":
+			return false, guardRefusal(fmt.Sprintf("the device holds a password for %q in NVS, so config.json "+
+				"cannot carry it empty. Use Push config keys or Clear on device first, nothing was sent", ssid))
+		case nvs[field] == "":
+			return false, guardRefusal(fmt.Sprintf("secret.info cannot tell %q apart from another SSID, nothing was sent", ssid))
+		}
+		return true, nil
 	}
 }
 
@@ -786,7 +818,7 @@ func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration
 	label := "size check of " + staged
 	resp, f := step(label, func(ctx context.Context) (*mqtt.CLIResponse, error) {
 		// Offset at the expected end: the reply carries total and no data.
-		return cli.CLIRequest(ctx, topicPrefix, "fs.cat", fmt.Sprintf("%s %d 1", staged, len(content)))
+		return cli.CLIRequestStateful(ctx, topicPrefix, "fs.cat", fmt.Sprintf("%s %d 1", staged, len(content)))
 	})
 	if f != nil {
 		return cleanup(f)
@@ -825,7 +857,7 @@ type writeStep func(label string, send func(context.Context) (*mqtt.CLIResponse,
 func renameReadback(timedOut *writeFailure, step writeStep, cleanup func(*writeFailure) error, cli cliSender, topicPrefix, staged, path string, content []byte) error {
 	read := func(p string, off, n int) (*mqtt.CLIResponse, *writeFailure) {
 		return step("read back "+p, func(ctx context.Context) (*mqtt.CLIResponse, error) {
-			return cli.CLIRequest(ctx, topicPrefix, "fs.cat", fmt.Sprintf("%s %d %d", p, off, n))
+			return cli.CLIRequestStateful(ctx, topicPrefix, "fs.cat", fmt.Sprintf("%s %d %d", p, off, n))
 		})
 	}
 	unknown := &writeFailure{status: reqStatusTimeout, msg: timedOut.msg + ", the rename outcome is unknown. Reload the file to check it",

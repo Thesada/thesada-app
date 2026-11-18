@@ -47,10 +47,10 @@ func TestProvisionDeviceSecrets(t *testing.T) {
 		}
 	})
 
-	t.Run("secretProvisionFields builds scalars + per-SSID + legacy", func(t *testing.T) {
+	t.Run("secretProvisionFields builds scalars + per-SSID, never the bare legacy field", func(t *testing.T) {
 		got, primary := secretProvisionFields([]string{"HomeNet", "Barn"})
 		want := []string{"mqtt.password", "telegram.bot_token", "web.password", "wifi.ap_password",
-			"wifi.password:HomeNet", "wifi.password:Barn", "wifi.password"}
+			"wifi.password:HomeNet", "wifi.password:Barn"}
 		if !reflect.DeepEqual(got, want) || primary != "HomeNet" {
 			t.Errorf("secretProvisionFields = %v, %q; want %v, HomeNet", got, primary, want)
 		}

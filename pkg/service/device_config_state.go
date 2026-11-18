@@ -97,6 +97,10 @@ func (s *DeviceFilesService) UpsertFromDevice(ctx context.Context, tenantID stri
 			return err
 		}
 		if s.secrets != nil && s.secrets.Enabled() {
+			// First, so the gap fill sees the per-SSID row a legacy one became.
+			if _, err := s.secrets.rekeyLegacyWifiTx(ctx, tx, tenantID, devicePk, primaryWifiSSID(content)); err != nil {
+				return err
+			}
 			if err := s.refreshStoreTx(ctx, tx, tenantID, devicePk, content, source, readStart); err != nil {
 				return err
 			}
@@ -110,12 +114,11 @@ func (s *DeviceFilesService) UpsertFromDevice(ctx context.Context, tenantID stri
 }
 
 // refreshStoreTx fills only fields the store has nothing for, as the firmware resolves NVS first (C1),
-// and sets the device's markers to the networks this read shows open.
+// and sets the device's markers to the networks whose password this read shows as "" in the file.
 func (s *DeviceFilesService) refreshStoreTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, content, source string, seenAt time.Time) error {
 	found := extractConfigSecrets(content)
-	primary := WifiSecretField(primaryWifiSSID(content))
 	for _, field := range slices.Sorted(maps.Keys(found)) {
-		has, err := storedForReadTx(ctx, tx, devicePk, field, primary)
+		has, err := hasSecretTx(ctx, tx, devicePk, field)
 		if err != nil {
 			return fmt.Errorf("look up device secret %s: %w", field, err)
 		}
@@ -127,17 +130,8 @@ func (s *DeviceFilesService) refreshStoreTx(ctx context.Context, tx pgx.Tx, tena
 		}
 	}
 	// Non-nil: ANY over a NULL array matches nothing, and NOT of that deletes nothing.
-	open := []string{}
-	for _, ssid := range openWifiSSIDs(content) {
-		// A stored password is in NVS, which the firmware reads before the file's "".
-		has, err := storedForReadTx(ctx, tx, devicePk, WifiSecretField(ssid), primary)
-		if err != nil {
-			return fmt.Errorf("look up device secret %s: %w", WifiSecretField(ssid), err)
-		}
-		if !has {
-			open = append(open, ssid)
-		}
-	}
+	// A file fact only. Whether NVS holds a password is asked of the device at write time.
+	open := append([]string{}, openWifiSSIDs(content)...)
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM device_open_networks WHERE device_pk = $1 AND NOT (ssid = ANY($2::text[]))`,
 		devicePk, open); err != nil {
@@ -155,18 +149,8 @@ func (s *DeviceFilesService) refreshStoreTx(ctx context.Context, tx pgx.Tx, tena
 	return nil
 }
 
-// storedForReadTx is hasSecretTx, plus the legacy bare row for primary (wifi.password:<primary
-// SSID>), where provisioning puts it in NVS. out: stored, error.
-func storedForReadTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, field, primary string) (bool, error) {
-	has, err := hasSecretTx(ctx, tx, devicePk, field)
-	if err != nil || has || field == "" || field != primary {
-		return has, err
-	}
-	return hasSecretTx(ctx, tx, devicePk, LegacyWifiPassword)
-}
-
-// OpenNetworkCurrent reports whether a device read showed ssid open after the
-// device's last config change. in: ctx, tenant, device, ssid. out: open, error.
+// OpenNetworkCurrent reports whether a device read after the device's last config change
+// showed "" for ssid's password in config.json. in: ctx, tenant, device, ssid. out: open, error.
 func (s *DeviceFilesService) OpenNetworkCurrent(ctx context.Context, tenantID string, devicePk uuid.UUID, ssid string) (bool, error) {
 	var open bool
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {

@@ -59,6 +59,13 @@ func (c *Client) driftCLI(topicPrefix, command, payload string) (*CLIResponse, e
 	return c.CLIRequest(ctx, topicPrefix, command, payload)
 }
 
+// driftCLIStateful is driftCLI for a reply the drift pull stores. in: topic prefix, command, payload. out: response, error.
+func (c *Client) driftCLIStateful(topicPrefix, command, payload string) (*CLIResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), c.driftTimeout())
+	defer cancel()
+	return c.CLIRequestStateful(ctx, topicPrefix, command, payload)
+}
+
 func (c *Client) driftTimeout() time.Duration {
 	if c.cliTimeout <= 0 {
 		return driftCLIFallback
@@ -79,7 +86,7 @@ func (c *Client) ReadFileChunked(ctx context.Context, topicPrefix, path string, 
 			return "", fmt.Errorf("chunk limit reached at offset %d", offset)
 		}
 		cctx, cancel := context.WithTimeout(ctx, step)
-		resp, err := c.CLIRequest(cctx, topicPrefix, "fs.cat", fmt.Sprintf("%s %d 2048", path, offset))
+		resp, err := c.CLIRequestStateful(cctx, topicPrefix, "fs.cat", fmt.Sprintf("%s %d 2048", path, offset))
 		cancel()
 		if err != nil {
 			return "", fmt.Errorf("chunk at offset %d: %w", offset, err)
@@ -190,7 +197,7 @@ func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix,
 			return
 		}
 		readStart = start
-		resp, err := c.driftCLI(topicPrefix, "config.dump", "")
+		resp, err := c.driftCLIStateful(topicPrefix, "config.dump", "")
 		if err != nil {
 			slog.Error("drift pull failed", "path", path, "err", err)
 			return

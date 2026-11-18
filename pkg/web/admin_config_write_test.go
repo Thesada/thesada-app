@@ -23,9 +23,11 @@ type fakeFS struct {
 }
 
 // fakeReply overrides one reply. errTimeout makes the call wait out its deadline.
+// uncorrelated drops the req_id echo.
 type fakeReply struct {
-	resp *mqtt.CLIResponse
-	err  error
+	resp         *mqtt.CLIResponse
+	err          error
+	uncorrelated bool
 }
 
 var errTimeout = errors.New("wait for the deadline")
@@ -42,10 +44,25 @@ func (f *fakeFS) reply(ctx context.Context, cmd, arg string, run func() *mqtt.CL
 				<-ctx.Done()
 				return nil, ctx.Err()
 			}
+			if r.resp != nil {
+				resp := *r.resp
+				resp.Correlated = !r.uncorrelated
+				return &resp, r.err
+			}
 			return r.resp, r.err
 		}
 	}
-	return run(), nil
+	resp := run()
+	resp.Correlated = true
+	return resp, nil
+}
+
+func (f *fakeFS) CLIRequestStateful(ctx context.Context, p, cmd, args string) (*mqtt.CLIResponse, error) {
+	resp, err := f.CLIRequest(ctx, p, cmd, args)
+	if err == nil && !resp.Correlated {
+		return resp, mqtt.ErrUncorrelated
+	}
+	return resp, err
 }
 
 // okLines is an ok:true reply. Lines are cut to 63 bytes like the firmware's char msg[64].
@@ -114,7 +131,7 @@ func when(cond bool, resp *mqtt.CLIResponse, err error) *fakeReply {
 	if !cond {
 		return nil
 	}
-	return &fakeReply{resp, err}
+	return &fakeReply{resp: resp, err: err}
 }
 
 const oldConfig = `{"wifi":{"ssid":"old"}}`
@@ -439,6 +456,16 @@ func TestStagedWrite_RenameTimeoutReadsBackTheOutcome(t *testing.T) {
 			},
 			"rename outcome is unknown", reqStatusTimeout,
 			"fs.write|fs.cat|fs.mv|fs.cat|fs.cat", string(content)},
+		{"destination chunk without req_id", true,
+			func(n int, cmd, _ string) *fakeReply {
+				if n != 5 {
+					return nil
+				}
+				total, off, data := len(content), 0, string(content)
+				return &fakeReply{resp: &mqtt.CLIResponse{Cmd: cmd, OK: true, Total: &total, Offset: &off, Data: &data}, uncorrelated: true}
+			},
+			"rename outcome is unknown", reqStatusTimeout,
+			"fs.write|fs.cat|fs.mv|fs.cat|fs.cat", string(content)},
 		{"destination chunk from another offset", true,
 			func(n int, cmd, _ string) *fakeReply {
 				total, off, data := len(content), 7, string(content)
@@ -456,7 +483,7 @@ func TestStagedWrite_RenameTimeoutReadsBackTheOutcome(t *testing.T) {
 						fs.files["/config.json"] = fs.files["/config.json.new"]
 						delete(fs.files, "/config.json.new")
 					}
-					return &fakeReply{nil, errTimeout}
+					return &fakeReply{err: errTimeout}
 				}
 				if tc.readback != nil {
 					return tc.readback(n, cmd, arg)
@@ -523,5 +550,27 @@ func TestChangesConfig(t *testing.T) {
 		if got := changesConfig(tc.cmd, tc.payload); got != tc.want {
 			t.Errorf("changesConfig(%q, %q) = %v, want %v", tc.cmd, tc.payload, got, tc.want)
 		}
+	}
+}
+
+// The size check decides whether the rename runs, so its reply must echo the req_id.
+func TestStagedWrite_UncorrelatedSizeCheckDoesNotRename(t *testing.T) {
+	fs := newFakeFS(map[string]string{"/config.json": oldConfig})
+	fs.hook = func(n int, cmd, _ string) *fakeReply {
+		if cmd != "fs.cat" {
+			return nil
+		}
+		total := len(`{"a":1}`)
+		return &fakeReply{resp: &mqtt.CLIResponse{Cmd: cmd, OK: true, Total: &total}, uncorrelated: true}
+	}
+	err := stagedWrite(context.Background(), fs, time.Second, "p", "/config.json", []byte(`{"a":1}`))
+	if err == nil || !strings.Contains(err.Error(), "request id") {
+		t.Fatalf("stagedWrite = %v, want the uncorrelated size check refused", err)
+	}
+	if got := strings.Join(cmdNames(fs.calls), "|"); got != "fs.write|fs.cat|fs.rm" {
+		t.Fatalf("calls = %s, want no fs.mv", got)
+	}
+	if fs.files["/config.json"] != oldConfig {
+		t.Fatalf("config.json = %q, want it untouched", fs.files["/config.json"])
 	}
 }

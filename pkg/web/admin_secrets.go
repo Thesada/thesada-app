@@ -8,6 +8,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -19,6 +20,7 @@ import (
 
 	"thesada.app/app/pkg/authmw"
 	"thesada.app/app/pkg/authz"
+	"thesada.app/app/pkg/mqtt"
 	"thesada.app/app/pkg/service"
 )
 
@@ -81,12 +83,25 @@ func secretInfoKey(field string) string { return strings.TrimRight(field, " \t")
 // parsed device report maps straight through.
 // in: ctx, device, storage fields to report. out: map[storageField]state, reachable.
 func (s *Server) deviceSecretState(ctx context.Context, device *service.Device, fields []string) (map[string]string, bool) {
+	return s.secretState(ctx, device, fields, false)
+}
+
+// verifiedSecretState is deviceSecretState from a reply that echoed the req_id, for a
+// stored fact or a decision. An uncorrelated reply is unreachable. out: state, reachable.
+func (s *Server) verifiedSecretState(ctx context.Context, device *service.Device, fields []string) (map[string]string, bool) {
+	return s.secretState(ctx, device, fields, true)
+}
+
+func (s *Server) secretState(ctx context.Context, device *service.Device, fields []string, stateful bool) (map[string]string, bool) {
 	if s.mqtt == nil {
 		return nil, false
 	}
 	cctx, cancel := context.WithTimeout(ctx, secretInfoTimeout)
 	defer cancel()
 	resp, err := s.mqtt.CLIRequest(cctx, s.deviceTopicPrefix(device), "secret.info", "")
+	if stateful && err == nil && !resp.Correlated {
+		err = mqtt.ErrUncorrelated
+	}
 	if err != nil || resp == nil || !resp.OK {
 		return nil, false
 	}
@@ -314,7 +329,7 @@ func (s *Server) verifyInNVS(ctx context.Context, device *service.Device, pushed
 	if len(pushed) == 0 {
 		return nil, true
 	}
-	state, ok := s.deviceSecretState(ctx, device, pushed)
+	state, ok := s.verifiedSecretState(ctx, device, pushed)
 	if !ok {
 		return nil, false
 	}
@@ -359,15 +374,24 @@ func (s *Server) handleAdminDeviceSecretsClearDevice(w http.ResponseWriter, r *h
 		http.Redirect(w, r, flashSecretField.on(dest), http.StatusFound)
 		return
 	}
-	ssids := s.deviceWifiSSIDs(r.Context(), device)
-	primary := ""
-	if len(ssids) > 0 {
-		primary = ssids[0]
-	}
-	fwField, ok := service.FirmwareSecretField(field, primary)
-	if !ok {
+	// The bare legacy row is inert and names no device field.
+	if field == service.LegacyWifiPassword {
 		http.Redirect(w, r, flashSecretClearNVSNoSSID.on(dest), http.StatusFound)
 		return
+	}
+	fwField := field
+	// A tenant default has no device row to drop, and the next provision pushes it back (Q5).
+	if service.IsWifiPasswordField(field) {
+		origins, err := s.services.Secrets.OriginStatus(r.Context(), device.TenantID, device.ID)
+		if err != nil {
+			slog.Error("device_secret.clear_nvs origin lookup failed", "device", device.DeviceID, "field", field, "err", err)
+			http.Redirect(w, r, flashSecretClearFailed.on(dest), http.StatusFound)
+			return
+		}
+		if origins[field] == service.OriginTenant {
+			http.Redirect(w, r, flashSecretClearNVSTenantDefault.on(dest), http.StatusFound)
+			return
+		}
 	}
 	// The binary payload splits field from value on the first line break.
 	if strings.ContainsAny(fwField, "\r\n") {
@@ -378,8 +402,11 @@ func (s *Server) handleAdminDeviceSecretsClearDevice(w http.ResponseWriter, r *h
 	if !ok {
 		slog.Warn("device_secret.clear_nvs failed", "device", device.DeviceID, "field", fwField, "reason", msg)
 		flash := flashSecretClearNVSFailed
-		if msg == "unreachable" {
+		switch msg {
+		case "unreachable":
 			flash = flashSecretClearNVSUnreachable
+		case "uncorrelated":
+			flash = flashSecretClearNVSUncorrelated
 		}
 		http.Redirect(w, r, flash.on(dest), http.StatusFound)
 		return
@@ -397,31 +424,28 @@ func (s *Server) handleAdminDeviceSecretsClearDevice(w http.ResponseWriter, r *h
 	defer auditCancel()
 	dropped := false
 	if msg == "" && service.IsWifiPasswordField(fwField) {
-		dropped = s.dropClearedWifiRows(auditCtx, device, fwField, primary)
+		dropped = s.dropClearedWifiRows(auditCtx, device, fwField)
 	}
 	s.audit(auditCtx, user, authz.DeviceSecretClearNVS, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
 		Detail: map[string]any{"device_id": device.DeviceID, "field": fwField, "verified": msg != "unverified", "store_dropped": dropped},
 	})
 	done := flashSecretClearedNVS
-	if msg == "unverified" {
+	switch {
+	case msg == "unverified":
 		done = flashSecretClearedNVSUnverified
+	case msg == "" && service.IsWifiPasswordField(fwField) && !dropped:
+		done = flashSecretClearedNVSStoreKept
 	}
 	http.Redirect(w, r, done.on(dest), http.StatusFound)
 }
 
-// dropClearedWifiRows deletes the device rows (and the primary's legacy row) for a WiFi
-// field the device verified empty. in: ctx, device, firmware field, primary SSID. out: all deleted.
-func (s *Server) dropClearedWifiRows(ctx context.Context, device *service.Device, fwField, primary string) bool {
-	fields := []string{fwField}
-	if primary != "" && fwField == service.WifiSecretField(primary) {
-		fields = append(fields, service.LegacyWifiPassword)
-	}
-	for _, f := range fields {
-		if _, err := s.services.Secrets.ClearDeviceSecret(ctx, device.TenantID, device.ID, f); err != nil {
-			slog.Error("device_secret.store_drop_failed", "device", device.DeviceID, "field", f, "err", err)
-			return false
-		}
+// dropClearedWifiRows deletes the device row for a WiFi field the device verified empty.
+// in: ctx, device, firmware field. out: deleted.
+func (s *Server) dropClearedWifiRows(ctx context.Context, device *service.Device, fwField string) bool {
+	if _, err := s.services.Secrets.ClearDeviceSecret(ctx, device.TenantID, device.ID, fwField); err != nil {
+		slog.Error("device_secret.store_drop_failed", "device", device.DeviceID, "field", fwField, "err", err)
+		return false
 	}
 	return true
 }
@@ -434,7 +458,10 @@ func (s *Server) clearOnDevice(ctx context.Context, device *service.Device, fwFi
 	defer cancel()
 	if !strings.ContainsAny(fwField, " \t") {
 		// The firmware answers ok for an unknown field too, only its cleared line counts.
-		resp, err := s.mqtt.CLIRequest(cctx, topicPrefix, "secret.clear", fwField)
+		resp, err := s.mqtt.CLIRequestStateful(cctx, topicPrefix, "secret.clear", fwField)
+		if errors.Is(err, mqtt.ErrUncorrelated) {
+			return "uncorrelated", false
+		}
 		if err != nil {
 			return "unreachable", false
 		}
@@ -444,7 +471,10 @@ func (s *Server) clearOnDevice(ctx context.Context, device *service.Device, fwFi
 		return "", true
 	}
 	// The shell splits secret.clear on blanks. Secret::set takes an empty value as a clear.
-	resp, err := s.mqtt.CLIRequestFields(cctx, topicPrefix, "secret.set", []byte(fwField+"\n"))
+	resp, err := s.mqtt.CLIRequestFieldsStateful(cctx, topicPrefix, "secret.set", []byte(fwField+"\n"))
+	if errors.Is(err, mqtt.ErrUncorrelated) {
+		return "uncorrelated", false
+	}
 	if err != nil {
 		return "unreachable", false
 	}
@@ -452,7 +482,7 @@ func (s *Server) clearOnDevice(ctx context.Context, device *service.Device, fwFi
 		return "rejected", false
 	}
 	// The reply says stored for a clear too, only secret.info tells.
-	state, reachable := s.deviceSecretState(ctx, device, []string{fwField})
+	state, reachable := s.verifiedSecretState(ctx, device, []string{fwField})
 	switch {
 	case !reachable, state[fwField] == "":
 		return "unverified", true
