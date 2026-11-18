@@ -25,6 +25,7 @@ type AlertSubscription struct {
 	ChannelID   *uuid.UUID `json:"channel_id,omitempty"`
 	Target      string     `json:"target,omitempty"`
 	Enabled     bool       `json:"enabled"`
+	Confirmed   bool       `json:"confirmed"`
 	MinSeverity string     `json:"min_severity"`
 	CreatedAt   time.Time  `json:"created_at"`
 }
@@ -160,7 +161,8 @@ func (s *AlertService) RecentByTenant(ctx context.Context, tenantID string, limi
 func (s *AlertService) ListSubscriptions(ctx context.Context, tenantID string, userID uuid.UUID) ([]AlertSubscription, error) {
 	const query = `
 		SELECT s.id, s.user_id, s.device_pk, s.channel, s.destination, s.channel_id,
-		       coalesce(` + channelTargetSQL + `, ''), coalesce(c.enabled, false), s.min_severity, s.created_at
+		       coalesce(` + channelTargetSQL + `, ''), coalesce(c.enabled, false),
+		       coalesce(` + channelConfirmedSQL + `, false), s.min_severity, s.created_at
 		FROM alert_subscriptions s
 		LEFT JOIN notification_channels c ON c.id = s.channel_id
 		LEFT JOIN users u ON u.id = c.user_id
@@ -175,7 +177,7 @@ func (s *AlertService) ListSubscriptions(ctx context.Context, tenantID string, u
 		for rows.Next() {
 			var sub AlertSubscription
 			if err := rows.Scan(&sub.ID, &sub.UserID, &sub.DevicePK, &sub.Channel,
-				&sub.Destination, &sub.ChannelID, &sub.Target, &sub.Enabled, &sub.MinSeverity, &sub.CreatedAt); err != nil {
+				&sub.Destination, &sub.ChannelID, &sub.Target, &sub.Enabled, &sub.Confirmed, &sub.MinSeverity, &sub.CreatedAt); err != nil {
 				return err
 			}
 			out = append(out, sub)

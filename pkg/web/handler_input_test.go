@@ -51,7 +51,7 @@ func TestHandlers_BadUUID(t *testing.T) {
 		{"AdminDeviceConfig", "id", http.MethodGet, s.handleAdminDeviceConfig, http.StatusNotFound},
 		{"AdminDeviceConfigCmd", "id", http.MethodPost, s.handleAdminDeviceConfigCmd, http.StatusBadRequest},
 		{"AdminDeviceConfigWrite", "id", http.MethodPost, s.handleAdminDeviceConfigWrite, http.StatusBadRequest},
-		{"AdminDeviceConfigSnapshot", "id", http.MethodPost, s.handleAdminDeviceConfigSnapshot, http.StatusBadRequest},
+		{"AdminDeviceConfigLoad", "id", http.MethodPost, s.handleAdminDeviceConfigLoad, http.StatusBadRequest},
 		{"AdminDeviceConfigHistory", "id", http.MethodGet, s.handleAdminDeviceConfigHistory, http.StatusBadRequest},
 		{"AdminDeviceSecrets", "id", http.MethodGet, s.handleAdminDeviceSecrets, http.StatusNotFound},
 		{"AdminDeviceSecretsSet", "id", http.MethodPost, s.handleAdminDeviceSecretsSet, http.StatusNotFound},
