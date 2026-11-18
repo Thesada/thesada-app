@@ -34,6 +34,8 @@ var deviceSendSites = map[string]string{
 	"deviceSecretState":          "read only (secret.info presence)",
 	"recoveryPath":               "read only (dynsec client state)",
 	"runRulePush":                "rules.tenant_push, written at enqueue in handleDeviceRulesPush (staged write, then lua.reload)",
+	"runConfigLoad":              "device.command (config.load), written at enqueue in handleAdminDeviceConfigLoad",
+	"clearOnDevice":              "device_secret.clear_nvs, written by handleAdminDeviceSecretsClearDevice",
 }
 
 func TestDeviceSendSitesAreAudited(t *testing.T) {

@@ -196,8 +196,8 @@ func (c *Client) tapCLIResponses(topicPrefix string, fn func([]byte)) (func(), e
 // race on the shared cli_response topic. req_id correlation (firmware
 // v1.4.5+) filters out late or retained-replay responses with a different
 // id so the second call cannot accidentally consume the first call's
-// late reply. Older firmware that ignores req_id still works - the mutex
-// alone makes the response unambiguous.
+// late reply. Older firmware that ignores req_id is matched on cmd only,
+// so a late reply to an earlier same-command request can still be taken.
 // in: ctx, topicPrefix, command, payload. out: *CLIResponse, error.
 func (c *Client) CLIRequest(ctx context.Context, topicPrefix, command, payload string) (*CLIResponse, error) {
 	if c.c == nil || !c.c.IsConnected() {

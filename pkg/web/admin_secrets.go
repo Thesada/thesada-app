@@ -10,6 +10,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -43,9 +44,10 @@ func (f secretFieldStatus) Inherited() bool { return f.Origin == service.OriginT
 func (f secretFieldStatus) Overridden() bool { return f.Origin == service.OriginOverride }
 
 // parseSecretInfo turns firmware `secret.info` output into a map of firmware
-// field key -> state token. Each line is "<field>  <state>" (e.g.
-// "mqtt.password nvs", "wifi.password:HomeNet config/none"); the state is the
-// last whitespace-separated token, normalized to "nvs" or "config".
+// field key -> state token. The firmware prints "%-22s %s", field padded to 22
+// columns then one blank and the state, normalized to "nvs" or "config". Keys are
+// secretInfoKey, as padding and an SSID's own trailing blanks cannot be told apart.
+// A key the report repeats maps to "", state unknown.
 // in: output lines. out: map[fwField]state.
 func parseSecretInfo(output []string) map[string]string {
 	states := make(map[string]string, len(output))
@@ -56,16 +58,21 @@ func parseSecretInfo(output []string) map[string]string {
 		if i < 0 {
 			continue
 		}
-		field := strings.TrimSpace(line[:i])
-		state := line[i+1:]
-		if strings.HasPrefix(state, "nvs") {
-			states[field] = "nvs"
-		} else {
-			states[field] = "config"
+		field := secretInfoKey(line[:i])
+		state := "config"
+		if strings.HasPrefix(line[i+1:], "nvs") {
+			state = "nvs"
 		}
+		if _, seen := states[field]; seen {
+			state = ""
+		}
+		states[field] = state
 	}
 	return states
 }
+
+// secretInfoKey is a field as parseSecretInfo keys it, without trailing blanks.
+func secretInfoKey(field string) string { return strings.TrimRight(field, " \t") }
 
 // deviceSecretState queries the device over MQTT for its live per-field NVS
 // state, keyed by storage field. Bounded by secretInfoTimeout; a timeout or
@@ -84,11 +91,20 @@ func (s *Server) deviceSecretState(ctx context.Context, device *service.Device, 
 		return nil, false
 	}
 	byFwField := parseSecretInfo(resp.Output)
+	shared := make(map[string]int, len(fields))
+	for _, f := range slices.Compact(slices.Sorted(slices.Values(fields))) {
+		shared[secretInfoKey(f)]++
+	}
 	out := make(map[string]string, len(fields))
 	for _, f := range fields {
-		if st, present := byFwField[f]; present {
+		st, present := byFwField[secretInfoKey(f)]
+		switch {
+		case shared[secretInfoKey(f)] > 1:
+			// Fields that differ only by trailing blanks share one report line.
+			out[f] = ""
+		case present:
 			out[f] = st
-		} else {
+		default:
 			out[f] = "none"
 		}
 	}
@@ -255,6 +271,9 @@ func (s *Server) handleAdminDeviceSecretsProvision(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// The reply text says "stored" even for a clear, only secret.info tells.
+	missing, verified := s.verifyInNVS(r.Context(), device, outcome.Pushed)
+
 	user := authmw.CurrentUser(r)
 	actor := ""
 	if user != nil {
@@ -262,21 +281,185 @@ func (s *Server) handleAdminDeviceSecretsProvision(w http.ResponseWriter, r *htt
 	}
 	slog.Info("device_secret.state_change", "action", "provision",
 		"tenant", device.TenantID, "device", device.DeviceID,
-		"pushed", len(outcome.Pushed), "actor", actor)
-	s.audit(r.Context(), user, authz.DeviceSecretProvision, service.AuditEntry{
+		"pushed", len(outcome.Pushed), "verified", verified, "not_in_nvs", missing, "actor", actor)
+	// The push already reached the device, so a client disconnect must not drop the row.
+	auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), auditTimeout)
+	defer auditCancel()
+	s.audit(auditCtx, user, authz.DeviceSecretProvision, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
 		Detail: map[string]any{
-			"device_id": device.DeviceID,
-			"pushed":    len(outcome.Pushed),
-			"skipped":   len(outcome.SkippedUnset) + len(outcome.SkippedNoSSID),
+			"device_id":  device.DeviceID,
+			"pushed":     len(outcome.Pushed),
+			"skipped":    len(outcome.SkippedUnset) + len(outcome.SkippedNoSSID),
+			"verified":   verified,
+			"not_in_nvs": len(missing),
 		},
 	})
 
 	done := flashSecretProvisioned
-	if len(outcome.SkippedUnset)+len(outcome.SkippedNoSSID) > 0 {
+	switch {
+	case len(missing) > 0:
+		done = flashSecretNotInNVS
+	case !verified:
+		done = flashSecretProvisionedUnverified
+	case len(outcome.SkippedUnset)+len(outcome.SkippedNoSSID) > 0:
 		done = flashSecretProvisionedMix
 	}
 	http.Redirect(w, r, done.on(dest), http.StatusFound)
+}
+
+// verifyInNVS reads secret.info after a push. out: pushed fields the device does not
+// report in NVS, and false when it did not answer (nothing verified).
+func (s *Server) verifyInNVS(ctx context.Context, device *service.Device, pushed []string) ([]string, bool) {
+	if len(pushed) == 0 {
+		return nil, true
+	}
+	state, ok := s.deviceSecretState(ctx, device, pushed)
+	if !ok {
+		return nil, false
+	}
+	var missing []string
+	for _, f := range pushed {
+		if state[f] != "nvs" {
+			missing = append(missing, f)
+		}
+	}
+	return missing, true
+}
+
+// handleAdminDeviceSecretsClearDevice erases one field from the device NVS with
+// secret.clear. A verified WiFi password clear drops its store rows too. in: writer, POST .../secrets/clear-device. out: 302.
+func (s *Server) handleAdminDeviceSecretsClearDevice(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	device, err := s.services.Devices.GetByIDAny(r.Context(), id)
+	if err != nil {
+		slog.Error("device lookup failed", "device", id, "err", err)
+		http.Error(w, "device lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if device == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	field := r.PostFormValue("field")
+	dest := "/admin/devices/" + device.ID.String() + "/secrets"
+	if !s.services.Secrets.Enabled() {
+		http.Redirect(w, r, flashSecretDisabled.on(dest), http.StatusFound)
+		return
+	}
+	if !service.ValidSecretField(field) {
+		http.Redirect(w, r, flashSecretField.on(dest), http.StatusFound)
+		return
+	}
+	ssids := s.deviceWifiSSIDs(r.Context(), device)
+	primary := ""
+	if len(ssids) > 0 {
+		primary = ssids[0]
+	}
+	fwField, ok := service.FirmwareSecretField(field, primary)
+	if !ok {
+		http.Redirect(w, r, flashSecretClearNVSNoSSID.on(dest), http.StatusFound)
+		return
+	}
+	// The binary payload splits field from value on the first line break.
+	if strings.ContainsAny(fwField, "\r\n") {
+		http.Redirect(w, r, flashSecretClearNVSField.on(dest), http.StatusFound)
+		return
+	}
+	msg, ok := s.clearOnDevice(r.Context(), device, fwField)
+	if !ok {
+		slog.Warn("device_secret.clear_nvs failed", "device", device.DeviceID, "field", fwField, "reason", msg)
+		flash := flashSecretClearNVSFailed
+		if msg == "unreachable" {
+			flash = flashSecretClearNVSUnreachable
+		}
+		http.Redirect(w, r, flash.on(dest), http.StatusFound)
+		return
+	}
+
+	user := authmw.CurrentUser(r)
+	actor := ""
+	if user != nil {
+		actor = user.Email
+	}
+	slog.Info("device_secret.state_change", "action", "clear_nvs",
+		"tenant", device.TenantID, "device", device.DeviceID, "field", fwField, "actor", actor)
+	// The device already cleared the field, so a client disconnect must not drop the row.
+	auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), auditTimeout)
+	defer auditCancel()
+	dropped := false
+	if msg == "" && service.IsWifiPasswordField(fwField) {
+		dropped = s.dropClearedWifiRows(auditCtx, device, fwField, primary)
+	}
+	s.audit(auditCtx, user, authz.DeviceSecretClearNVS, service.AuditEntry{
+		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
+		Detail: map[string]any{"device_id": device.DeviceID, "field": fwField, "verified": msg != "unverified", "store_dropped": dropped},
+	})
+	done := flashSecretClearedNVS
+	if msg == "unverified" {
+		done = flashSecretClearedNVSUnverified
+	}
+	http.Redirect(w, r, done.on(dest), http.StatusFound)
+}
+
+// dropClearedWifiRows deletes the device rows (and the primary's legacy row) for a WiFi
+// field the device verified empty. in: ctx, device, firmware field, primary SSID. out: all deleted.
+func (s *Server) dropClearedWifiRows(ctx context.Context, device *service.Device, fwField, primary string) bool {
+	fields := []string{fwField}
+	if primary != "" && fwField == service.WifiSecretField(primary) {
+		fields = append(fields, service.LegacyWifiPassword)
+	}
+	for _, f := range fields {
+		if _, err := s.services.Secrets.ClearDeviceSecret(ctx, device.TenantID, device.ID, f); err != nil {
+			slog.Error("device_secret.store_drop_failed", "device", device.DeviceID, "field", f, "err", err)
+			return false
+		}
+	}
+	return true
+}
+
+// clearOnDevice erases one firmware field from NVS. A field without blanks goes through
+// secret.clear, one with blanks through binary secret.set with an empty value. out: reason, ok.
+func (s *Server) clearOnDevice(ctx context.Context, device *service.Device, fwField string) (string, bool) {
+	topicPrefix := s.deviceTopicPrefix(device)
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if !strings.ContainsAny(fwField, " \t") {
+		// The firmware answers ok for an unknown field too, only its cleared line counts.
+		resp, err := s.mqtt.CLIRequest(cctx, topicPrefix, "secret.clear", fwField)
+		if err != nil {
+			return "unreachable", false
+		}
+		if !resp.OK || !outputHasPrefix(resp.Output, "secret cleared") {
+			return "rejected", false
+		}
+		return "", true
+	}
+	// The shell splits secret.clear on blanks. Secret::set takes an empty value as a clear.
+	resp, err := s.mqtt.CLIRequestFields(cctx, topicPrefix, "secret.set", []byte(fwField+"\n"))
+	if err != nil {
+		return "unreachable", false
+	}
+	if !resp.OK {
+		return "rejected", false
+	}
+	// The reply says stored for a clear too, only secret.info tells.
+	state, reachable := s.deviceSecretState(ctx, device, []string{fwField})
+	switch {
+	case !reachable, state[fwField] == "":
+		return "unverified", true
+	case state[fwField] == "nvs":
+		return "still in NVS", false
+	}
+	return "", true
 }
 
 // handleAdminDeviceSecretsSet stores (or overwrites) one secret value, then

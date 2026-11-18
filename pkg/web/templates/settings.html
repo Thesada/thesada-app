@@ -168,7 +168,17 @@
   {{if or (eq .SavedSection "notifications") (eq .SavedSection "channels")}}
   <div class="mb-4 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
     Notification settings updated.
+    {{if eq .ConfirmState "sent"}}A confirm link went to the new address. Alerts go there once it is confirmed.{{end}}
   </div>
+  {{if eq .ConfirmState "later"}}
+  <div class="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+    Too many confirm emails in the last hour. No link was sent, try Resend later.
+  </div>
+  {{else if eq .ConfirmState "failed"}}
+  <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+    The confirm email could not be sent. Try Resend later.
+  </div>
+  {{end}}
   {{else if or (eq .SaveError "notifications") (eq .SaveError "channels")}}
   <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
     Could not save that change.
@@ -205,6 +215,13 @@
               <button type="submit" class="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-600">off</button>
               {{end}}
             </form>
+            {{if not .Confirmed}}
+            <span class="text-xs text-amber-700">waiting for confirmation</span>
+            <form method="POST" action="/settings/channels/{{.ID}}/resend" class="inline">
+              <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+              <button type="submit" class="text-xs text-sky-700 hover:underline">Resend</button>
+            </form>
+            {{end}}
           </td>
           <td class="px-4 py-2 text-right whitespace-nowrap">
             <details class="inline-block text-left">
@@ -289,7 +306,8 @@
             {{.Channel}}
             {{if .Target}}<span class="font-mono text-xs text-slate-500 break-all">{{.Target}}</span>{{end}}
             {{if not .ChannelID}}<span class="text-xs text-amber-700">no channel, not sent</span>
-            {{else if not .Enabled}}<span class="text-xs text-slate-500">channel off</span>{{end}}
+            {{else if not .Enabled}}<span class="text-xs text-slate-500">channel off</span>
+            {{else if not .Confirmed}}<span class="text-xs text-amber-700">waiting for confirmation</span>{{end}}
           </td>
           <td class="px-4 py-2">
             <span class="text-xs px-2 py-0.5 rounded

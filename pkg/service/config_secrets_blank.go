@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -216,4 +217,107 @@ func blankSensitiveLeaves(v any) bool {
 		}
 	}
 	return changed
+}
+
+// primaryWifiSSID is the first configured SSID, the one provisioning gives the legacy
+// bare wifi.password. out: "" when none or the content does not parse.
+func primaryWifiSSID(content string) string {
+	var m map[string]any
+	if json.Unmarshal([]byte(content), &m) != nil {
+		return ""
+	}
+	if ssids := WifiNetworkSSIDs(m); len(ssids) > 0 {
+		return ssids[0]
+	}
+	return ""
+}
+
+// openWifiSSIDs returns the SSID of every wifi.networks[] entry whose password
+// is an explicit "", in config order. A device read records these as open (#88).
+// in: config.json content. out: SSIDs (may be empty).
+func openWifiSSIDs(content string) []string {
+	var m map[string]any
+	if json.Unmarshal([]byte(content), &m) != nil {
+		return nil
+	}
+	var out []string
+	for _, net := range wifiNetworks(m) {
+		ssid, _ := net["ssid"].(string)
+		if pw, ok := net["password"].(string); ok && pw == "" && ssid != "" && !slices.Contains(out, ssid) {
+			out = append(out, ssid)
+		}
+	}
+	return out
+}
+
+// BlankSecretFields lists the empty secret leaves in config.json content, the
+// shape blankConfigSecrets leaves in snapshots and the editor. Writing such
+// content to a device erases those secrets unless the field really is empty
+// on the device. fields are storage keys (scalars and wifi.password:<ssid>),
+// unknown is an empty sensitive leaf the store has no field for.
+// Content that is not one JSON object fails closed with an error: a config.json
+// write must never replace the device config with something it cannot parse.
+// in: raw config.json content. out: empty fields, unknown empty leaf found, error.
+func BlankSecretFields(content string) ([]string, bool, error) {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(content)), &m); err != nil {
+		return nil, false, fmt.Errorf("config.json must be one JSON object: %w", err)
+	}
+	if m == nil {
+		return nil, false, fmt.Errorf("config.json must be one JSON object, got null")
+	}
+	var fields []string
+	for _, dotted := range ScalarSecretFields {
+		segs := strings.Split(dotted, ".")
+		if v, ok := readPath(m, segs); ok && v == "" {
+			fields = append(fields, dotted)
+			deletePath(m, segs)
+		}
+	}
+	for _, net := range wifiNetworks(m) {
+		pw, ok := net["password"].(string)
+		ssid, _ := net["ssid"].(string)
+		if ok && pw == "" && ssid != "" {
+			fields = append(fields, WifiSecretField(ssid))
+			delete(net, "password")
+		}
+	}
+	// Whatever empty sensitive leaf is left has no storage field.
+	return fields, hasBlankSensitiveLeaf(m), nil
+}
+
+// deletePath removes the leaf at segs, the counterpart of readPath.
+func deletePath(m map[string]any, segs []string) {
+	for _, seg := range segs[:len(segs)-1] {
+		child, ok := m[seg].(map[string]any)
+		if !ok {
+			return
+		}
+		m = child
+	}
+	delete(m, segs[len(segs)-1])
+}
+
+func hasBlankSensitiveLeaf(v any) bool {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			if s, ok := val.(string); ok {
+				if s == "" && sensitiveConfigKeyRE.MatchString(k) {
+					return true
+				}
+				continue
+			}
+			if hasBlankSensitiveLeaf(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range t {
+			if hasBlankSensitiveLeaf(item) {
+				return true
+			}
+		}
+	}
+	return false
 }

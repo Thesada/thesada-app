@@ -500,3 +500,28 @@ func TestStagedWrite_SnapshotKeyWritesRootConfig(t *testing.T) {
 		t.Fatalf("/config.json = %q, want the restored snapshot", fs.files["/config.json"])
 	}
 }
+
+func TestChangesConfig(t *testing.T) {
+	for _, tc := range []struct {
+		cmd, payload string
+		want         bool
+	}{
+		{"config.dump", "", false},
+		{"fs.cat", "/config.json 0 2048", false},
+		{"fs.ls", "/", false},
+		{"config.set", "wifi.networks []", true},
+		{"fs.mv", "/config.json.bak /config.json", true},
+		{"fs.rm", "/config.json", true},
+		{"fs.write", "/scripts/main.lua", false},
+		{"sys.reboot", "", false},
+		// The device globs fs.rm, and "/." names the root past its config.json skip.
+		{"fs.rm", "/./config.* --yes", true},
+		{"fs.rm", "/c?nfig.json --yes", true},
+		{"fs.rm", "/sd/logs/old.csv", false},
+		{"fs.ls", "/*.json", false},
+	} {
+		if got := changesConfig(tc.cmd, tc.payload); got != tc.want {
+			t.Errorf("changesConfig(%q, %q) = %v, want %v", tc.cmd, tc.payload, got, tc.want)
+		}
+	}
+}

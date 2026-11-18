@@ -46,6 +46,7 @@ const (
 	DeviceReassign        Action = "device.reassign"
 	DeviceSecretSet       Action = "device_secret.set"
 	DeviceSecretClear     Action = "device_secret.clear"
+	DeviceSecretClearNVS  Action = "device_secret.clear_nvs"
 	DeviceSecretProvision Action = "device_secret.provision"
 	TenantSecretSet       Action = "tenant_secret.set"
 	TenantSecretClear     Action = "tenant_secret.clear"
@@ -93,6 +94,7 @@ var superAdminActions = map[Action]bool{
 	DeviceReassign:          true,
 	DeviceSecretSet:         true,
 	DeviceSecretClear:       true,
+	DeviceSecretClearNVS:    true,
 	DeviceSecretProvision:   true,
 	TenantSecretSet:         true,
 	TenantSecretClear:       true,

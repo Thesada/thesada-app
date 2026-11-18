@@ -278,7 +278,7 @@ func (s *TenantService) CountSubscribersAny(slug string) (int, error) {
 		return tx.QueryRow(ctx, `
 			SELECT count(DISTINCT s.user_id) FROM alert_subscriptions s
 			JOIN users u ON u.id = s.user_id
-			JOIN notification_channels c ON c.id = s.channel_id AND c.enabled
+			JOIN notification_channels c ON c.id = s.channel_id AND c.enabled AND `+channelConfirmedSQL+`
 			WHERE u.tenant_id = $1 AND `+subCoversPaired, slug).Scan(&n)
 	})
 	return n, err

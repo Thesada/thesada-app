@@ -47,25 +47,71 @@ func (c *Client) devicePaired(tenant string, devicePk uuid.UUID) bool {
 // driftCLIFallback bounds a drift round trip on a Client built without config.
 const driftCLIFallback = 15 * time.Second
 
+// driftUpsertTimeout bounds the store refresh and snapshot write of one drift pull.
+const driftUpsertTimeout = 10 * time.Second
+
 // driftCLI runs one drift-pull CLI round trip under cfg.CLIRequestTimeout, so
 // a cellular device gets the same budget as an operator command.
 // in: topic prefix, command, payload. out: response, error.
 func (c *Client) driftCLI(topicPrefix, command, payload string) (*CLIResponse, error) {
-	d := c.cliTimeout
-	if d <= 0 {
-		d = driftCLIFallback
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), d)
+	ctx, cancel := context.WithTimeout(context.Background(), c.driftTimeout())
 	defer cancel()
 	return c.CLIRequest(ctx, topicPrefix, command, payload)
 }
 
-// maxDriftChunks caps one script pull at 128 KB of 2 KB chunks, twice the firmware's 64 KB editor cap.
+func (c *Client) driftTimeout() time.Duration {
+	if c.cliTimeout <= 0 {
+		return driftCLIFallback
+	}
+	return c.cliTimeout
+}
+
+// maxDriftChunks caps one chunked read at 128 KB of 2 KB chunks, twice the firmware's 64 KB editor cap.
 const maxDriftChunks = 64
 
+// ReadFileChunked reads path off the device with chunked fs.cat, 2 KB per round
+// trip, each bounded by step. in: ctx, topic prefix, path, per-chunk timeout. out: content, error.
+func (c *Client) ReadFileChunked(ctx context.Context, topicPrefix, path string, step time.Duration) (string, error) {
+	var buf strings.Builder
+	offset := 0
+	for chunk := 0; ; chunk++ {
+		if chunk >= maxDriftChunks {
+			return "", fmt.Errorf("chunk limit reached at offset %d", offset)
+		}
+		cctx, cancel := context.WithTimeout(ctx, step)
+		resp, err := c.CLIRequest(cctx, topicPrefix, "fs.cat", fmt.Sprintf("%s %d 2048", path, offset))
+		cancel()
+		if err != nil {
+			return "", fmt.Errorf("chunk at offset %d: %w", offset, err)
+		}
+		if !resp.OK {
+			return "", fmt.Errorf("device error at offset %d: %s", offset, strings.Join(resp.Output, " "))
+		}
+		next, more, err := nextChunk(offset, resp)
+		if err != nil {
+			return "", err
+		}
+		if resp.Data != nil {
+			buf.WriteString(*resp.Data)
+		}
+		if !more {
+			return buf.String(), nil
+		}
+		offset = next
+	}
+}
+
 // nextChunk decides how a chunked fs.cat pull goes on after one reply.
-// in: current offset, reply. out: next offset, whether to read more, error when not done but no progress.
+// in: current offset, reply. out: next offset, whether to read more, error when not done but no progress
+// or when the reply does not echo the offset asked for.
 func nextChunk(offset int, resp *CLIResponse) (int, bool, error) {
+	// Firmware echoes offset on every chunk. A cmd-only match takes a late reply to an earlier chunk.
+	if resp.Offset == nil {
+		return offset, false, fmt.Errorf("chunk reply without offset, asked for %d", offset)
+	}
+	if *resp.Offset != offset {
+		return offset, false, fmt.Errorf("chunk reply for offset %d, asked for %d", *resp.Offset, offset)
+	}
 	if resp.Done != nil && *resp.Done {
 		return offset, false, nil
 	}
@@ -133,7 +179,17 @@ func (c *Client) discoverAndSnapshotScripts(tenant string, devicePk uuid.UUID, t
 // sha (empty string when caller has no reference hash). out: none.
 func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix, path, source, expectedSha string) {
 	var content string
+	var readStart time.Time
 	if path == "config.json" {
+		// Taken before the device answers: a config change meanwhile makes this pull stale.
+		rctx, rcancel := context.WithTimeout(context.Background(), driftUpsertTimeout)
+		start, err := c.services.DeviceFiles.ReadStart(rctx, tenant)
+		rcancel()
+		if err != nil {
+			slog.Error("drift pull read start failed", "path", path, "err", err)
+			return
+		}
+		readStart = start
 		resp, err := c.driftCLI(topicPrefix, "config.dump", "")
 		if err != nil {
 			slog.Error("drift pull failed", "path", path, "err", err)
@@ -145,38 +201,12 @@ func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix,
 		}
 		content = strings.Join(resp.Output, "\n")
 	} else {
-		// Chunked read for script files
-		var buf strings.Builder
-		offset := 0
-		for chunk := 0; ; chunk++ {
-			if chunk >= maxDriftChunks {
-				slog.Error("drift pull chunk limit", "path", path, "offset", offset)
-				return
-			}
-			payload := fmt.Sprintf("%s %d 2048", path, offset)
-			resp, err := c.driftCLI(topicPrefix, "fs.cat", payload)
-			if err != nil {
-				slog.Error("drift pull chunk failed", "path", path, "offset", offset, "err", err)
-				return
-			}
-			if !resp.OK {
-				slog.Error("drift pull chunk device error", "path", path, "output", resp.Output)
-				return
-			}
-			if resp.Data != nil {
-				buf.WriteString(*resp.Data)
-			}
-			next, more, err := nextChunk(offset, resp)
-			if err != nil {
-				slog.Error("drift pull chunk without progress", "path", path, "offset", offset, "err", err)
-				return
-			}
-			if !more {
-				break
-			}
-			offset = next
+		var err error
+		content, err = c.ReadFileChunked(context.Background(), topicPrefix, path, c.driftTimeout())
+		if err != nil {
+			slog.Error("drift pull chunked read failed", "path", path, "err", err)
+			return
 		}
-		content = buf.String()
 	}
 
 	if !validSnapshotContent(path, content) {
@@ -195,7 +225,9 @@ func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix,
 		return
 	}
 
-	if err := c.services.DeviceFiles.Upsert(context.Background(), tenant, devicePk, path, content, hashHex, source, nil); err != nil {
+	uctx, cancel := context.WithTimeout(context.Background(), driftUpsertTimeout)
+	defer cancel()
+	if err := c.services.DeviceFiles.UpsertFromDevice(uctx, tenant, devicePk, path, content, hashHex, source, nil, readStart); err != nil {
 		slog.Error("drift file upsert failed", "path", path, "err", err)
 	} else {
 		slog.Info("device_file saved", "path", path, "source", source, "sha256", hashHex[:12])

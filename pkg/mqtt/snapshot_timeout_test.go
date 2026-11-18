@@ -5,17 +5,17 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"thesada.app/app/pkg/service"
 )
 
 // A drift pull waits CLIRequestTimeout per round trip, not a fixed 10 or 15 s,
 // so a slow cellular link gets the operator's budget and a dead device frees
-// the CLI lock when that budget ends.
+// the CLI lock when that budget ends. config.dump goes through the same
+// driftCLI as discovery, after a database read start this test has no DB for.
 func TestDriftPull_UsesConfiguredCLITimeout(t *testing.T) {
 	silent := &answerBroker{} // the device never answers
 	for name, pull := range map[string]func(c *Client){
-		"config.json": func(c *Client) {
-			c.pullAndSnapshot("t", uuid.New(), "thesada/t/d", "config.json", "drift", "")
-		},
 		"script chunk": func(c *Client) {
 			c.pullAndSnapshot("t", uuid.New(), "thesada/t/d", "/scripts/main.lua", "drift", "")
 		},
@@ -24,7 +24,8 @@ func TestDriftPull_UsesConfiguredCLITimeout(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := &Client{c: silent, cliTimeout: 50 * time.Millisecond}
+			c := &Client{c: silent, cliTimeout: 50 * time.Millisecond,
+				services: &service.Services{DeviceFiles: &service.DeviceFilesService{}}}
 			start := time.Now()
 			pull(c)
 			if took := time.Since(start); took > 2*time.Second {

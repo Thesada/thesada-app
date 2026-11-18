@@ -17,6 +17,7 @@ import (
 	"thesada.app/app/pkg/alerts"
 	apiv1 "thesada.app/app/pkg/api/v1"
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/buildinfo"
 	"thesada.app/app/pkg/config"
 	"thesada.app/app/pkg/db"
 	"thesada.app/app/pkg/httpsec"
@@ -127,6 +128,8 @@ func main() {
 		slog.Info("rotate-kek done", "rotated", res.Rotated, "already_new", res.AlreadyNew, "next", next)
 		return
 	}
+
+	slog.Info("starting", "build", buildinfo.String())
 
 	// Warm the tenant slug and settings caches before routing starts.
 	// Fatal on first load so a mis-seeded db is caught at boot, not on first

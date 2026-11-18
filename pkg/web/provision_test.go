@@ -103,6 +103,20 @@ func TestProvisionDeviceSecrets(t *testing.T) {
 		}
 	})
 
+	// secret.set with "" clears NVS on the firmware, so a found empty value is skipped (C1).
+	t.Run("an empty value is skipped, never pushed", func(t *testing.T) {
+		out := provisionDeviceSecrets([]string{"wifi.password:cafe", "mqtt.password"}, "n",
+			func(f string) (string, bool, error) { return "", true, nil },
+			func(fw, v string) (string, bool) {
+				t.Fatalf("push of %s with %q must not happen", fw, v)
+				return "", false
+			},
+		)
+		if out.AbortMsg != "" || len(out.SkippedUnset) != 2 {
+			t.Errorf("outcome = %+v, want both skipped", out)
+		}
+	})
+
 	t.Run("all unset is a clean no-op", func(t *testing.T) {
 		out := provisionDeviceSecrets(fields, "n",
 			func(f string) (string, bool, error) { return "", false, nil },

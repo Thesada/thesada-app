@@ -51,6 +51,15 @@ func TestParseSecretInfo(t *testing.T) {
 			want:   map[string]string{"mqtt.password": "nvs"},
 		},
 		{
+			name: "a key the report repeats is unknown",
+			output: []string{
+				"wifi.password:Cafe     nvs",
+				"wifi.password:Cafe     config/none",
+				"mqtt.password          nvs",
+			},
+			want: map[string]string{"wifi.password:Cafe": "", "mqtt.password": "nvs"},
+		},
+		{
 			name:   "empty output yields empty map",
 			output: nil,
 			want:   map[string]string{},
