@@ -72,16 +72,18 @@ func lockDeviceConfig(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, change
 
 // UpsertFromDevice is Upsert for content the device reported or confirmed. config.json runs in one
 // tx under the device row lock: a stale read writes nothing, a current one refreshes the store too.
-func (s *DeviceFilesService) UpsertFromDevice(ctx context.Context, tenantID string, devicePk uuid.UUID, path, content, sha256hex, source string, createdBy *uuid.UUID, readStart time.Time) error {
+// out: stored (false for a stale read, which is dropped with a nil error), error.
+func (s *DeviceFilesService) UpsertFromDevice(ctx context.Context, tenantID string, devicePk uuid.UUID, path, content, sha256hex, source string, createdBy *uuid.UUID, readStart time.Time) (bool, error) {
 	if !isConfigJSON(path) {
-		return s.Upsert(ctx, tenantID, devicePk, path, content, sha256hex, source, createdBy)
+		err := s.Upsert(ctx, tenantID, devicePk, path, content, sha256hex, source, createdBy)
+		return err == nil, err
 	}
 	if readStart.IsZero() {
-		return errors.New("device read of config.json without a read start")
+		return false, errors.New("device read of config.json without a read start")
 	}
 	blanked, err := blankedContent(path, content)
 	if err != nil {
-		return err
+		return false, err
 	}
 	stale := false
 	err = db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
@@ -107,10 +109,13 @@ func (s *DeviceFilesService) UpsertFromDevice(ctx context.Context, tenantID stri
 		}
 		return upsertTx(ctx, tx, devicePk, path, blanked, sha256hex, source, createdBy)
 	})
-	if err == nil && stale {
+	if err != nil {
+		return false, err
+	}
+	if stale {
 		slog.Info("device.read.stale_dropped", "device", devicePk, "source", source)
 	}
-	return err
+	return !stale, nil
 }
 
 // refreshStoreTx fills only fields the store has nothing for, as the firmware resolves NVS first (C1),

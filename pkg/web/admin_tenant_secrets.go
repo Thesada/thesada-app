@@ -304,7 +304,7 @@ func (s *Server) handleAdminTenantSecretsProvision(w http.ResponseWriter, r *htt
 	slog.Info("tenant_secret.state_change", "action", "provision",
 		"tenant", tenant.ID, "field", field, "targets", len(targets),
 		"pushed", out.Pushed, "unreachable", out.Unreachable,
-		"rejected", out.Rejected, "skipped", out.Skipped, "actor", actor)
+		"rejected", out.Rejected, "skipped", out.Skipped, "overridden", out.Overridden, "actor", actor)
 	// Its own budget, not the sweep's leftovers: a truncated sweep is exactly
 	// when the audit row matters, and fanCtx is spent by then.
 	auditCtx, acancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
@@ -314,6 +314,7 @@ func (s *Server) handleAdminTenantSecretsProvision(w http.ResponseWriter, r *htt
 		Detail: map[string]any{
 			"field": field, "targets": len(targets), "pushed": out.Pushed,
 			"unreachable": out.Unreachable, "rejected": out.Rejected, "skipped": out.Skipped,
+			"overridden": out.Overridden,
 		},
 	})
 
@@ -330,13 +331,14 @@ func (s *Server) handleAdminTenantSecretsProvision(w http.ResponseWriter, r *htt
 const fanOutPerDeviceBudget = 15 * time.Second
 
 // fanOutResult counts what a sweep did. Every target lands in exactly one
-// bucket, and the four sum to len(targets), so a silently dropped device is
+// bucket, and the five sum to len(targets), so a silently dropped device is
 // impossible to hide.
 type fanOutResult struct {
 	Pushed      int
 	Unreachable int // no response from the device
 	Rejected    int // device answered and refused the write
 	Skipped     int // never attempted (lookup failed, or budget exhausted)
+	Overridden  int // gained its own override after the target list was read
 }
 
 // fanOutTenantSecret pushes one value to each target device over MQTT. A
@@ -367,7 +369,25 @@ func (s *Server) fanOutTenantSecret(ctx context.Context, tenantID, field, value 
 			out.Skipped++
 			continue
 		}
-		msg, ok := s.pushSecret(ctx, s.deviceTopicPrefix(device), field, value)
+		var msg string
+		var ok bool
+		// An override set after ProvisionTargets is seen here, under the lock its write takes.
+		ran, err := s.services.Secrets.PushUnlessOverridden(ctx, tenantID, pk, field, func() {
+			msg, ok = s.pushSecret(ctx, s.deviceTopicPrefix(device), field, value)
+		})
+		if !ran {
+			if err != nil {
+				slog.Error("tenant_secret.fanout_lookup_failed", "tenant", tenantID, "device", pk, "err", err)
+				out.Skipped++
+			} else {
+				slog.Info("tenant_secret.fanout_overridden", "tenant", tenantID, "device", device.DeviceID, "field", field)
+				out.Overridden++
+			}
+			continue
+		}
+		if err != nil {
+			slog.Error("tenant_secret.fanout_commit_failed", "tenant", tenantID, "device", device.DeviceID, "err", err)
+		}
 		if !ok {
 			// msg is a fixed, value-free string built by pushSecret.
 			slog.Warn("tenant_secret.fanout_push_failed", "tenant", tenantID,

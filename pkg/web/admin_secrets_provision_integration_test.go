@@ -340,7 +340,7 @@ func TestAdminDeviceSecretsClearDevice_DropsWifiRow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReadStart: %v", err)
 		}
-		if err := env.Services.DeviceFiles.UpsertFromDevice(ctx, tenant, device.ID, "config.json", content, "sha", "drift", nil, at); err != nil {
+		if _, err := env.Services.DeviceFiles.UpsertFromDevice(ctx, tenant, device.ID, "config.json", content, "sha", "drift", nil, at); err != nil {
 			t.Fatalf("UpsertFromDevice: %v", err)
 		}
 	}

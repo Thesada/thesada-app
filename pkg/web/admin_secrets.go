@@ -440,10 +440,10 @@ func (s *Server) handleAdminDeviceSecretsClearDevice(w http.ResponseWriter, r *h
 	http.Redirect(w, r, done.on(dest), http.StatusFound)
 }
 
-// dropClearedWifiRows deletes the device row for a WiFi field the device verified empty.
-// in: ctx, device, firmware field. out: deleted.
+// dropClearedWifiRows deletes the store rows for a WiFi field the device verified empty,
+// the bare legacy row too when it maps to that network. in: ctx, device, firmware field. out: deleted.
 func (s *Server) dropClearedWifiRows(ctx context.Context, device *service.Device, fwField string) bool {
-	if _, err := s.services.Secrets.ClearDeviceSecret(ctx, device.TenantID, device.ID, fwField); err != nil {
+	if err := s.services.Secrets.DropClearedWifi(ctx, device.TenantID, device.ID, fwField); err != nil {
 		slog.Error("device_secret.store_drop_failed", "device", device.DeviceID, "field", fwField, "err", err)
 		return false
 	}

@@ -68,3 +68,18 @@ func (l *Log) Find(msg, site string) map[string]any {
 	}
 	return nil
 }
+
+// Count returns how many records carry this message.
+// in: message. out: count.
+func (l *Log) Count(msg string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, line := range bytes.Split(l.buf.Bytes(), []byte("\n")) {
+		var rec map[string]any
+		if json.Unmarshal(line, &rec) == nil && rec["msg"] == msg {
+			n++
+		}
+	}
+	return n
+}

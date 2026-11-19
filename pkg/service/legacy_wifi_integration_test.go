@@ -53,7 +53,7 @@ func (l *legacyEnv) read(pk uuid.UUID, content string) {
 	if err != nil {
 		l.t.Fatalf("ReadStart: %v", err)
 	}
-	if err := l.svcs.DeviceFiles.UpsertFromDevice(ctx, legacyTenant, pk, "config.json", content, "sha", "drift", nil, at); err != nil {
+	if _, err := l.svcs.DeviceFiles.UpsertFromDevice(ctx, legacyTenant, pk, "config.json", content, "sha", "drift", nil, at); err != nil {
 		l.t.Fatalf("UpsertFromDevice: %v", err)
 	}
 }
@@ -129,7 +129,7 @@ func TestLegacyWifi(t *testing.T) {
 		if err := l.svcs.DeviceFiles.MarkConfigChanged(ctx, legacyTenant, pk); err != nil {
 			t.Fatal(err)
 		}
-		if err := l.svcs.DeviceFiles.UpsertFromDevice(ctx, legacyTenant, pk, "config.json", homeAndPark, "sha", "drift", nil, at); err != nil {
+		if _, err := l.svcs.DeviceFiles.UpsertFromDevice(ctx, legacyTenant, pk, "config.json", homeAndPark, "sha", "drift", nil, at); err != nil {
 			t.Fatal(err)
 		}
 		if !l.bare(pk) {
@@ -137,6 +137,69 @@ func TestLegacyWifi(t *testing.T) {
 		}
 		if _, found := l.reveal(pk, "wifi.password:home"); found {
 			t.Error("a stale read wrote wifi.password:home")
+		}
+	})
+
+	t.Run("a_verified_clear_of_the_primary_drops_the_bare_row_too", func(t *testing.T) {
+		pk := l.device("lwf-6")
+		if err := l.svcs.DeviceFiles.Upsert(ctx, legacyTenant, pk, "config.json", homeAndPark, "sha", "read", nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, "wifi.password:home", "per-ssid"); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home"); err != nil {
+			t.Fatalf("DropClearedWifi: %v", err)
+		}
+		if l.bare(pk) {
+			t.Error("the bare row survived a verified clear of the primary network")
+		}
+		if _, err := service.MigrateLegacyWifi(ctx, l.svcs.Secrets, l.svcs.Devices, l.svcs.DeviceFiles); err != nil {
+			t.Fatal(err)
+		}
+		l.read(pk, homeAndPark)
+		if _, found := l.reveal(pk, "wifi.password:home"); found {
+			t.Error("a re-key brought the cleared password back")
+		}
+	})
+
+	t.Run("a_verified_clear_without_a_stored_config_drops_the_bare_row", func(t *testing.T) {
+		pk := l.device("lwf-8")
+		if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home"); err != nil {
+			t.Fatalf("DropClearedWifi: %v", err)
+		}
+		if l.bare(pk) {
+			t.Error("the bare row survived a verified clear on a device with no stored config")
+		}
+		l.read(pk, homeAndPark)
+		if _, found := l.reveal(pk, "wifi.password:home"); found {
+			t.Error("a later read re-keyed the cleared password back")
+		}
+	})
+
+	t.Run("a_verified_clear_with_no_networks_stored_drops_the_bare_row", func(t *testing.T) {
+		pk := l.device("lwf-9")
+		if err := l.svcs.DeviceFiles.Upsert(ctx, legacyTenant, pk, "config.json", `{"device":{"name":"x"}}`, "sha", "read", nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home"); err != nil {
+			t.Fatalf("DropClearedWifi: %v", err)
+		}
+		if l.bare(pk) {
+			t.Error("the bare row survived a verified clear on a device whose stored config names no network")
+		}
+	})
+
+	t.Run("a_verified_clear_of_another_network_keeps_the_bare_row", func(t *testing.T) {
+		pk := l.device("lwf-7")
+		if err := l.svcs.DeviceFiles.Upsert(ctx, legacyTenant, pk, "config.json", homeAndPark, "sha", "read", nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:park"); err != nil {
+			t.Fatalf("DropClearedWifi: %v", err)
+		}
+		if !l.bare(pk) {
+			t.Error("a clear of a second network deleted the primary's bare row")
 		}
 	})
 

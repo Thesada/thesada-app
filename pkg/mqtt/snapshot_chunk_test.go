@@ -18,7 +18,8 @@ func TestNextChunk_StopsWithoutProgress(t *testing.T) {
 		{"progress", CLIResponse{Offset: &at, Done: &no, Length: &n}, 6144, true, false},
 		{"zero length", CLIResponse{Offset: &at, Done: &no, Length: &zero}, 0, false, true},
 		{"negative length", CLIResponse{Offset: &at, Done: &no, Length: &neg}, 0, false, true},
-		{"no length", CLIResponse{Offset: &at, Done: &no}, 0, false, false},
+		{"no length", CLIResponse{Offset: &at, Done: &no}, 0, false, true},
+		{"no length no done", CLIResponse{Offset: &at}, 0, false, false},
 	}
 	for _, tc := range cases {
 		next, more, err := nextChunk(at, &tc.resp)

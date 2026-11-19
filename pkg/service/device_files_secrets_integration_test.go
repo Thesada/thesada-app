@@ -52,7 +52,7 @@ func TestUpsertFromDevice(t *testing.T) {
 	}
 	read := func(t *testing.T, pk uuid.UUID, content, sha string, at time.Time) {
 		t.Helper()
-		if err := df.UpsertFromDevice(ctx, tA, pk, "config.json", content, sha, "drift", nil, at); err != nil {
+		if _, err := df.UpsertFromDevice(ctx, tA, pk, "config.json", content, sha, "drift", nil, at); err != nil {
 			t.Fatalf("UpsertFromDevice: %v", err)
 		}
 	}
@@ -229,7 +229,7 @@ func TestUpsertFromDevice(t *testing.T) {
 		if open(t, restarted.DeviceFiles, pk, "cafe") {
 			t.Error("a restart made a stale marker count again")
 		}
-		if err := restarted.DeviceFiles.UpsertFromDevice(ctx, tA, pk, "config.json", openCafe, "sha-r", "drift", nil, before); err != nil {
+		if _, err := restarted.DeviceFiles.UpsertFromDevice(ctx, tA, pk, "config.json", openCafe, "sha-r", "drift", nil, before); err != nil {
 			t.Fatalf("UpsertFromDevice: %v", err)
 		}
 		if open(t, restarted.DeviceFiles, pk, "cafe") {
@@ -244,7 +244,9 @@ func TestUpsertFromDevice(t *testing.T) {
 		readStarted := start(t)
 		changed(t, pk)
 		stale := `{"device":{"name":"old"},"mqtt":{"password":"mq"},"wifi":{"networks":[{"ssid":"cafe","password":""}]}}`
-		read(t, pk, stale, "sha-old", readStarted)
+		if stored, err := df.UpsertFromDevice(ctx, tA, pk, "config.json", stale, "sha-old", "drift", nil, readStarted); err != nil || stored {
+			t.Fatalf("stale UpsertFromDevice = %v, %v, want dropped with a nil error", stored, err)
+		}
 		latest, err := df.Latest(ctx, tA, pk, "config.json")
 		if err != nil || latest == nil || latest.SHA256 != "sha-new" {
 			t.Fatalf("snapshot after a stale read = %+v, %v, want sha-new", latest, err)
@@ -254,6 +256,9 @@ func TestUpsertFromDevice(t *testing.T) {
 		}
 		if markers(t, pk) != 0 {
 			t.Error("a stale read recorded a marker")
+		}
+		if stored, err := df.UpsertFromDevice(ctx, tA, pk, "config.json", `{"device":{"name":"new"}}`, "sha-new2", "drift", nil, start(t)); err != nil || !stored {
+			t.Fatalf("current UpsertFromDevice = %v, %v, want stored", stored, err)
 		}
 	})
 
@@ -276,7 +281,7 @@ func TestUpsertFromDevice(t *testing.T) {
 		pk := mustUpsert(t, svcs.Devices, tA, "dfs-dev-9", "", "", "", "")
 		// Postgres text refuses NUL, so the marker step fails after mqtt.password was filled.
 		bad := `{"mqtt":{"password":"mq"},"wifi":{"networks":[{"ssid":"bad\u0000","password":""}]}}`
-		if err := df.UpsertFromDevice(ctx, tA, pk, "config.json", bad, "sha-bad", "drift", nil, start(t)); err == nil {
+		if _, err := df.UpsertFromDevice(ctx, tA, pk, "config.json", bad, "sha-bad", "drift", nil, start(t)); err == nil {
 			t.Fatal("UpsertFromDevice with a NUL SSID succeeded, the failure path never ran")
 		}
 		if _, found := reveal(t, pk, "mqtt.password"); found {
@@ -302,7 +307,7 @@ func TestUpsertFromDevice(t *testing.T) {
 			t.Fatalf("ReadStart: %v", err)
 		}
 		moved := strings.Replace(content, "pw-a", "pw-b", 1)
-		if err := df.UpsertFromDevice(ctx, tB, pk, "config.json", moved, "sha-b", "drift", nil, at); err != nil {
+		if _, err := df.UpsertFromDevice(ctx, tB, pk, "config.json", moved, "sha-b", "drift", nil, at); err != nil {
 			t.Fatalf("read under the new tenant: %v", err)
 		}
 		var n int
@@ -408,7 +413,7 @@ func TestUpsertFromDevice(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReadStart: %v", err)
 		}
-		if err := off.DeviceFiles.UpsertFromDevice(ctx, tA, pk, "config.json", content, "sha-off", "pull", nil, at); err != nil {
+		if _, err := off.DeviceFiles.UpsertFromDevice(ctx, tA, pk, "config.json", content, "sha-off", "pull", nil, at); err != nil {
 			t.Fatalf("UpsertFromDevice feature off: %v", err)
 		}
 		latest, err := off.DeviceFiles.Latest(ctx, tA, pk, "config.json")
@@ -424,7 +429,7 @@ func TestUpsertFromDevice(t *testing.T) {
 		if err := off.DeviceFiles.MarkConfigChanged(ctx, tA, pk); err != nil {
 			t.Fatalf("MarkConfigChanged: %v", err)
 		}
-		if err := off.DeviceFiles.UpsertFromDevice(ctx, tA, pk, "config.json", `{}`, "sha-late", "pull", nil, at); err != nil {
+		if _, err := off.DeviceFiles.UpsertFromDevice(ctx, tA, pk, "config.json", `{}`, "sha-late", "pull", nil, at); err != nil {
 			t.Fatalf("stale UpsertFromDevice: %v", err)
 		}
 		if latest, _ := off.DeviceFiles.Latest(ctx, tA, pk, "config.json"); latest == nil || latest.SHA256 != "sha-off" {

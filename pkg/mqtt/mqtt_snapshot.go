@@ -12,6 +12,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+
+	"thesada.app/app/pkg/service"
 )
 
 // snapshotAllowed reports whether a device's config may be pulled over the
@@ -42,6 +44,21 @@ func (c *Client) devicePaired(tenant string, devicePk uuid.UUID) bool {
 		return false
 	}
 	return snapshotAllowed(d.PairedAt)
+}
+
+// firmwareMeetsFloor reads the device's stored firmware version, a lookup failure fails closed.
+// in: tenant id, device pk. out: reported version ("" when unknown), at or above the floor.
+func (c *Client) firmwareMeetsFloor(tenant string, devicePk uuid.UUID) (string, bool) {
+	d, err := c.services.Devices.GetByID(devicePk, tenant)
+	if err != nil || d == nil {
+		slog.Debug("firmware version unresolved", "tenant", tenant, "device_pk", devicePk, "err", err)
+		return "", false
+	}
+	fw := ""
+	if d.FirmwareVersion != nil {
+		fw = *d.FirmwareVersion
+	}
+	return fw, service.FirmwareMeetsFloor(d.FirmwareVersion)
 }
 
 // driftCLIFallback bounds a drift round trip on a Client built without config.
@@ -123,6 +140,10 @@ func nextChunk(offset int, resp *CLIResponse) (int, bool, error) {
 		return offset, false, nil
 	}
 	if resp.Length == nil {
+		// A not-done reply without length would pass a truncated prefix as the whole file.
+		if resp.Done != nil {
+			return offset, false, fmt.Errorf("chunk reply at offset %d not done without length", offset)
+		}
 		return offset, false, nil
 	}
 	if *resp.Length <= 0 {
@@ -234,9 +255,11 @@ func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix,
 
 	uctx, cancel := context.WithTimeout(context.Background(), driftUpsertTimeout)
 	defer cancel()
-	if err := c.services.DeviceFiles.UpsertFromDevice(uctx, tenant, devicePk, path, content, hashHex, source, nil, readStart); err != nil {
+	stored, err := c.services.DeviceFiles.UpsertFromDevice(uctx, tenant, devicePk, path, content, hashHex, source, nil, readStart)
+	switch {
+	case err != nil:
 		slog.Error("drift file upsert failed", "path", path, "err", err)
-	} else {
+	case stored:
 		slog.Info("device_file saved", "path", path, "source", source, "sha256", hashHex[:12])
 	}
 }

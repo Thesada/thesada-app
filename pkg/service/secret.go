@@ -651,6 +651,34 @@ func (s *SecretService) ProvisionTargets(ctx context.Context, tenantID, field st
 	return out, nil
 }
 
+// PushUnlessOverridden runs push for one ProvisionTargets device only while it holds no override
+// for field. The device row lock SetSecret takes is held across the check and push, so an override
+// cannot land in between. in: ctx, tenant, device, field, push. out: pushed (false when overridden), error.
+func (s *SecretService) PushUnlessOverridden(ctx context.Context, tenantID string, devicePk uuid.UUID, field string, push func()) (bool, error) {
+	if !validSecretField(field) {
+		return false, fmt.Errorf("secret: unknown field %q", field)
+	}
+	ran := false
+	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		if err := lockDeviceConfig(ctx, tx, devicePk, nil, nil); err != nil {
+			return err
+		}
+		var overridden bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM device_config_secrets WHERE device_pk = $1 AND field = $2)`,
+			devicePk, field).Scan(&overridden); err != nil {
+			return fmt.Errorf("look up override %s: %w", field, err)
+		}
+		if overridden {
+			return nil
+		}
+		ran = true
+		push()
+		return nil
+	})
+	return ran, err
+}
+
 // ProvisionTargetCounts returns, per field, how many devices a default change
 // would have to reach. One query for the whole page: the per-field variant ran
 // its own transaction each time, which is a round trip per row rendered.

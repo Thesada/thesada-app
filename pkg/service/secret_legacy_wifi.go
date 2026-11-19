@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -76,6 +77,48 @@ func (s *SecretService) rekeyLegacyWifiTx(ctx context.Context, tx pgx.Tx, tenant
 	}
 	slog.Info("device_secret.legacy_wifi_"+string(outcome), "device", devicePk, "field", target)
 	return outcome, nil
+}
+
+// DropClearedWifi deletes the store rows for a WiFi password the device verified empty, in one tx under
+// the device row lock: the per-SSID row, and the bare legacy row unless the stored config.json names another
+// primary SSID, so a later re-key cannot bring the password back. in: ctx, tenant, device, field. out: error.
+func (s *SecretService) DropClearedWifi(ctx context.Context, tenantID string, devicePk uuid.UUID, field string) error {
+	ssid, ok := strings.CutPrefix(field, WifiPasswordPrefix)
+	if !ok || ssid == "" || !validSecretField(field) {
+		return fmt.Errorf("secret: %q is not a per-SSID WiFi password", field)
+	}
+	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		if err := lockDeviceConfig(ctx, tx, devicePk, nil, nil); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM device_config_secrets WHERE device_pk = $1 AND field = $2`, devicePk, field); err != nil {
+			return fmt.Errorf("delete %s: %w", field, err)
+		}
+		var content string
+		reason := "primary ssid"
+		err := tx.QueryRow(ctx,
+			`SELECT content FROM device_files WHERE device_pk = $1 AND path = 'config.json'`, devicePk).Scan(&content)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			reason = "no stored config"
+		case err != nil:
+			return fmt.Errorf("read stored config.json: %w", err)
+		case primaryWifiSSID(content) == "":
+			reason = "no primary ssid"
+		case primaryWifiSSID(content) != ssid:
+			return nil
+		}
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM device_config_secrets WHERE device_pk = $1 AND field = $2`, devicePk, LegacyWifiPassword)
+		if err != nil {
+			return fmt.Errorf("delete legacy wifi row: %w", err)
+		}
+		if tag.RowsAffected() > 0 {
+			slog.Info("device_secret.legacy_wifi_cleared", "device", devicePk, "field", field, "reason", reason)
+		}
+		return nil
+	})
 }
 
 // LegacyWifiResult is the summary of a migrate-legacy-wifi sweep.

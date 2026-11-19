@@ -361,7 +361,7 @@ func (s *Server) snapshotFromCmdResponse(parentCtx context.Context, tenantID str
 	defer cancel()
 	h := sha256.Sum256([]byte(content))
 	hashHex := hex.EncodeToString(h[:])
-	if err := s.services.DeviceFiles.UpsertFromDevice(ctx, tenantID, devicePk, configSnapshotKey, content, hashHex, "read", userID, readStart); err != nil {
+	if _, err := s.services.DeviceFiles.UpsertFromDevice(ctx, tenantID, devicePk, configSnapshotKey, content, hashHex, "read", userID, readStart); err != nil {
 		slog.Error("device_file upsert failed", "path", configSnapshotKey, "err", err)
 	}
 }
@@ -416,6 +416,10 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 
 	if req.Path == "" || req.Content == "" {
 		http.Error(w, "path and content required", http.StatusBadRequest)
+		return
+	}
+	if msg := firmwareRefusal(device, "Saving a file"); msg != "" {
+		http.Error(w, msg, http.StatusConflict)
 		return
 	}
 	// Two writes would share <path>.new and interleave their chunks on the device.
@@ -560,7 +564,8 @@ func (s *Server) storeWritten(parentCtx context.Context, device *service.Device,
 	if err != nil {
 		return err
 	}
-	return s.services.DeviceFiles.UpsertFromDevice(ctx, device.TenantID, device.ID, path, content, hashHex, "write", userID, start)
+	_, err = s.services.DeviceFiles.UpsertFromDevice(ctx, device.TenantID, device.ID, path, content, hashHex, "write", userID, start)
+	return err
 }
 
 // writeClaim is one running write: the token its owner releases with, and
@@ -677,6 +682,20 @@ func configWriteRefusal(path, content string, isOpen func(field string) (bool, e
 		}
 	}
 	return ""
+}
+
+// firmwareRefusal stops a staged write before dispatch on firmware that does not echo req_id,
+// whose size check could never pass. Unknown firmware is refused too. in: device, action. out: message or "".
+func firmwareRefusal(d *service.Device, action string) string {
+	if service.FirmwareMeetsFloor(d.FirmwareVersion) {
+		return ""
+	}
+	reported := "no firmware version"
+	if d.FirmwareVersion != nil && *d.FirmwareVersion != "" {
+		reported = "firmware " + *d.FirmwareVersion
+	}
+	return fmt.Sprintf("%s needs firmware %s or later and this device reports %s. "+
+		"Update the firmware first, nothing was sent", action, service.MinFirmwareVersion, reported)
 }
 
 // guardRefusal is a write guard refusal with its own message.
@@ -968,7 +987,7 @@ func (s *Server) runConfigLoad(parentCtx context.Context, reqID uuid.UUID, devic
 	if json.Unmarshal([]byte(content), &probe) == nil && probe != nil {
 		ctx, cancel := context.WithTimeout(parentCtx, snapshotUpsertTimeout)
 		h := sha256.Sum256([]byte(content))
-		if err := s.services.DeviceFiles.UpsertFromDevice(ctx, device.TenantID, device.ID, configSnapshotKey,
+		if _, err := s.services.DeviceFiles.UpsertFromDevice(ctx, device.TenantID, device.ID, configSnapshotKey,
 			content, hex.EncodeToString(h[:]), "read", userID, start); err != nil {
 			slog.Error("config load upsert failed", "device", device.DeviceID, "err", err)
 		}

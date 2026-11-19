@@ -274,10 +274,10 @@ func TestAdminConfigWrite_ChunksAndSnapshots(t *testing.T) {
 	})
 }
 
-// seedDevice upserts one device on prefix and returns it with its pk.
+// seedDevice upserts one device on prefix at the firmware floor and returns it with its pk.
 func seedDevice(t *testing.T, env *servicetest.Env, tenant, devID, prefix string) *service.Device {
 	t.Helper()
-	pk, err := env.Services.Devices.Upsert(tenant, devID, "", "", "", prefix)
+	pk, err := env.Services.Devices.Upsert(tenant, devID, "", service.MinFirmwareVersion, "", prefix)
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
@@ -296,7 +296,7 @@ func deviceRead(t *testing.T, env *servicetest.Env, device *service.Device, cont
 	if err != nil {
 		t.Fatalf("ReadStart: %v", err)
 	}
-	if err := env.Services.DeviceFiles.UpsertFromDevice(ctx, device.TenantID, device.ID, "config.json", content, "sha-seed", "drift", nil, start); err != nil {
+	if _, err := env.Services.DeviceFiles.UpsertFromDevice(ctx, device.TenantID, device.ID, "config.json", content, "sha-seed", "drift", nil, start); err != nil {
 		t.Fatalf("seed device read: %v", err)
 	}
 }
@@ -637,7 +637,7 @@ func TestAdminConfigWrite_FailedMarkAfterRenameKeepsMarkersStale(t *testing.T) {
 		// The old file, read after the pre-send mark and before the rename.
 		start, err := env.Services.DeviceFiles.ReadStart(ctx, tenant)
 		if err == nil {
-			err = env.Services.DeviceFiles.UpsertFromDevice(ctx, tenant, device.ID, "config.json",
+			_, err = env.Services.DeviceFiles.UpsertFromDevice(ctx, tenant, device.ID, "config.json",
 				dfs.files["/config.json"], "sha-old", "drift", nil, start)
 		}
 		if err != nil {
@@ -749,7 +749,7 @@ func TestAdminConfigWrite_SecondWriteToTheDeviceIs409(t *testing.T) {
 	const tenant = "webcfg4"
 	env.SeedTenant(t, tenant)
 	prefix := "thesada/" + tenant + "/dev4"
-	pk, err := env.Services.Devices.Upsert(tenant, "dev4", "", "", "", prefix)
+	pk, err := env.Services.Devices.Upsert(tenant, "dev4", "", service.MinFirmwareVersion, "", prefix)
 	if err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
