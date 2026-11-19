@@ -325,10 +325,10 @@ func (s *Server) handleAdminTenantSecretsProvision(w http.ResponseWriter, r *htt
 	http.Redirect(w, r, done.on(dest), http.StatusFound)
 }
 
-// fanOutPerDeviceBudget bounds the whole sweep at this much per target, on top
-// of pushSecret's own 10s per-device timeout. A sweep that runs past it stops
-// and reports what it managed, rather than running unbounded in the background.
-const fanOutPerDeviceBudget = 15 * time.Second
+// fanOutPerDeviceBudget bounds each target's row lock wait and push, over
+// pushSecret's own 10s timeout, and the sweep at this much per target plus one.
+// A var so a test can shorten it.
+var fanOutPerDeviceBudget = 15 * time.Second
 
 // fanOutResult counts what a sweep did. Every target lands in exactly one
 // bucket, and the five sum to len(targets), so a silently dropped device is
@@ -363,45 +363,53 @@ func (s *Server) fanOutTenantSecret(ctx context.Context, tenantID, field, value 
 			out.Skipped += len(targets) - i
 			return out
 		}
-		device, err := s.services.Devices.GetByIDAny(ctx, pk)
-		if err != nil || device == nil {
-			slog.Error("tenant_secret.fanout_lookup_failed", "tenant", tenantID, "device", pk, "err", err)
-			out.Skipped++
-			continue
-		}
-		var msg string
-		var ok bool
-		// An override set after ProvisionTargets is seen here, under the lock its write takes.
-		ran, err := s.services.Secrets.PushUnlessOverridden(ctx, tenantID, pk, field, func() {
-			msg, ok = s.pushSecret(ctx, s.deviceTopicPrefix(device), field, value)
-		})
-		if !ran {
-			if err != nil {
-				slog.Error("tenant_secret.fanout_lookup_failed", "tenant", tenantID, "device", pk, "err", err)
-				out.Skipped++
-			} else {
-				slog.Info("tenant_secret.fanout_overridden", "tenant", tenantID, "device", device.DeviceID, "field", field)
-				out.Overridden++
-			}
-			continue
-		}
-		if err != nil {
-			slog.Error("tenant_secret.fanout_commit_failed", "tenant", tenantID, "device", device.DeviceID, "err", err)
-		}
-		if !ok {
-			// msg is a fixed, value-free string built by pushSecret.
-			slog.Warn("tenant_secret.fanout_push_failed", "tenant", tenantID,
-				"device", device.DeviceID, "field", field, "reason", msg)
-			if strings.Contains(msg, "rejected") {
-				out.Rejected++
-			} else {
-				out.Unreachable++
-			}
-			continue
-		}
-		out.Pushed++
+		s.fanOutOne(ctx, tenantID, field, value, pk, &out)
 	}
 	return out
+}
+
+// fanOutOne pushes the default to one target under its own budget, so a long row lock wait
+// on one device cannot spend the sweep's. in: sweep ctx, tenant, field, plaintext, device pk, counts.
+func (s *Server) fanOutOne(ctx context.Context, tenantID, field, value string, pk uuid.UUID, out *fanOutResult) {
+	ctx, cancel := context.WithTimeout(ctx, fanOutPerDeviceBudget)
+	defer cancel()
+	device, err := s.services.Devices.GetByIDAny(ctx, pk)
+	if err != nil || device == nil {
+		slog.Error("tenant_secret.fanout_lookup_failed", "tenant", tenantID, "device", pk, "err", err)
+		out.Skipped++
+		return
+	}
+	var msg string
+	var ok bool
+	// An override set after ProvisionTargets is seen here, under the lock its write takes.
+	ran, err := s.services.Secrets.PushUnlessOverridden(ctx, tenantID, pk, field, func() {
+		msg, ok = s.pushSecret(ctx, s.deviceTopicPrefix(device), field, value)
+	})
+	if !ran {
+		if err != nil {
+			slog.Error("tenant_secret.fanout_lookup_failed", "tenant", tenantID, "device", pk, "err", err)
+			out.Skipped++
+		} else {
+			slog.Info("tenant_secret.fanout_overridden", "tenant", tenantID, "device", device.DeviceID, "field", field)
+			out.Overridden++
+		}
+		return
+	}
+	if err != nil {
+		slog.Error("tenant_secret.fanout_commit_failed", "tenant", tenantID, "device", device.DeviceID, "err", err)
+	}
+	if !ok {
+		// msg is a fixed, value-free string built by pushSecret.
+		slog.Warn("tenant_secret.fanout_push_failed", "tenant", tenantID,
+			"device", device.DeviceID, "field", field, "reason", msg)
+		if strings.Contains(msg, "rejected") {
+			out.Rejected++
+		} else {
+			out.Unreachable++
+		}
+		return
+	}
+	out.Pushed++
 }
 
 // tenantSecretTarget resolves {slug} to a tenant and the page URL to redirect

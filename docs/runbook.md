@@ -66,6 +66,7 @@ Assume broker credentials and/or the dynsec store are untrusted.
 3. Rolling the image back to an older timescaledb than the volume holds fails the ALTER, and the script stops before the migrations. The database container already runs the older image by then, so the stack is not as it was. Put the newer timescaledb image back in the compose file and rerun the script, or restore the database from a backup made before the upgrade.
 4. Update devices to firmware 1.4.5 or later before the app rollout. The app refuses file saves and rule pushes to older or unknown firmware with a 409 naming 1.4.5, and drift pulls skip it with `drift pull skipped, firmware below the supported floor` in the log.
 5. The release PR runs `make release-pin RELEASE=<version>`, so the compose file in a release tag runs that release. `go test ./deploy/` fails when the pin is older than the newest tag. The release workflow runs the same check (`make pin-check`, all tags fetched) on the tagged commit, and the image and binary jobs wait for it.
+6. Releases are CalVer only (`YY.MM.N`, no `v`). The release workflow fires on CalVer-shaped tags, and its pin job fails on any tag that is not `YY.MM.N`.
 
 ## Migrations
 

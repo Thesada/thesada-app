@@ -41,6 +41,8 @@ var (
 		"That password is the tenant default. Set a device override or clear the tenant default first.")
 	flashSecretClearedNVSStoreKept = adminFlashErr("nvs_cleared_store_kept",
 		"Cleared on the device, but the app could not drop its stored row, so the next provision pushes it again. Clear the row on this page.")
+	flashSecretClearedNVSReplaced = adminFlashErr("nvs_cleared_store_replaced",
+		"Cleared on the device, but a new password for that network was saved meanwhile. The app keeps it and the next provision pushes it.")
 	flashSecretClearNVSUncorrelated = adminFlashErr("nvs_clear_uncorrelated",
 		"The device answered without the request id, so the clear is not confirmed and the app keeps its rows. Reload to check the Device column.")
 	flashSecretProvisionedMix = adminFlashOK("provisioned_partial", "Provisioned. Some fields were skipped. Counts are in the log.")

@@ -8,6 +8,7 @@ package service_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -65,6 +66,16 @@ func (l *legacyEnv) reveal(pk uuid.UUID, field string) (string, bool) {
 		l.t.Fatalf("Reveal %s: %v", field, err)
 	}
 	return v, found
+}
+
+// drop runs DropClearedWifi with a mark taken just before, as Clear on device does around the device clear.
+func (l *legacyEnv) drop(pk uuid.UUID, field string) error {
+	l.t.Helper()
+	mark, err := l.svcs.Secrets.MarkWifiSecret(context.Background(), legacyTenant, pk, field)
+	if err != nil {
+		l.t.Fatalf("MarkWifiSecret %s: %v", field, err)
+	}
+	return l.svcs.Secrets.DropClearedWifi(context.Background(), legacyTenant, pk, field, mark)
 }
 
 func (l *legacyEnv) bare(pk uuid.UUID) bool {
@@ -148,7 +159,7 @@ func TestLegacyWifi(t *testing.T) {
 		if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, "wifi.password:home", "per-ssid"); err != nil {
 			t.Fatal(err)
 		}
-		if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home"); err != nil {
+		if err := l.drop(pk, "wifi.password:home"); err != nil {
 			t.Fatalf("DropClearedWifi: %v", err)
 		}
 		if l.bare(pk) {
@@ -165,7 +176,7 @@ func TestLegacyWifi(t *testing.T) {
 
 	t.Run("a_verified_clear_without_a_stored_config_drops_the_bare_row", func(t *testing.T) {
 		pk := l.device("lwf-8")
-		if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home"); err != nil {
+		if err := l.drop(pk, "wifi.password:home"); err != nil {
 			t.Fatalf("DropClearedWifi: %v", err)
 		}
 		if l.bare(pk) {
@@ -182,7 +193,7 @@ func TestLegacyWifi(t *testing.T) {
 		if err := l.svcs.DeviceFiles.Upsert(ctx, legacyTenant, pk, "config.json", `{"device":{"name":"x"}}`, "sha", "read", nil); err != nil {
 			t.Fatal(err)
 		}
-		if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home"); err != nil {
+		if err := l.drop(pk, "wifi.password:home"); err != nil {
 			t.Fatalf("DropClearedWifi: %v", err)
 		}
 		if l.bare(pk) {
@@ -195,11 +206,35 @@ func TestLegacyWifi(t *testing.T) {
 		if err := l.svcs.DeviceFiles.Upsert(ctx, legacyTenant, pk, "config.json", homeAndPark, "sha", "read", nil); err != nil {
 			t.Fatal(err)
 		}
-		if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:park"); err != nil {
+		if err := l.drop(pk, "wifi.password:park"); err != nil {
 			t.Fatalf("DropClearedWifi: %v", err)
 		}
 		if !l.bare(pk) {
 			t.Error("a clear of a second network deleted the primary's bare row")
+		}
+	})
+
+	t.Run("a_password_saved_after_the_mark_is_kept", func(t *testing.T) {
+		for id, before := range map[string]string{"lwf-10": "old", "lwf-11": ""} {
+			pk := l.device(id)
+			if before != "" {
+				if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, "wifi.password:home", before); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mark, err := l.svcs.Secrets.MarkWifiSecret(ctx, legacyTenant, pk, "wifi.password:home")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, "wifi.password:home", "new"); err != nil {
+				t.Fatal(err)
+			}
+			if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home", mark); !errors.Is(err, service.ErrWifiSecretChanged) {
+				t.Errorf("row before %q: DropClearedWifi = %v, want ErrWifiSecretChanged", before, err)
+			}
+			if v, found := l.reveal(pk, "wifi.password:home"); !found || v != "new" {
+				t.Errorf("row before %q: stored = %q found=%v, want the later save kept", before, v, found)
+			}
 		}
 	})
 

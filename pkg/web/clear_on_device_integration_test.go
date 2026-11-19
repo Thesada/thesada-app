@@ -1,7 +1,7 @@
 //go:build integration
 
 // Clear on device for a WiFi password: one store row, dropped in one tx after a verified clear,
-// an honest flash and audit when that drop fails, and a refusal over a tenant default (Q5).
+// an honest flash and audit when that drop fails, a password saved during the clear kept, and a refusal over a tenant default (Q5).
 //
 //	go test -tags integration -run TestClearOnDevice ./pkg/web/...
 package web
@@ -89,6 +89,31 @@ func TestClearOnDevice(t *testing.T) {
 		}
 		if rows("wifi.password:office") != 0 {
 			t.Error("the verified clear kept the override row")
+		}
+	})
+
+	t.Run("a_password_saved_during_the_clear_survives", func(t *testing.T) {
+		const field = "wifi.password:garage"
+		if err := env.Services.Secrets.SetSecret(ctx, tenant, device.ID, field, "old"); err != nil {
+			t.Fatal(err)
+		}
+		fd.Handle("secret.clear", func(string, []byte) []mqtttest.Response {
+			if err := env.Services.Secrets.SetSecret(ctx, tenant, device.ID, field, "new"); err != nil {
+				t.Errorf("save during the clear: %v", err)
+			}
+			return mqtttest.OK("secret cleared (falls back to config.json/empty)")
+		})
+		defer fd.Handle("secret.clear", func(string, []byte) []mqtttest.Response {
+			return mqtttest.OK("secret cleared (falls back to config.json/empty)")
+		})
+		if loc := post(field); !strings.HasSuffix(loc, "?"+flashSecretClearedNVSReplaced.query()) {
+			t.Errorf("Location = %q, want the saved-meanwhile notice", loc)
+		}
+		if row := lastAudit(t, env, "device_secret.clear_nvs"); row.detail["store_dropped"] != false || row.detail["store_replaced"] != true {
+			t.Errorf("audit detail = %v, want store_dropped false, store_replaced true", row.detail)
+		}
+		if v, found, err := env.Services.Secrets.Reveal(ctx, tenant, device.ID, field); err != nil || !found || v != "new" {
+			t.Errorf("stored %s = %q found=%v err=%v, want the password saved during the clear kept", field, v, found, err)
 		}
 	})
 

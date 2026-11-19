@@ -16,6 +16,8 @@ import (
 var (
 	composePinRE = regexp.MustCompile(`(?m)^\s*image:\s*ghcr\.io/thesada/thesada-app:(\S+)\s*$`)
 	calVerRE     = regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.([0-9]+)$`)
+	// The make release-pin shape: a release tag is YY.MM.N, nothing else ships.
+	releaseTagRE = regexp.MustCompile(`^[0-9]{2}\.[0-9]{1,2}\.[0-9]+$`)
 )
 
 // A release tag must ship a compose file that runs that release, not the one before.
@@ -29,6 +31,12 @@ func TestComposePinIsNotBehindNewestTag(t *testing.T) {
 		t.Fatal(err)
 	}
 	pin, _ := calVer(tag)
+	// The release workflow sets it to the tag it ships.
+	if rel := os.Getenv("THESADA_RELEASE_TAG"); rel != "" {
+		if err := releaseTagErr(rel); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// CI sets it, so a checkout without tags cannot pass the pin unchecked.
 	skip := t.Skipf
 	if os.Getenv("THESADA_REQUIRE_TAGS") != "" {
@@ -94,6 +102,71 @@ func TestMakeTestRunsDeployUncached(t *testing.T) {
 	if !strings.Contains(recipe, "-count=1 ./deploy/") {
 		t.Errorf("make test recipe %q does not run ./deploy/ with -count=1", recipe)
 	}
+}
+
+// The release workflow fires only on CalVer-shaped tags, and its pin job hands the tag to the pin check.
+func TestReleaseTriggerIsCalVerOnly(t *testing.T) {
+	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pats := releaseTagGlobs(string(raw))
+	if len(pats) == 0 {
+		t.Fatal("release.yml lists no tag trigger")
+	}
+	for _, p := range pats {
+		if !strings.HasPrefix(p, "[0-9][0-9].") {
+			t.Errorf("release.yml fires on tag pattern %q, want CalVer YY.MM.N patterns only", p)
+		}
+	}
+	if pin := workflowJobs(string(raw))["pin"]; !strings.Contains(pin, "THESADA_RELEASE_TAG: ${{ github.ref_name }}") {
+		t.Errorf("pin job does not pass the tag to the pin check:\n%s", pin)
+	}
+}
+
+func TestReleaseTagErr(t *testing.T) {
+	for _, tc := range []struct {
+		tag string
+		ok  bool
+	}{
+		{"26.11.5", true},
+		{"26.6.1", true},
+		{"v26.11.5", false},
+		{"v1.2.3", false},
+		{"1.2.3", false},
+		{"26.11.5-rc.1", false},
+		{"", false},
+	} {
+		if err := releaseTagErr(tc.tag); (err == nil) != tc.ok {
+			t.Errorf("releaseTagErr(%q) = %v, want ok=%v", tc.tag, err, tc.ok)
+		}
+	}
+}
+
+// releaseTagErr refuses a release tag that is not CalVer YY.MM.N. in: tag. out: error.
+func releaseTagErr(tag string) error {
+	if !releaseTagRE.MatchString(tag) {
+		return fmt.Errorf("release tag %q is not CalVer YY.MM.N, releases are CalVer only", tag)
+	}
+	return nil
+}
+
+// releaseTagGlobs returns the push tag filters of a workflow. in: workflow. out: patterns.
+func releaseTagGlobs(raw string) []string {
+	_, rest, ok := strings.Cut(raw, "\n    tags:\n")
+	if !ok {
+		return nil
+	}
+	var out []string
+	for line := range strings.SplitSeq(rest, "\n") {
+		item, ok := strings.CutPrefix(line, "      - ")
+		if !ok {
+			break
+		}
+		item, _, _ = strings.Cut(item, "#")
+		out = append(out, strings.Trim(strings.TrimSpace(item), `"'`))
+	}
+	return out
 }
 
 // A tag pushed after the last CI run is checked by the release itself, before anything ships.

@@ -3,6 +3,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -79,10 +80,46 @@ func (s *SecretService) rekeyLegacyWifiTx(ctx context.Context, tx pgx.Tx, tenant
 	return outcome, nil
 }
 
+// ErrWifiSecretChanged - the WiFi password row changed after its mark was taken, so DropClearedWifi kept it.
+var ErrWifiSecretChanged = errors.New("secret: wifi password changed since the clear")
+
+// WifiSecretMark is a device WiFi password row as it stood before a Clear on device. The sealed blob
+// carries a fresh nonce on every write, so an equal blob is the same write.
+type WifiSecretMark struct {
+	blob []byte
+}
+
+// MarkWifiSecret reads the device's row for field before the device clear. No row is a mark too.
+// in: ctx, tenant, device, field. out: mark, error.
+func (s *SecretService) MarkWifiSecret(ctx context.Context, tenantID string, devicePk uuid.UUID, field string) (WifiSecretMark, error) {
+	var m WifiSecretMark
+	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		var err error
+		m.blob, err = wifiSecretBlobTx(ctx, tx, devicePk, field)
+		return err
+	})
+	return m, err
+}
+
+// wifiSecretBlobTx returns the sealed blob of the device's row for field, nil without one.
+func wifiSecretBlobTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, field string) ([]byte, error) {
+	var blob []byte
+	err := tx.QueryRow(ctx,
+		`SELECT ciphertext FROM device_config_secrets WHERE device_pk = $1 AND field = $2`, devicePk, field).Scan(&blob)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", field, err)
+	}
+	return blob, nil
+}
+
 // DropClearedWifi deletes the store rows for a WiFi password the device verified empty, in one tx under
 // the device row lock: the per-SSID row, and the bare legacy row unless the stored config.json names another
-// primary SSID, so a later re-key cannot bring the password back. in: ctx, tenant, device, field. out: error.
-func (s *SecretService) DropClearedWifi(ctx context.Context, tenantID string, devicePk uuid.UUID, field string) error {
+// primary SSID, so a later re-key cannot bring the password back. A per-SSID row written after mark is kept
+// and the call returns ErrWifiSecretChanged. in: ctx, tenant, device, field, mark. out: error.
+func (s *SecretService) DropClearedWifi(ctx context.Context, tenantID string, devicePk uuid.UUID, field string, mark WifiSecretMark) error {
 	ssid, ok := strings.CutPrefix(field, WifiPasswordPrefix)
 	if !ok || ssid == "" || !validSecretField(field) {
 		return fmt.Errorf("secret: %q is not a per-SSID WiFi password", field)
@@ -91,13 +128,20 @@ func (s *SecretService) DropClearedWifi(ctx context.Context, tenantID string, de
 		if err := lockDeviceConfig(ctx, tx, devicePk, nil, nil); err != nil {
 			return err
 		}
+		blob, err := wifiSecretBlobTx(ctx, tx, devicePk, field)
+		if err != nil {
+			return err
+		}
+		if blob != nil && !bytes.Equal(blob, mark.blob) {
+			return ErrWifiSecretChanged
+		}
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM device_config_secrets WHERE device_pk = $1 AND field = $2`, devicePk, field); err != nil {
 			return fmt.Errorf("delete %s: %w", field, err)
 		}
 		var content string
 		reason := "primary ssid"
-		err := tx.QueryRow(ctx,
+		err = tx.QueryRow(ctx,
 			`SELECT content FROM device_files WHERE device_pk = $1 AND path = 'config.json'`, devicePk).Scan(&content)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):

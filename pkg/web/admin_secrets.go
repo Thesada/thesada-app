@@ -398,6 +398,16 @@ func (s *Server) handleAdminDeviceSecretsClearDevice(w http.ResponseWriter, r *h
 		http.Redirect(w, r, flashSecretClearNVSField.on(dest), http.StatusFound)
 		return
 	}
+	// The row as it stands before the clear, so a password saved during it is not dropped after.
+	var mark service.WifiSecretMark
+	if service.IsWifiPasswordField(fwField) {
+		var err error
+		if mark, err = s.services.Secrets.MarkWifiSecret(r.Context(), device.TenantID, device.ID, fwField); err != nil {
+			slog.Error("device_secret.clear_nvs mark failed", "device", device.DeviceID, "field", fwField, "err", err)
+			http.Redirect(w, r, flashSecretClearFailed.on(dest), http.StatusFound)
+			return
+		}
+	}
 	msg, ok := s.clearOnDevice(r.Context(), device, fwField)
 	if !ok {
 		slog.Warn("device_secret.clear_nvs failed", "device", device.DeviceID, "field", fwField, "reason", msg)
@@ -422,32 +432,40 @@ func (s *Server) handleAdminDeviceSecretsClearDevice(w http.ResponseWriter, r *h
 	// The device already cleared the field, so a client disconnect must not drop the row.
 	auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), auditTimeout)
 	defer auditCancel()
-	dropped := false
+	dropped, replaced := false, false
 	if msg == "" && service.IsWifiPasswordField(fwField) {
-		dropped = s.dropClearedWifiRows(auditCtx, device, fwField)
+		dropped, replaced = s.dropClearedWifiRows(auditCtx, device, fwField, mark)
 	}
 	s.audit(auditCtx, user, authz.DeviceSecretClearNVS, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
-		Detail: map[string]any{"device_id": device.DeviceID, "field": fwField, "verified": msg != "unverified", "store_dropped": dropped},
+		Detail: map[string]any{"device_id": device.DeviceID, "field": fwField, "verified": msg != "unverified",
+			"store_dropped": dropped, "store_replaced": replaced},
 	})
 	done := flashSecretClearedNVS
 	switch {
 	case msg == "unverified":
 		done = flashSecretClearedNVSUnverified
+	case replaced:
+		done = flashSecretClearedNVSReplaced
 	case msg == "" && service.IsWifiPasswordField(fwField) && !dropped:
 		done = flashSecretClearedNVSStoreKept
 	}
 	http.Redirect(w, r, done.on(dest), http.StatusFound)
 }
 
-// dropClearedWifiRows deletes the store rows for a WiFi field the device verified empty,
-// the bare legacy row too when it maps to that network. in: ctx, device, firmware field. out: deleted.
-func (s *Server) dropClearedWifiRows(ctx context.Context, device *service.Device, fwField string) bool {
-	if err := s.services.Secrets.DropClearedWifi(ctx, device.TenantID, device.ID, fwField); err != nil {
-		slog.Error("device_secret.store_drop_failed", "device", device.DeviceID, "field", fwField, "err", err)
-		return false
+// dropClearedWifiRows deletes the store rows for a WiFi field the device verified empty, the bare legacy
+// row too when it maps to that network. A row saved after mark stays. in: ctx, device, field, mark. out: dropped, replaced.
+func (s *Server) dropClearedWifiRows(ctx context.Context, device *service.Device, fwField string, mark service.WifiSecretMark) (bool, bool) {
+	err := s.services.Secrets.DropClearedWifi(ctx, device.TenantID, device.ID, fwField, mark)
+	if errors.Is(err, service.ErrWifiSecretChanged) {
+		slog.Info("device_secret.store_drop_skipped", "device", device.DeviceID, "field", fwField, "reason", "saved during the clear")
+		return false, true
 	}
-	return true
+	if err != nil {
+		slog.Error("device_secret.store_drop_failed", "device", device.DeviceID, "field", fwField, "err", err)
+		return false, false
+	}
+	return true, false
 }
 
 // clearOnDevice erases one firmware field from NVS. A field without blanks goes through
