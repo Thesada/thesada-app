@@ -238,6 +238,72 @@ func TestLegacyWifi(t *testing.T) {
 		}
 	})
 
+	// A read during the clear re-keys the bare row to the cleared network. That is the same password, not a save.
+	t.Run("a_rekey_during_the_clear_is_dropped", func(t *testing.T) {
+		pk := l.device("lwf-12")
+		mark, err := l.svcs.Secrets.MarkWifiSecret(ctx, legacyTenant, pk, "wifi.password:home")
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.read(pk, homeAndPark)
+		if v, _ := l.reveal(pk, "wifi.password:home"); v != "legacy-pw" {
+			t.Fatalf("precondition: wifi.password:home = %q, want the re-keyed legacy value", v)
+		}
+		if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home", mark); err != nil {
+			t.Errorf("DropClearedWifi = %v, want the re-keyed row dropped", err)
+		}
+		if _, found := l.reveal(pk, "wifi.password:home"); found {
+			t.Error("the re-keyed legacy password survived a verified clear")
+		}
+		if l.bare(pk) {
+			t.Error("the bare row is back")
+		}
+	})
+
+	t.Run("a_rekey_then_a_new_save_during_the_clear_keeps_the_save", func(t *testing.T) {
+		pk := l.device("lwf-13")
+		mark, err := l.svcs.Secrets.MarkWifiSecret(ctx, legacyTenant, pk, "wifi.password:home")
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.read(pk, homeAndPark)
+		if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, "wifi.password:home", "new"); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home", mark); !errors.Is(err, service.ErrWifiSecretChanged) {
+			t.Errorf("DropClearedWifi = %v, want ErrWifiSecretChanged", err)
+		}
+		if v, found := l.reveal(pk, "wifi.password:home"); !found || v != "new" {
+			t.Errorf("stored = %q found=%v, want the later save kept", v, found)
+		}
+	})
+
+	t.Run("without_a_legacy_row_a_clear_drops_and_a_save_is_kept", func(t *testing.T) {
+		for id, save := range map[string]bool{"lwf-14": false, "lwf-15": true} {
+			pk := mustUpsert(t, l.svcs.Devices, legacyTenant, id, "", "", "", "")
+			if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, "wifi.password:home", "old"); err != nil {
+				t.Fatal(err)
+			}
+			mark, err := l.svcs.Secrets.MarkWifiSecret(ctx, legacyTenant, pk, "wifi.password:home")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := error(nil)
+			if save {
+				want = service.ErrWifiSecretChanged
+				if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, "wifi.password:home", "new"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home", mark); !errors.Is(err, want) {
+				t.Errorf("save %v: DropClearedWifi = %v, want %v", save, err, want)
+			}
+			if _, found := l.reveal(pk, "wifi.password:home"); found != save {
+				t.Errorf("save %v: row kept = %v", save, found)
+			}
+		}
+	})
+
 	t.Run("set_secret_refuses_the_bare_field", func(t *testing.T) {
 		pk := mustUpsert(t, l.svcs.Devices, legacyTenant, "lwf-5", "", "", "", "")
 		if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, service.LegacyWifiPassword, "x"); err == nil {

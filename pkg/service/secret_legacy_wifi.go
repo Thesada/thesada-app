@@ -5,6 +5,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -83,22 +84,53 @@ func (s *SecretService) rekeyLegacyWifiTx(ctx context.Context, tx pgx.Tx, tenant
 // ErrWifiSecretChanged - the WiFi password row changed after its mark was taken, so DropClearedWifi kept it.
 var ErrWifiSecretChanged = errors.New("secret: wifi password changed since the clear")
 
-// WifiSecretMark is a device WiFi password row as it stood before a Clear on device. The sealed blob
-// carries a fresh nonce on every write, so an equal blob is the same write.
+// WifiSecretMark is a device WiFi password row, and the bare legacy row, as they stood before a Clear on
+// device. The sealed blob carries a fresh nonce on every write, so an equal blob is the same write.
 type WifiSecretMark struct {
-	blob []byte
+	blob   []byte
+	legacy []byte
 }
 
-// MarkWifiSecret reads the device's row for field before the device clear. No row is a mark too.
-// in: ctx, tenant, device, field. out: mark, error.
+// MarkWifiSecret reads the device's row for field and its bare legacy row before the device clear. No row
+// is a mark too. in: ctx, tenant, device, field. out: mark, error.
 func (s *SecretService) MarkWifiSecret(ctx context.Context, tenantID string, devicePk uuid.UUID, field string) (WifiSecretMark, error) {
 	var m WifiSecretMark
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		var err error
-		m.blob, err = wifiSecretBlobTx(ctx, tx, devicePk, field)
+		if m.blob, err = wifiSecretBlobTx(ctx, tx, devicePk, field); err != nil {
+			return err
+		}
+		m.legacy, err = wifiSecretBlobTx(ctx, tx, devicePk, LegacyWifiPassword)
 		return err
 	})
 	return m, err
+}
+
+// rekeyedSinceMarkTx reports whether the per-SSID blob, absent at mark, is the marked bare row re-keyed:
+// the bare row is gone and both decrypt to the same password. in: ctx, tx, tenant, device, field, blob, mark.
+func (s *SecretService) rekeyedSinceMarkTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, field string, blob []byte, mark WifiSecretMark) (bool, error) {
+	if mark.blob != nil || mark.legacy == nil {
+		return false, nil
+	}
+	bare, err := wifiSecretBlobTx(ctx, tx, devicePk, LegacyWifiPassword)
+	if err != nil || bare != nil {
+		return false, err
+	}
+	dek, err := s.tenantDEK(ctx, tx, tenantID)
+	if err != nil {
+		return false, err
+	}
+	old, err := secrets.DecryptSecret(dek, mark.legacy, secretAAD(tenantID, devicePk, LegacyWifiPassword))
+	if err != nil {
+		return false, nil
+	}
+	defer clear(old)
+	cur, err := secrets.DecryptSecret(dek, blob, secretAAD(tenantID, devicePk, field))
+	if err != nil {
+		return false, nil
+	}
+	defer clear(cur)
+	return subtle.ConstantTimeCompare(old, cur) == 1, nil
 }
 
 // wifiSecretBlobTx returns the sealed blob of the device's row for field, nil without one.
@@ -118,7 +150,8 @@ func wifiSecretBlobTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, field 
 // DropClearedWifi deletes the store rows for a WiFi password the device verified empty, in one tx under
 // the device row lock: the per-SSID row, and the bare legacy row unless the stored config.json names another
 // primary SSID, so a later re-key cannot bring the password back. A per-SSID row written after mark is kept
-// and the call returns ErrWifiSecretChanged. in: ctx, tenant, device, field, mark. out: error.
+// and the call returns ErrWifiSecretChanged, unless it is the marked bare row re-keyed meanwhile.
+// in: ctx, tenant, device, field, mark. out: error.
 func (s *SecretService) DropClearedWifi(ctx context.Context, tenantID string, devicePk uuid.UUID, field string, mark WifiSecretMark) error {
 	ssid, ok := strings.CutPrefix(field, WifiPasswordPrefix)
 	if !ok || ssid == "" || !validSecretField(field) {
@@ -133,7 +166,13 @@ func (s *SecretService) DropClearedWifi(ctx context.Context, tenantID string, de
 			return err
 		}
 		if blob != nil && !bytes.Equal(blob, mark.blob) {
-			return ErrWifiSecretChanged
+			rekeyed, err := s.rekeyedSinceMarkTx(ctx, tx, tenantID, devicePk, field, blob, mark)
+			if err != nil {
+				return err
+			}
+			if !rekeyed {
+				return ErrWifiSecretChanged
+			}
 		}
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM device_config_secrets WHERE device_pk = $1 AND field = $2`, devicePk, field); err != nil {
