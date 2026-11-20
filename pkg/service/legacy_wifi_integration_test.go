@@ -7,9 +7,12 @@
 package service_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -89,6 +92,17 @@ func (l *legacyEnv) bare(pk uuid.UUID) bool {
 	return n > 0
 }
 
+// rekeyed reads the re-key mark of the device's row for field.
+func (l *legacyEnv) rekeyed(t *testing.T, pk uuid.UUID, field string) bool {
+	t.Helper()
+	var r bool
+	if err := l.env.Super.QueryRow(context.Background(),
+		`SELECT rekeyed FROM device_config_secrets WHERE device_pk = $1 AND field = $2`, pk, field).Scan(&r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 const homeAndPark = `{"wifi":{"networks":[{"ssid":"home","password":""},{"ssid":"park","password":""}]}}`
 
 func TestLegacyWifi(t *testing.T) {
@@ -108,6 +122,55 @@ func TestLegacyWifi(t *testing.T) {
 			t.Error("the bare row survived the re-key")
 		}
 	})
+
+	t.Run("a_read_with_the_stored_primary_rekeys_it", func(t *testing.T) {
+		pk := l.device("lwf-30")
+		if err := l.svcs.DeviceFiles.Upsert(ctx, legacyTenant, pk, "config.json", homeAndPark, "sha", "read", nil); err != nil {
+			t.Fatal(err)
+		}
+		l.read(pk, homeAndPark)
+		if v, found := l.reveal(pk, "wifi.password:home"); !found || v != "legacy-pw" {
+			t.Errorf("wifi.password:home = %q (found %v), want the legacy value", v, found)
+		}
+		if !l.rekeyed(t, pk, "wifi.password:home") {
+			t.Error("the re-keyed row lost its rekeyed flag")
+		}
+	})
+
+	for _, source := range []string{"drift", "write"} {
+		t.Run("a_new_primary_drops_the_bare_row_"+source, func(t *testing.T) {
+			pk := l.device("lwf-31-" + source)
+			if err := l.svcs.DeviceFiles.Upsert(ctx, legacyTenant, pk, "config.json", homeAndPark, "sha", "read", nil); err != nil {
+				t.Fatal(err)
+			}
+			at, err := l.svcs.DeviceFiles.ReadStart(ctx, legacyTenant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parkFirst := `{"wifi":{"networks":[{"ssid":"park","password":""},{"ssid":"home","password":""}]}}`
+			if _, err := l.svcs.DeviceFiles.UpsertFromDevice(ctx, legacyTenant, pk, "config.json", parkFirst, "sha2", source, nil, at); err != nil {
+				t.Fatal(err)
+			}
+			if l.bare(pk) {
+				t.Error("the bare row survived a primary change")
+			}
+			for _, f := range []string{"wifi.password:park", "wifi.password:home"} {
+				if _, found := l.reveal(pk, f); found {
+					t.Errorf("the legacy value landed on %s", f)
+				}
+			}
+			var n int
+			var detail string
+			if err := l.env.Super.QueryRow(ctx,
+				`SELECT count(*), coalesce(max(detail::text), '') FROM admin_audit
+				  WHERE action = 'device_secret.legacy_wifi_dropped' AND target_id = $1`, pk.String()).Scan(&n, &detail); err != nil {
+				t.Fatal(err)
+			}
+			if n != 1 || strings.Contains(detail, "legacy-pw") {
+				t.Errorf("audit rows = %d detail %s, want one without the value", n, detail)
+			}
+		})
+	}
 
 	t.Run("a_read_keeps_the_per_ssid_row_and_drops_the_bare_one", func(t *testing.T) {
 		pk := l.device("lwf-2")
@@ -278,6 +341,131 @@ func TestLegacyWifi(t *testing.T) {
 		}
 	})
 
+	// The re-key is told by its own write, not by the value: a save of the legacy password is still a save.
+	t.Run("a_rekey_then_a_same_value_save_during_the_clear_keeps_the_save", func(t *testing.T) {
+		pk := l.device("lwf-16")
+		mark, err := l.svcs.Secrets.MarkWifiSecret(ctx, legacyTenant, pk, "wifi.password:home")
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.read(pk, homeAndPark)
+		if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, "wifi.password:home", "legacy-pw"); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home", mark); !errors.Is(err, service.ErrWifiSecretChanged) {
+			t.Errorf("DropClearedWifi = %v, want ErrWifiSecretChanged", err)
+		}
+		if v, found := l.reveal(pk, "wifi.password:home"); !found || v != "legacy-pw" {
+			t.Errorf("stored = %q found=%v, want the same-value save kept", v, found)
+		}
+	})
+
+	// A save first, then a read finds the per-SSID row and only deletes the bare one.
+	t.Run("a_same_value_save_then_a_rekey_during_the_clear_keeps_the_save", func(t *testing.T) {
+		pk := l.device("lwf-17")
+		mark, err := l.svcs.Secrets.MarkWifiSecret(ctx, legacyTenant, pk, "wifi.password:home")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, "wifi.password:home", "legacy-pw"); err != nil {
+			t.Fatal(err)
+		}
+		l.read(pk, homeAndPark)
+		if l.bare(pk) {
+			t.Fatal("precondition: the read left the bare row")
+		}
+		if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home", mark); !errors.Is(err, service.ErrWifiSecretChanged) {
+			t.Errorf("DropClearedWifi = %v, want ErrWifiSecretChanged", err)
+		}
+		if v, found := l.reveal(pk, "wifi.password:home"); !found || v != "legacy-pw" {
+			t.Errorf("stored = %q found=%v, want the same-value save kept", v, found)
+		}
+	})
+
+	// Every save seals with a fresh nonce, so re-saving the stored password is a save after the mark.
+	t.Run("a_same_value_resave_of_the_marked_row_is_kept", func(t *testing.T) {
+		for id, legacy := range map[string]bool{"lwf-18": true, "lwf-19": false} {
+			pk := mustUpsert(t, l.svcs.Devices, legacyTenant, id, "", "", "", "")
+			if legacy {
+				pk = l.device(id)
+			}
+			if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, "wifi.password:home", "same"); err != nil {
+				t.Fatal(err)
+			}
+			mark, err := l.svcs.Secrets.MarkWifiSecret(ctx, legacyTenant, pk, "wifi.password:home")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, "wifi.password:home", "same"); err != nil {
+				t.Fatal(err)
+			}
+			if err := l.svcs.Secrets.DropClearedWifi(ctx, legacyTenant, pk, "wifi.password:home", mark); !errors.Is(err, service.ErrWifiSecretChanged) {
+				t.Errorf("legacy %v: DropClearedWifi = %v, want ErrWifiSecretChanged", legacy, err)
+			}
+			if v, found := l.reveal(pk, "wifi.password:home"); !found || v != "same" {
+				t.Errorf("legacy %v: stored = %q found=%v, want the re-save kept", legacy, v, found)
+			}
+		}
+	})
+
+	t.Run("only_the_rekey_marks_its_row", func(t *testing.T) {
+		pk := l.device("lwf-21")
+		l.read(pk, homeAndPark)
+		if !l.rekeyed(t, pk, "wifi.password:home") {
+			t.Error("the re-keyed row is not marked as a re-key")
+		}
+		if err := l.svcs.Secrets.SetSecret(ctx, legacyTenant, pk, "wifi.password:home", "legacy-pw"); err != nil {
+			t.Fatal(err)
+		}
+		if l.rekeyed(t, pk, "wifi.password:home") {
+			t.Error("a save left the re-key mark on the row")
+		}
+	})
+
+	// A re-key commits under the device lock, so it cannot land between the mark's two reads.
+	t.Run("the_mark_reads_both_rows_under_the_device_lock", func(t *testing.T) {
+		pk := l.device("lwf-20")
+		tx, err := l.env.Super.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM devices WHERE id = $1 FOR UPDATE`, pk); err != nil {
+			t.Fatal(err)
+		}
+		type res struct {
+			mark service.WifiSecretMark
+			err  error
+		}
+		done := make(chan res, 1)
+		go func() {
+			m, err := l.svcs.Secrets.MarkWifiSecret(ctx, legacyTenant, pk, "wifi.password:home")
+			done <- res{m, err}
+		}()
+		select {
+		case r := <-done:
+			t.Fatalf("MarkWifiSecret returned while the device lock was held (err %v)", r.err)
+		case <-time.After(500 * time.Millisecond):
+		}
+		var moved []byte
+		if err := tx.QueryRow(ctx,
+			`UPDATE device_config_secrets SET field = 'wifi.password:home' WHERE device_pk = $1 AND field = $2 RETURNING ciphertext`,
+			pk, service.LegacyWifiPassword).Scan(&moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		r := <-done
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		blob, legacy := r.mark.Rows()
+		if !bytes.Equal(blob, moved) || legacy != nil {
+			t.Errorf("mark = per-SSID %v, bare %v, want the state after the re-key only", blob != nil, legacy != nil)
+		}
+	})
+
 	t.Run("without_a_legacy_row_a_clear_drops_and_a_save_is_kept", func(t *testing.T) {
 		for id, save := range map[string]bool{"lwf-14": false, "lwf-15": true} {
 			pk := mustUpsert(t, l.svcs.Devices, legacyTenant, id, "", "", "", "")
@@ -374,6 +562,9 @@ func TestLegacyWifiSweep(t *testing.T) {
 	}
 	if v, _ := l.reveal(dup, "wifi.password:home"); v != "per-ssid" || l.bare(dup) {
 		t.Errorf("duplicate device: home = %q, bare left %v, want per-ssid and no bare row", v, l.bare(dup))
+	}
+	if !l.rekeyed(t, rekeyed, "wifi.password:home") || l.rekeyed(t, dup, "wifi.password:home") {
+		t.Error("the sweep must mark its re-key and only its re-key")
 	}
 	if !l.bare(inert) {
 		t.Error("a device without a snapshot lost its bare row")

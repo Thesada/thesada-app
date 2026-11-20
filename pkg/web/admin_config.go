@@ -336,15 +336,15 @@ func (s *Server) handleAdminDeviceConfigCmdResult(w http.ResponseWriter, r *http
 }
 
 // changesConfig reports whether a CLI command can rewrite config.json on the device.
-// fs.format wipes it with the rest of the filesystem. A glob can match it, so it counts too.
+// fs.format wipes it, a firmware update from ota.* can migrate it, a glob can match it.
 func changesConfig(command, payload string) bool {
 	switch command {
-	case "config.dump", "fs.cat", "fs.ls", "fs.df":
+	case "config.dump", "fs.cat", "fs.ls", "fs.df", "ota.status":
 		return false
 	case "fs.format":
 		return true
 	}
-	return strings.HasPrefix(command, "config.") ||
+	return strings.HasPrefix(command, "config.") || strings.HasPrefix(command, "ota.") ||
 		(strings.HasPrefix(command, "fs.") &&
 			(strings.Contains(payload, configSnapshotKey) || strings.ContainsAny(payload, "*?")))
 }
@@ -429,7 +429,7 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 		return
 	}
 	// Checked under the claim, so no other write can change the store in between.
-	if msg := configWriteRefusal(req.Path, req.Content, s.openWifiLookup(r.Context(), device, req.Content)); msg != "" {
+	if msg := configWriteRefusal(req.Path, req.Content, s.blankSecretLookup(r.Context(), device, req.Content)); msg != "" {
 		s.releaseDeviceWrite(device.ID, claim)
 		http.Error(w, msg, http.StatusUnprocessableEntity)
 		return
@@ -482,7 +482,7 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID, claim uuid.UUID, 
 	configPath := service.IsConfigJSON(path)
 	// Again at write time: the markers may have gone stale since the enqueue check.
 	if configPath {
-		if msg := configWriteRefusal(path, content, s.openWifiLookup(parentCtx, device, content)); msg != "" {
+		if msg := configWriteRefusal(path, content, s.blankSecretLookup(parentCtx, device, content)); msg != "" {
 			s.releaseDeviceWrite(device.ID, claim)
 			s.cliRequests.markError(reqID, reqStatusError, msg)
 			return
@@ -655,8 +655,8 @@ func writeSteps(n int) int {
 }
 
 // configWriteRefusal stops a config.json write with empty secret fields, which would erase the device's secrets (#85).
-// An empty WiFi password passes only when isOpen says so (#88). in: path, content, isOpen (nil refuses all). out: message or "".
-func configWriteRefusal(path, content string, isOpen func(field string) (bool, error)) string {
+// An empty field passes only when check says so (#88). in: path, content, check (nil refuses all). out: message or "".
+func configWriteRefusal(path, content string, check func(field string) (bool, error)) string {
 	if !service.IsConfigJSON(path) {
 		return ""
 	}
@@ -664,16 +664,17 @@ func configWriteRefusal(path, content string, isOpen func(field string) (bool, e
 	if err != nil {
 		return "config.json is not one JSON object, nothing was sent"
 	}
+	if len(unknown) > 0 {
+		return fmt.Sprintf("config.json has %s empty and the app cannot check it on the device. "+
+			"Enter its value, or leave the key out if the device does not use it, nothing was sent", strings.Join(unknown, ", "))
+	}
 	const refusal = "config.json has empty secret fields (snapshots and the editor never show secrets), " +
 		"writing it would erase the device's secrets. Change settings with Push config keys, nothing was sent"
-	if unknown || (len(fields) > 0 && isOpen == nil) {
+	if len(fields) > 0 && check == nil {
 		return refusal
 	}
 	for _, f := range fields {
-		if !service.IsWifiPasswordField(f) {
-			return refusal
-		}
-		if open, err := isOpen(f); err != nil || !open {
+		if ok, err := check(f); err != nil || !ok {
 			var r guardRefusal
 			if errors.As(err, &r) {
 				return string(r)
@@ -703,17 +704,34 @@ type guardRefusal string
 
 func (g guardRefusal) Error() string { return string(g) }
 
-// openWifiLookup: a current read showed "" for the SSID in config.json, and one correlated secret.info for
-// content's empty fields shows nothing in NVS for it. Nil with the store off. in: ctx, device, content. out: lookup.
-func (s *Server) openWifiLookup(ctx context.Context, device *service.Device, content string) func(string) (bool, error) {
-	if !s.services.Secrets.Enabled() {
-		return nil
-	}
+// blankSecretLookup checks an empty secret field against the device, with one correlated secret.info
+// per write. A scalar passes when NVS holds it, as the firmware reads NVS first. A WiFi password passes
+// when a current read showed "" for the SSID and NVS holds none. in: ctx, device, content. out: check.
+func (s *Server) blankSecretLookup(ctx context.Context, device *service.Device, content string) func(string) (bool, error) {
 	var nvs map[string]string
 	asked, reachable := false, false
+	state := func() {
+		if !asked {
+			asked = true
+			fields, _, _ := service.BlankSecretFields(content)
+			nvs, reachable = s.verifiedSecretState(ctx, device, fields)
+		}
+	}
 	return func(field string) (bool, error) {
-		ssid, ok := strings.CutPrefix(field, service.WifiPasswordPrefix)
-		if !ok || ssid == "" {
+		ssid, wifi := strings.CutPrefix(field, service.WifiPasswordPrefix)
+		if !wifi {
+			state()
+			switch {
+			case !reachable:
+				return false, guardRefusal(fmt.Sprintf("the device did not confirm over secret.info, with the request id, "+
+					"that NVS holds %s, nothing was sent", field))
+			case nvs[field] != "nvs":
+				return false, guardRefusal(fmt.Sprintf("the device does not hold %s in NVS, so an empty value in config.json "+
+					"would erase it. Enter its value or push it with Push config keys first, nothing was sent", field))
+			}
+			return true, nil
+		}
+		if ssid == "" {
 			return false, nil
 		}
 		// A timed-out lookup is an error, which refuses the write.
@@ -723,11 +741,7 @@ func (s *Server) openWifiLookup(ctx context.Context, device *service.Device, con
 		if err != nil || !open {
 			return false, err
 		}
-		if !asked {
-			asked = true
-			fields, _, _ := service.BlankSecretFields(content)
-			nvs, reachable = s.verifiedSecretState(ctx, device, fields)
-		}
+		state()
 		switch {
 		case !reachable:
 			return false, guardRefusal(fmt.Sprintf("the device did not confirm over secret.info, with the request id, "+

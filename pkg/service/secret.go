@@ -210,6 +210,11 @@ func checkDeviceSecret(devicePk uuid.UUID, field, value string) error {
 // setSecretTx is SetSecret inside an open tenant tx that holds the device row lock.
 // Caller checked keyring != nil. in: ctx, tx, tenant_id, device pk, field, plaintext value. out: error.
 func (s *SecretService) setSecretTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, field, value string) error {
+	return s.writeSecretTx(ctx, tx, tenantID, devicePk, field, value, false)
+}
+
+// writeSecretTx is setSecretTx with the row's re-key flag, which only rekeyLegacyWifiTx sets.
+func (s *SecretService) writeSecretTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, field, value string, rekeyed bool) error {
 	if err := checkDeviceSecret(devicePk, field, value); err != nil {
 		return err
 	}
@@ -222,11 +227,11 @@ func (s *SecretService) setSecretTx(ctx context.Context, tx pgx.Tx, tenantID str
 		return fmt.Errorf("secret: encrypt %s: %w", field, err)
 	}
 	_, err = tx.Exec(ctx, `
-		INSERT INTO device_config_secrets (tenant_id, device_pk, field, ciphertext)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO device_config_secrets (tenant_id, device_pk, field, ciphertext, rekeyed)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (device_pk, field) WHERE device_pk IS NOT NULL
-		DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = now()`,
-		tenantID, devicePk, field, blob)
+		DO UPDATE SET ciphertext = EXCLUDED.ciphertext, rekeyed = EXCLUDED.rekeyed, updated_at = now()`,
+		tenantID, devicePk, field, blob, rekeyed)
 	return err
 }
 

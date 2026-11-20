@@ -546,6 +546,10 @@ func TestChangesConfig(t *testing.T) {
 		{"fs.rm", "/c?nfig.json --yes", true},
 		{"fs.rm", "/sd/logs/old.csv", false},
 		{"fs.ls", "/*.json", false},
+		// A firmware update can migrate config.json.
+		{"ota.check", "--force", true},
+		{"ota.check", "", true},
+		{"ota.status", "", false},
 	} {
 		if got := changesConfig(tc.cmd, tc.payload); got != tc.want {
 			t.Errorf("changesConfig(%q, %q) = %v, want %v", tc.cmd, tc.payload, got, tc.want)

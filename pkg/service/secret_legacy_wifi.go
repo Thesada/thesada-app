@@ -5,7 +5,6 @@ package service
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -32,11 +31,14 @@ const (
 	LegacyNoSSID LegacyWifiOutcome = "no_ssid"
 	// LegacyUndecryptable - the bare row does not decrypt, it stays inert and is logged.
 	LegacyUndecryptable LegacyWifiOutcome = "undecryptable"
+	// LegacyDropped - the stored config.json names another primary SSID, the bare row was deleted.
+	LegacyDropped LegacyWifiOutcome = "dropped"
 )
 
 // rekeyLegacyWifiTx moves the device's bare wifi.password row to wifi.password:<primary> in tx, which
-// holds the device row lock: decrypt under the old AAD, encrypt under the new one, delete the bare row.
-func (s *SecretService) rekeyLegacyWifiTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, primary string) (LegacyWifiOutcome, error) {
+// holds the device row lock: decrypt under the old AAD, encrypt under the new one flagged rekeyed, delete the bare row.
+// When stored, the primary SSID of the config.json the app held before, names another network, the bare row is deleted.
+func (s *SecretService) rekeyLegacyWifiTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, primary, stored string) (LegacyWifiOutcome, error) {
 	var blob []byte
 	err := tx.QueryRow(ctx,
 		`SELECT ciphertext FROM device_config_secrets WHERE device_pk = $1 AND field = $2`,
@@ -50,6 +52,14 @@ func (s *SecretService) rekeyLegacyWifiTx(ctx context.Context, tx pgx.Tx, tenant
 	target := WifiSecretField(primary)
 	if target == "" {
 		return LegacyNoSSID, nil
+	}
+	if stored != "" && stored != primary {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM device_config_secrets WHERE device_pk = $1 AND field = $2`, devicePk, LegacyWifiPassword); err != nil {
+			return LegacyNone, fmt.Errorf("delete legacy wifi row: %w", err)
+		}
+		slog.Info("device_secret.legacy_wifi_dropped", "device", devicePk, "reason", "primary ssid changed")
+		return LegacyDropped, nil
 	}
 	var exists bool
 	if err := tx.QueryRow(ctx,
@@ -68,7 +78,7 @@ func (s *SecretService) rekeyLegacyWifiTx(ctx context.Context, tx pgx.Tx, tenant
 			slog.Error("device_secret.legacy_wifi_undecryptable", "device", devicePk, "err", err)
 			return LegacyUndecryptable, nil
 		}
-		if err := s.setSecretTx(ctx, tx, tenantID, devicePk, target, string(pt)); err != nil {
+		if err := s.writeSecretTx(ctx, tx, tenantID, devicePk, target, string(pt), true); err != nil {
 			return LegacyNone, fmt.Errorf("store %s: %w", target, err)
 		}
 		outcome = LegacyRekeyed
@@ -91,66 +101,44 @@ type WifiSecretMark struct {
 	legacy []byte
 }
 
-// MarkWifiSecret reads the device's row for field and its bare legacy row before the device clear. No row
-// is a mark too. in: ctx, tenant, device, field. out: mark, error.
+// MarkWifiSecret reads the device's row for field and its bare legacy row before the device clear, under
+// the device row lock so no re-key lands between the two. No row is a mark too. in: ctx, tenant, device, field. out: mark, error.
 func (s *SecretService) MarkWifiSecret(ctx context.Context, tenantID string, devicePk uuid.UUID, field string) (WifiSecretMark, error) {
 	var m WifiSecretMark
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
-		var err error
-		if m.blob, err = wifiSecretBlobTx(ctx, tx, devicePk, field); err != nil {
+		if err := lockDeviceConfig(ctx, tx, devicePk, nil, nil); err != nil {
 			return err
 		}
-		m.legacy, err = wifiSecretBlobTx(ctx, tx, devicePk, LegacyWifiPassword)
+		var err error
+		if m.blob, _, err = wifiSecretRowTx(ctx, tx, devicePk, field); err != nil {
+			return err
+		}
+		m.legacy, _, err = wifiSecretRowTx(ctx, tx, devicePk, LegacyWifiPassword)
 		return err
 	})
 	return m, err
 }
 
-// rekeyedSinceMarkTx reports whether the per-SSID blob, absent at mark, is the marked bare row re-keyed:
-// the bare row is gone and both decrypt to the same password. in: ctx, tx, tenant, device, field, blob, mark.
-func (s *SecretService) rekeyedSinceMarkTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, field string, blob []byte, mark WifiSecretMark) (bool, error) {
-	if mark.blob != nil || mark.legacy == nil {
-		return false, nil
-	}
-	bare, err := wifiSecretBlobTx(ctx, tx, devicePk, LegacyWifiPassword)
-	if err != nil || bare != nil {
-		return false, err
-	}
-	dek, err := s.tenantDEK(ctx, tx, tenantID)
-	if err != nil {
-		return false, err
-	}
-	old, err := secrets.DecryptSecret(dek, mark.legacy, secretAAD(tenantID, devicePk, LegacyWifiPassword))
-	if err != nil {
-		return false, nil
-	}
-	defer clear(old)
-	cur, err := secrets.DecryptSecret(dek, blob, secretAAD(tenantID, devicePk, field))
-	if err != nil {
-		return false, nil
-	}
-	defer clear(cur)
-	return subtle.ConstantTimeCompare(old, cur) == 1, nil
-}
-
-// wifiSecretBlobTx returns the sealed blob of the device's row for field, nil without one.
-func wifiSecretBlobTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, field string) ([]byte, error) {
+// wifiSecretRowTx returns the sealed blob of the device's row for field and its re-key flag, nil without a row.
+func wifiSecretRowTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, field string) ([]byte, bool, error) {
 	var blob []byte
+	var rekeyed bool
 	err := tx.QueryRow(ctx,
-		`SELECT ciphertext FROM device_config_secrets WHERE device_pk = $1 AND field = $2`, devicePk, field).Scan(&blob)
+		`SELECT ciphertext, rekeyed FROM device_config_secrets WHERE device_pk = $1 AND field = $2`,
+		devicePk, field).Scan(&blob, &rekeyed)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", field, err)
+		return nil, false, fmt.Errorf("read %s: %w", field, err)
 	}
-	return blob, nil
+	return blob, rekeyed, nil
 }
 
 // DropClearedWifi deletes the store rows for a WiFi password the device verified empty, in one tx under
 // the device row lock: the per-SSID row, and the bare legacy row unless the stored config.json names another
 // primary SSID, so a later re-key cannot bring the password back. A per-SSID row written after mark is kept
-// and the call returns ErrWifiSecretChanged, unless it is the marked bare row re-keyed meanwhile.
+// and the call returns ErrWifiSecretChanged, unless the re-key of the marked bare row wrote it and nothing since.
 // in: ctx, tenant, device, field, mark. out: error.
 func (s *SecretService) DropClearedWifi(ctx context.Context, tenantID string, devicePk uuid.UUID, field string, mark WifiSecretMark) error {
 	ssid, ok := strings.CutPrefix(field, WifiPasswordPrefix)
@@ -161,18 +149,13 @@ func (s *SecretService) DropClearedWifi(ctx context.Context, tenantID string, de
 		if err := lockDeviceConfig(ctx, tx, devicePk, nil, nil); err != nil {
 			return err
 		}
-		blob, err := wifiSecretBlobTx(ctx, tx, devicePk, field)
+		blob, rekeyed, err := wifiSecretRowTx(ctx, tx, devicePk, field)
 		if err != nil {
 			return err
 		}
-		if blob != nil && !bytes.Equal(blob, mark.blob) {
-			rekeyed, err := s.rekeyedSinceMarkTx(ctx, tx, tenantID, devicePk, field, blob, mark)
-			if err != nil {
-				return err
-			}
-			if !rekeyed {
-				return ErrWifiSecretChanged
-			}
+		rekeyedSinceMark := rekeyed && mark.blob == nil && mark.legacy != nil
+		if blob != nil && !bytes.Equal(blob, mark.blob) && !rekeyedSinceMark {
+			return ErrWifiSecretChanged
 		}
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM device_config_secrets WHERE device_pk = $1 AND field = $2`, devicePk, field); err != nil {
@@ -240,7 +223,7 @@ func MigrateLegacyWifi(ctx context.Context, sec *SecretService, devices *DeviceS
 				return err
 			}
 			var err error
-			outcome, err = sec.rekeyLegacyWifiTx(ctx, tx, d.TenantID, d.ID, primary)
+			outcome, err = sec.rekeyLegacyWifiTx(ctx, tx, d.TenantID, d.ID, primary, primary)
 			return err
 		})
 		if err != nil {

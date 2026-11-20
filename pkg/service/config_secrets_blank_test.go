@@ -224,7 +224,7 @@ func TestBlankSecretFields(t *testing.T) {
 			t.Fatalf("%s: %v", c.content, err)
 		}
 		sort.Strings(fields)
-		if !slices.Equal(fields, c.fields) || unknown != c.unknown {
+		if !slices.Equal(fields, c.fields) || (len(unknown) > 0) != c.unknown {
 			t.Errorf("%s: got %v unknown=%v, want %v unknown=%v", c.content, fields, unknown, c.fields, c.unknown)
 		}
 	}
@@ -249,5 +249,49 @@ func TestOpenWifiSSIDs_RepeatedSSID(t *testing.T) {
 	content := `{"wifi":{"networks":[{"ssid":"cafe","password":"pw"},{"ssid":"cafe","password":""},{"ssid":"cafe","password":""}]}}`
 	if got := openWifiSSIDs(content); !slices.Equal(got, []string{"cafe"}) {
 		t.Errorf("open = %v, want [cafe]", got)
+	}
+}
+
+// The key pattern names the leaves snapshots blank and the write guard checks.
+func TestSensitiveConfigKey(t *testing.T) {
+	for _, k := range []string{
+		"password", "ap_password", "bot_token", "client_secret", "api_key", "client_key",
+		"passphrase", "credential", "pass", "web_pass", "pwd", "mqtt_pwd", "psk", "PSK",
+		"pin", "sim_pin", "seed", "wallet_seed", "passwd", "Password",
+	} {
+		if !sensitiveConfigKeyRE.MatchString(k) {
+			t.Errorf("%q: want a match", k)
+		}
+	}
+	for _, k := range []string{
+		"ssid", "host", "bypass", "compass", "spin", "spinning", "pinout", "pins",
+		"seeded", "proceed", "user", "chat_id", "port", "passive", "pass_through",
+	} {
+		if sensitiveConfigKeyRE.MatchString(k) {
+			t.Errorf("%q: want no match", k)
+		}
+	}
+}
+
+// A null secret leaf reaches the firmware as "", so the guard counts it as empty.
+func TestBlankSecretFields_NullIsEmpty(t *testing.T) {
+	for _, c := range []struct {
+		content string
+		fields  []string
+		unknown bool
+	}{
+		{`{"mqtt":{"password":null}}`, []string{"mqtt.password"}, false},
+		{`{"wifi":{"networks":[{"ssid":"home","password":null}]}}`, []string{"wifi.password:home"}, false},
+		{`{"cellular":{"sim_pin":null}}`, nil, true},
+		{`{"lora":{"meshtastic":{"psk":""}}}`, nil, true},
+	} {
+		fields, unknown, err := BlankSecretFields(c.content)
+		if err != nil {
+			t.Fatalf("%s: %v", c.content, err)
+		}
+		sort.Strings(fields)
+		if !slices.Equal(fields, c.fields) || (len(unknown) > 0) != c.unknown {
+			t.Errorf("%s: got %v unknown=%v, want %v unknown=%v", c.content, fields, unknown, c.fields, c.unknown)
+		}
 	}
 }

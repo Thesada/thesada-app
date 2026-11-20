@@ -423,8 +423,8 @@ func TestUpsertFromDevice(t *testing.T) {
 		if _, found := reveal(t, pk, "wifi.password:home"); found {
 			t.Error("feature off wrote to the store")
 		}
-		if markers(t, pk) != 0 {
-			t.Error("feature off recorded a marker")
+		if markers(t, pk) != 1 {
+			t.Error("feature off did not record the open cafe, a file fact the guard needs")
 		}
 		if err := off.DeviceFiles.MarkConfigChanged(ctx, tA, pk); err != nil {
 			t.Fatalf("MarkConfigChanged: %v", err)

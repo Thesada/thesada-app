@@ -22,13 +22,14 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 )
 
 // sensitiveConfigKeyRE matches a config leaf key whose value must never be
-// persisted in cleartext. Anchored at the end so `password`, `api_key`,
-// `bot_token`, `client_secret`, `passphrase`, `credential` all match.
-var sensitiveConfigKeyRE = regexp.MustCompile(`(?i)(password|secret|token|key|passphrase|credential)$`)
+// persisted in cleartext. Long words match as a suffix (`api_key`, `passwd`),
+// short ones only as the whole key or after _ . - (`sim_pin`, not `spin`).
+var sensitiveConfigKeyRE = regexp.MustCompile(`(?i)(password|passwd|secret|token|key|passphrase|credential|(^|[_.-])(pass|pwd|psk|pin|seed))$`)
 
 // blankConfigSecrets returns config.json content with every sensitive leaf
 // emptied (value -> ""), preserving the object shape and key set. It blanks
@@ -254,36 +255,55 @@ func openWifiSSIDs(content string) []string {
 // shape blankConfigSecrets leaves in snapshots and the editor. Writing such
 // content to a device erases those secrets unless the field really is empty
 // on the device. fields are storage keys (scalars and wifi.password:<ssid>),
-// unknown is an empty sensitive leaf the store has no field for.
+// unknown are the dotted paths of empty sensitive leaves the store has no field for.
 // Content that is not one JSON object fails closed with an error: a config.json
 // write must never replace the device config with something it cannot parse.
-// in: raw config.json content. out: empty fields, unknown empty leaf found, error.
-func BlankSecretFields(content string) ([]string, bool, error) {
+// in: raw config.json content. out: empty fields, unknown empty leaves (sorted), error.
+func BlankSecretFields(content string) ([]string, []string, error) {
 	var m map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(content)), &m); err != nil {
-		return nil, false, fmt.Errorf("config.json must be one JSON object: %w", err)
+		return nil, nil, fmt.Errorf("config.json must be one JSON object: %w", err)
 	}
 	if m == nil {
-		return nil, false, fmt.Errorf("config.json must be one JSON object, got null")
+		return nil, nil, fmt.Errorf("config.json must be one JSON object, got null")
 	}
 	var fields []string
 	for _, dotted := range ScalarSecretFields {
 		segs := strings.Split(dotted, ".")
-		if v, ok := readPath(m, segs); ok && v == "" {
+		if emptyLeafAt(m, segs) {
 			fields = append(fields, dotted)
 			deletePath(m, segs)
 		}
 	}
 	for _, net := range wifiNetworks(m) {
-		pw, ok := net["password"].(string)
+		pw, ok := net["password"]
 		ssid, _ := net["ssid"].(string)
-		if ok && pw == "" && ssid != "" {
+		if ok && emptyValue(pw) && ssid != "" {
 			fields = append(fields, WifiSecretField(ssid))
 			delete(net, "password")
 		}
 	}
 	// Whatever empty sensitive leaf is left has no storage field.
-	return fields, hasBlankSensitiveLeaf(m), nil
+	var unknown []string
+	blankSensitivePaths(m, "", &unknown)
+	sort.Strings(unknown)
+	return fields, unknown, nil
+}
+
+// emptyValue: "" or null, both of which the firmware reads as an empty string.
+func emptyValue(v any) bool { return v == nil || v == "" }
+
+// emptyLeafAt reports whether the leaf at segs is present and empty or null.
+func emptyLeafAt(m map[string]any, segs []string) bool {
+	for _, seg := range segs[:len(segs)-1] {
+		child, ok := m[seg].(map[string]any)
+		if !ok {
+			return false
+		}
+		m = child
+	}
+	v, ok := m[segs[len(segs)-1]]
+	return ok && emptyValue(v)
 }
 
 // deletePath removes the leaf at segs, the counterpart of readPath.
@@ -298,26 +318,27 @@ func deletePath(m map[string]any, segs []string) {
 	delete(m, segs[len(segs)-1])
 }
 
-func hasBlankSensitiveLeaf(v any) bool {
+// blankSensitivePaths appends the dotted path of every empty or null leaf whose key looks sensitive.
+// Array elements show as [i]. in: value, its path, out list.
+func blankSensitivePaths(v any, at string, out *[]string) {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, val := range t {
-			if s, ok := val.(string); ok {
+			p := k
+			if at != "" {
+				p = at + "." + k
+			}
+			if s, ok := val.(string); ok || val == nil {
 				if s == "" && sensitiveConfigKeyRE.MatchString(k) {
-					return true
+					*out = append(*out, p)
 				}
 				continue
 			}
-			if hasBlankSensitiveLeaf(val) {
-				return true
-			}
+			blankSensitivePaths(val, p, out)
 		}
 	case []any:
-		for _, item := range t {
-			if hasBlankSensitiveLeaf(item) {
-				return true
-			}
+		for i, item := range t {
+			blankSensitivePaths(item, fmt.Sprintf("%s[%d]", at, i), out)
 		}
 	}
-	return false
 }

@@ -27,3 +27,6 @@ func (s *SecretService) PlantLegacyWifi(ctx context.Context, tenantID string, de
 		return s.setSecretTx(ctx, tx, tenantID, devicePk, LegacyWifiPassword, value)
 	})
 }
+
+// Rows returns the per-SSID and the bare legacy blob a mark holds, nil for no row.
+func (m WifiSecretMark) Rows() (blob, legacy []byte) { return m.blob, m.legacy }

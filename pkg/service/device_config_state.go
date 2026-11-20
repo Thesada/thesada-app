@@ -86,6 +86,7 @@ func (s *DeviceFilesService) UpsertFromDevice(ctx context.Context, tenantID stri
 		return false, err
 	}
 	stale := false
+	legacy := LegacyNone
 	err = db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		var changedAt, readAt *time.Time
 		if err := lockDeviceConfig(ctx, tx, devicePk, &changedAt, &readAt); err != nil {
@@ -99,13 +100,20 @@ func (s *DeviceFilesService) UpsertFromDevice(ctx context.Context, tenantID stri
 			return err
 		}
 		if s.secrets != nil && s.secrets.Enabled() {
+			stored, err := storedPrimaryTx(ctx, tx, devicePk)
+			if err != nil {
+				return err
+			}
 			// First, so the gap fill sees the per-SSID row a legacy one became.
-			if _, err := s.secrets.rekeyLegacyWifiTx(ctx, tx, tenantID, devicePk, primaryWifiSSID(content)); err != nil {
+			if legacy, err = s.secrets.rekeyLegacyWifiTx(ctx, tx, tenantID, devicePk, primaryWifiSSID(content), stored); err != nil {
 				return err
 			}
-			if err := s.refreshStoreTx(ctx, tx, tenantID, devicePk, content, source, readStart); err != nil {
+			if err := s.refreshStoreTx(ctx, tx, tenantID, devicePk, content); err != nil {
 				return err
 			}
+		}
+		if err := recordOpenNetworksTx(ctx, tx, tenantID, devicePk, content, source, readStart); err != nil {
+			return err
 		}
 		return upsertTx(ctx, tx, devicePk, path, blanked, sha256hex, source, createdBy)
 	})
@@ -115,12 +123,43 @@ func (s *DeviceFilesService) UpsertFromDevice(ctx context.Context, tenantID stri
 	if stale {
 		slog.Info("device.read.stale_dropped", "device", devicePk, "source", source)
 	}
+	if legacy == LegacyDropped {
+		s.auditLegacyDropped(ctx, tenantID, devicePk, createdBy)
+	}
 	return !stale, nil
 }
 
-// refreshStoreTx fills only fields the store has nothing for, as the firmware resolves NVS first (C1),
-// and sets the device's markers to the networks whose password this read shows as "" in the file.
-func (s *DeviceFilesService) refreshStoreTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, content, source string, seenAt time.Time) error {
+// storedPrimaryTx is the primary SSID of the config.json the app holds for the device, "" without one.
+func storedPrimaryTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID) (string, error) {
+	var content string
+	err := tx.QueryRow(ctx,
+		`SELECT content FROM device_files WHERE device_pk = $1 AND path = 'config.json'`, devicePk).Scan(&content)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read stored config.json: %w", err)
+	}
+	return primaryWifiSSID(content), nil
+}
+
+// auditLegacyDropped records the dropped bare WiFi password, field name only. The drop has
+// committed, so a failed audit write is logged, not returned.
+func (s *DeviceFilesService) auditLegacyDropped(ctx context.Context, tenantID string, devicePk uuid.UUID, actor *uuid.UUID) {
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "device_secret.legacy_wifi_dropped", func(tx pgx.Tx) error {
+		return auditInsertTx(ctx, tx, AuditEntry{
+			ActorUserID: actor, ActorEmail: "system", Action: "device_secret.legacy_wifi_dropped",
+			TargetType: "device", TargetID: devicePk.String(), TenantID: tenantID,
+			Detail: map[string]any{"field": LegacyWifiPassword, "reason": "primary ssid changed"},
+		})
+	})
+	if err != nil {
+		slog.Error("device_secret.legacy_wifi_drop_audit_failed", "device", devicePk, "err", err)
+	}
+}
+
+// refreshStoreTx fills only fields the store has nothing for, as the firmware resolves NVS first (C1).
+func (s *DeviceFilesService) refreshStoreTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, content string) error {
 	found := extractConfigSecrets(content)
 	for _, field := range slices.Sorted(maps.Keys(found)) {
 		has, err := hasSecretTx(ctx, tx, devicePk, field)
@@ -134,6 +173,12 @@ func (s *DeviceFilesService) refreshStoreTx(ctx context.Context, tx pgx.Tx, tena
 			return fmt.Errorf("store device secret %s: %w", field, err)
 		}
 	}
+	return nil
+}
+
+// recordOpenNetworksTx sets the device's markers to the networks whose password this read shows
+// as "" in the file. It holds no secret, so it runs with the store off too.
+func recordOpenNetworksTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, content, source string, seenAt time.Time) error {
 	// Non-nil: ANY over a NULL array matches nothing, and NOT of that deletes nothing.
 	// A file fact only. Whether NVS holds a password is asked of the device at write time.
 	open := append([]string{}, openWifiSSIDs(content)...)
