@@ -74,7 +74,7 @@ func TestAdminAuditTrail(t *testing.T) {
 		t.Fatal(err)
 	}
 	prefix := "thesada/" + tenant + "/" + devID
-	pk, err := env.Services.Devices.Upsert(tenant, devID, "", "", "", prefix)
+	pk, err := env.Services.Devices.Upsert(tenant, devID, "", service.MinFirmwareVersion, "", prefix)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -52,6 +52,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          # Release tags for the compose pin test (deploy/compose_pin_test.go).
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@v6
         with:
@@ -59,6 +61,7 @@ jobs:
       - name: Run unit tests
         env:
           THESADA_REQUIRE_NODE: "1"
+          THESADA_REQUIRE_TAGS: "1"
         run: make node-cli && make test
 
   # 80%+ floor on csrf, oauth, pki, authmw + the file pkg/service/auth.go.

@@ -28,6 +28,7 @@ var allActions = []Action{
 	DeviceReassign,
 	DeviceSecretSet,
 	DeviceSecretClear,
+	DeviceSecretClearNVS,
 	DeviceSecretProvision,
 	TenantSecretSet,
 	TenantSecretClear,

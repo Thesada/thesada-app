@@ -47,10 +47,10 @@ func TestProvisionDeviceSecrets(t *testing.T) {
 		}
 	})
 
-	t.Run("secretProvisionFields builds scalars + per-SSID + legacy", func(t *testing.T) {
+	t.Run("secretProvisionFields builds scalars + per-SSID, never the bare legacy field", func(t *testing.T) {
 		got, primary := secretProvisionFields([]string{"HomeNet", "Barn"})
 		want := []string{"mqtt.password", "telegram.bot_token", "web.password", "wifi.ap_password",
-			"wifi.password:HomeNet", "wifi.password:Barn", "wifi.password"}
+			"wifi.password:HomeNet", "wifi.password:Barn"}
 		if !reflect.DeepEqual(got, want) || primary != "HomeNet" {
 			t.Errorf("secretProvisionFields = %v, %q; want %v, HomeNet", got, primary, want)
 		}
@@ -100,6 +100,20 @@ func TestProvisionDeviceSecrets(t *testing.T) {
 		}
 		if len(out.Pushed) != 0 {
 			t.Errorf("Pushed = %v, want none (aborted on the failing push)", out.Pushed)
+		}
+	})
+
+	// secret.set with "" clears NVS on the firmware, so a found empty value is skipped (C1).
+	t.Run("an empty value is skipped, never pushed", func(t *testing.T) {
+		out := provisionDeviceSecrets([]string{"wifi.password:cafe", "mqtt.password"}, "n",
+			func(f string) (string, bool, error) { return "", true, nil },
+			func(fw, v string) (string, bool) {
+				t.Fatalf("push of %s with %q must not happen", fw, v)
+				return "", false
+			},
+		)
+		if out.AbortMsg != "" || len(out.SkippedUnset) != 2 {
+			t.Errorf("outcome = %+v, want both skipped", out)
 		}
 	})
 

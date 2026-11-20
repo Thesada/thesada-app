@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -27,10 +28,21 @@ type NotificationChannel struct {
 	CreatedAt time.Time `json:"created_at"`
 	// FollowsAccount: the target is the account's current email, not stored here.
 	FollowsAccount bool `json:"follows_account"`
+	// Confirmed is false for an email channel whose link is not used yet.
+	Confirmed bool `json:"confirmed"`
 }
 
 // channelTargetSQL is the live target: the account email for a follows_account row.
 const channelTargetSQL = `CASE WHEN c.follows_account THEN u.email::text ELSE c.target END`
+
+// channelConfirmedSQL holds for every channel (alias c) that may receive alerts.
+const channelConfirmedSQL = `(c.kind <> 'email' OR c.follows_account OR c.confirmed_at IS NOT NULL)`
+
+// channelConfirmLifetime is how long an email channel's confirm link stays valid.
+const channelConfirmLifetime = 24 * time.Hour
+
+// ErrConfirmLimited means a confirm mail was due but the caller's cap refused it.
+var ErrConfirmLimited = errors.New("confirm mail rate limited")
 
 // ErrBadChannelTarget means the target does not fit the channel kind.
 var ErrBadChannelTarget = errors.New("bad channel target")
@@ -82,7 +94,8 @@ func (s *AlertService) ListChannels(ctx context.Context, tenantID string, userID
 	var out []NotificationChannel
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT c.id, c.user_id, c.kind, `+channelTargetSQL+`, c.label, c.enabled, c.created_at, c.follows_account
+			SELECT c.id, c.user_id, c.kind, `+channelTargetSQL+`, c.label, c.enabled, c.created_at, c.follows_account,
+			       `+channelConfirmedSQL+`
 			FROM notification_channels c JOIN users u ON u.id = c.user_id
 			WHERE c.user_id = $1 ORDER BY c.follows_account DESC, c.created_at, c.id`, userID)
 		if err != nil {
@@ -91,7 +104,7 @@ func (s *AlertService) ListChannels(ctx context.Context, tenantID string, userID
 		defer rows.Close()
 		for rows.Next() {
 			var c NotificationChannel
-			if err := rows.Scan(&c.ID, &c.UserID, &c.Kind, &c.Target, &c.Label, &c.Enabled, &c.CreatedAt, &c.FollowsAccount); err != nil {
+			if err := rows.Scan(&c.ID, &c.UserID, &c.Kind, &c.Target, &c.Label, &c.Enabled, &c.CreatedAt, &c.FollowsAccount, &c.Confirmed); err != nil {
 				return err
 			}
 			out = append(out, c)
@@ -140,9 +153,12 @@ func createChannelTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, kind, tar
 	if n >= maxChannelsPerUser {
 		return uuid.Nil, fmt.Errorf("at most %d channels", maxChannelsPerUser)
 	}
+	// The account's own address needs no link.
 	err = tx.QueryRow(ctx, `
-		INSERT INTO notification_channels (user_id, kind, target, label)
-		VALUES ($1, $2, $3, $4) RETURNING id`, userID, kind, target, label).Scan(&id)
+		INSERT INTO notification_channels (user_id, kind, target, label, confirmed_at)
+		SELECT u.id, $2, $3, $4, CASE WHEN $2 = 'email' AND lower($3) = lower(u.email::text) THEN now() END
+		  FROM users u WHERE u.id = $1
+		RETURNING id`, userID, kind, target, label).Scan(&id)
 	return id, err
 }
 
@@ -152,10 +168,11 @@ func createChannelTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, kind, tar
 // in: ctx, tenant, user, channel id, target, label, enabled. out: error, ErrNotFound when not the user's.
 func (s *AlertService) UpdateChannel(ctx context.Context, tenantID string, userID, channelID uuid.UUID, target, label string, enabled bool) error {
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
-		var kind string
+		var kind, old string
 		var follows bool
-		if err := tx.QueryRow(ctx, `SELECT kind, follows_account FROM notification_channels WHERE id = $1 AND user_id = $2`,
-			channelID, userID).Scan(&kind, &follows); err != nil {
+		// Locked, so a concurrent edit cannot change the target between this read and the confirmation reset.
+		if err := tx.QueryRow(ctx, `SELECT kind, target, follows_account FROM notification_channels WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+			channelID, userID).Scan(&kind, &old, &follows); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
@@ -174,6 +191,16 @@ func (s *AlertService) UpdateChannel(ctx context.Context, tenantID string, userI
 			UPDATE notification_channels SET target = $1, label = $2, enabled = $3
 			WHERE id = $4 AND user_id = $5`, t, strings.TrimSpace(label), enabled, channelID, userID); err != nil {
 			return err
+		}
+		if kind == "email" && t != old {
+			// A new address starts unconfirmed and the old link dies.
+			if _, err := tx.Exec(ctx, `
+				UPDATE notification_channels c
+				   SET confirmed_at = CASE WHEN lower(c.target) = lower(u.email::text) THEN now() END,
+				       confirm_token_hash = NULL, confirm_expires_at = NULL
+				  FROM users u WHERE u.id = c.user_id AND c.id = $1`, channelID); err != nil {
+				return err
+			}
 		}
 		if kind == "webhook" {
 			_, err = tx.Exec(ctx, `UPDATE alert_subscriptions SET destination = $1 WHERE channel_id = $2`, t, channelID)
@@ -279,4 +306,77 @@ func channelForKindTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, kind, de
 	default:
 		return uuid.Nil, ErrBadChannelTarget
 	}
+}
+
+// IssueChannelConfirm gives an unconfirmed email channel a fresh confirm link
+// that replaces the one before. Without resend a live link is kept. allow is
+// asked only when a link is due.
+// in: ctx, tenant, user, channel id, resend, allow. out: target and raw token, both ""
+// when nothing is due, ErrNotFound when not the user's, ErrConfirmLimited when allow refused.
+func (s *AlertService) IssueChannelConfirm(ctx context.Context, tenantID string, userID, channelID uuid.UUID, resend bool, allow func() bool) (string, string, error) {
+	var target, token string
+	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		var confirmed, live bool
+		if err := tx.QueryRow(ctx, `
+			SELECT c.target, `+channelConfirmedSQL+`, coalesce(c.confirm_expires_at > now(), false)
+			  FROM notification_channels c
+			 WHERE c.id = $1 AND c.user_id = $2 FOR UPDATE`, channelID, userID).Scan(&target, &confirmed, &live); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if confirmed || (live && !resend) {
+			return nil
+		}
+		if !allow() {
+			return ErrConfirmLimited
+		}
+		raw, err := randomToken(32)
+		if err != nil {
+			return err
+		}
+		hash := sha256.Sum256([]byte(raw))
+		if _, err := tx.Exec(ctx, `
+			UPDATE notification_channels SET confirm_token_hash = $1, confirm_expires_at = $2
+			 WHERE id = $3`, hash[:], time.Now().Add(channelConfirmLifetime), channelID); err != nil {
+			return err
+		}
+		token = raw
+		return nil
+	})
+	if err != nil || token == "" {
+		return "", "", err
+	}
+	return target, token, nil
+}
+
+// ChannelConfirmValid reports whether a confirm link is unused and unexpired.
+// The link carries no tenant, so this and ConfirmChannel key on the hash alone.
+// in: ctx, raw token. out: valid, error.
+func (s *AlertService) ChannelConfirmValid(ctx context.Context, token string) (bool, error) {
+	hash := sha256.Sum256([]byte(token))
+	var ok bool
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "alert.channel_confirm_check", func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM notification_channels
+			                WHERE confirm_token_hash = $1 AND confirm_expires_at > now())`, hash[:]).Scan(&ok)
+	})
+	return ok, err
+}
+
+// ConfirmChannel uses a confirm link once: the channel receives alerts from now on.
+// in: ctx, raw token. out: ErrNotFound for an unknown, used or expired link.
+func (s *AlertService) ConfirmChannel(ctx context.Context, token string) error {
+	hash := sha256.Sum256([]byte(token))
+	return db.WithAdminAudit(ctx, s.pools.Admin, "alert.channel_confirm", func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE notification_channels
+			   SET confirmed_at = now(), confirm_token_hash = NULL, confirm_expires_at = NULL
+			 WHERE confirm_token_hash = $1 AND confirm_expires_at > now()`, hash[:])
+		if err == nil && tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return err
+	})
 }

@@ -230,6 +230,10 @@ func (s *Server) handleDeviceRulesPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lua := rulesgen.Generate(rules)
+	if msg := firmwareRefusal(d, "Pushing rules"); msg != "" {
+		http.Error(w, msg, http.StatusConflict)
+		return
+	}
 	claim, ok := s.claimDeviceWrite(d.ID, writeClaimTTL(s.cfg.CLIRequestTimeout, len(lua))+s.cfg.CLIRequestTimeout)
 	if !ok {
 		http.Error(w, "a write to this device is already running", http.StatusConflict)

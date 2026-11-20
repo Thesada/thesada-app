@@ -67,7 +67,7 @@ func seedSub(t *testing.T, env *servicetest.Env, userID, devicePk, kind, target,
 	ctx := context.Background()
 	var chID string
 	if err := env.Super.QueryRow(ctx, `
-		INSERT INTO notification_channels (user_id, kind, target) VALUES ($1, $2, $3)
+		INSERT INTO notification_channels (user_id, kind, target, confirmed_at) VALUES ($1, $2, $3, now())
 		ON CONFLICT (user_id, kind, target) DO UPDATE SET target = EXCLUDED.target
 		RETURNING id`, userID, kind, target).Scan(&chID); err != nil {
 		t.Fatalf("seed channel: %v", err)

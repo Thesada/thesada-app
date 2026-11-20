@@ -51,6 +51,7 @@ One Go binary. Goroutines for HTTP, MQTT subscriber, background workers. No micr
 
 - Go 1.26.10 (the `go` directive in `go.mod`)
 - Postgres 14+
+- Device firmware (thesada-fw) 1.4.5 or later. Older or unknown firmware gets no file saves, rule pushes or drift snapshots, see "A stored device reply echoes its request id" in [docs/invariants.md](docs/invariants.md)
 - The Tailwind v4 standalone binary, downloaded into `tools/tailwindcss`:
 
   ```

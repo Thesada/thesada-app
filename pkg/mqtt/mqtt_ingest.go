@@ -394,6 +394,12 @@ func (c *Client) handleInfo(tenant, device, topicPrefix string, payload []byte, 
 		driftPaths = append(driftPaths, path)
 	}
 	if len(driftPaths) > 0 {
+		// Every pull below would fail on a reply without req_id, one error per attempt.
+		if fw, ok := c.firmwareMeetsFloor(tenant, devicePk); !ok {
+			slog.Warn("drift pull skipped, firmware below the supported floor",
+				"tenant", tenant, "device", device, "firmware", fw, "min", service.MinFirmwareVersion)
+			return
+		}
 		c.pullDrift(tenant, devicePk, topicPrefix, driftPaths, hashMap)
 	}
 }
