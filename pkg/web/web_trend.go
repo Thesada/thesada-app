@@ -113,6 +113,8 @@ func (s *Server) handleTrendRuleAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, strings.TrimPrefix(err.Error(), service.ErrTrendRuleInvalid.Error()+": "), http.StatusBadRequest)
 	case errors.Is(err, service.ErrTrendDevice):
 		http.Error(w, "device not found", http.StatusBadRequest)
+	case errors.Is(err, service.ErrQuotaTrendRules):
+		http.Error(w, strings.TrimPrefix(err.Error(), service.ErrQuotaTrendRules.Error()+": "), http.StatusBadRequest)
 	case err != nil:
 		slog.Error("alerts.trend_save_failed", "part", "add", "tenant", tenantID, "err", err)
 		http.Redirect(w, r, "/alerts?err=rules#rules", http.StatusSeeOther)
@@ -129,7 +131,7 @@ func (s *Server) handleTrendRuleToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.trendRuleChange(w, r, func(tenantID string, id uuid.UUID) error {
-		return s.services.Alerts.SetTrendRuleEnabled(r.Context(), tenantID, id, r.PostFormValue("enabled") == "on")
+		return s.services.Alerts.SetTrendRuleEnabled(r.Context(), tenantID, id, formChecked(r, "enabled"))
 	})
 }
 

@@ -39,6 +39,8 @@ type ruleWorkspaceSaveRequest struct {
 	WorkspaceJSON string `json:"workspace_json"`
 	LuaContent    string `json:"lua_content"`
 	Source        string `json:"source"`
+	// Takeover lets the admin editor overwrite a slot the tenant editor owns.
+	Takeover bool `json:"takeover"`
 }
 
 // handleAdminDeviceRulesWorkspaceGET returns the saved Blockly workspace for
@@ -106,6 +108,22 @@ func (s *Server) handleAdminDeviceRulesWorkspacePOST(w http.ResponseWriter, r *h
 	if req.Source == "" {
 		req.Source = "editor"
 	}
+	if req.Source != "editor" && req.Source != "push" {
+		http.Error(w, "invalid source", http.StatusBadRequest)
+		return
+	}
+	if !req.Takeover {
+		cur, err := s.services.RuleWorkspaces.Latest(r.Context(), device.TenantID, device.ID, req.Slot)
+		if err != nil {
+			slog.Error("rule.workspace.load_failed", "device", device.DeviceID, "slot", req.Slot, "err", err)
+			http.Error(w, "workspace load failed", http.StatusInternalServerError)
+			return
+		}
+		if cur != nil && cur.Source == tenantRuleSource {
+			http.Error(w, "these rules belong to the tenant editor, use the starter workspace to take them over", http.StatusConflict)
+			return
+		}
+	}
 	user := authmw.CurrentUser(r)
 	sha, err := s.services.RuleWorkspaces.Save(
 		r.Context(), device.TenantID, device.ID,
@@ -119,7 +137,7 @@ func (s *Server) handleAdminDeviceRulesWorkspacePOST(w http.ResponseWriter, r *h
 	}
 	s.audit(r.Context(), user, authz.RulesWorkspaceSave, service.AuditEntry{
 		TargetType: "device", TargetID: device.ID.String(), TenantID: device.TenantID,
-		Detail: map[string]any{"device_id": device.DeviceID, "slot": req.Slot, "lua_sha256": sha, "source": req.Source},
+		Detail: map[string]any{"device_id": device.DeviceID, "slot": req.Slot, "lua_sha256": sha, "source": req.Source, "takeover": req.Takeover},
 	})
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "slot": req.Slot, "lua_sha256": sha})

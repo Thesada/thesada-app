@@ -12,6 +12,8 @@ var (
 	ErrQuotaUsers   = errors.New("tenant user cap reached")
 	ErrQuotaDevices = errors.New("tenant device cap reached")
 	ErrQuotaEvents  = errors.New("tenant event cap reached")
+	// ErrQuotaTrendRules wraps a refusal whose text names the cap.
+	ErrQuotaTrendRules = errors.New("tenant trend rule cap reached")
 )
 
 // quotaFull is the shared comparison. A non-positive max is off.
@@ -96,6 +98,26 @@ func quotaAllowEvent(ctx context.Context, tx pgx.Tx, tenant string, max int) err
 	}
 	if quotaFull(n, max) {
 		return ErrQuotaEvents
+	}
+	return nil
+}
+
+// quotaAllowTrendRule refuses a new trend rule once the tenant holds max, enabled or not.
+// in: tx, tenant, cap. out: an error wrapping ErrQuotaTrendRules, or a query error.
+func quotaAllowTrendRule(ctx context.Context, tx pgx.Tx, tenant string, max int) error {
+	if max <= 0 {
+		return nil
+	}
+	if err := lockTenantQuota(ctx, tx, tenant); err != nil {
+		return err
+	}
+	var n int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM alert_rules WHERE tenant_id = $1 AND kind = 'trend'`, tenant).Scan(&n); err != nil {
+		return fmt.Errorf("quota trend rules: %w", err)
+	}
+	if quotaFull(n, max) {
+		return fmt.Errorf("%w: at most %d trend rules per tenant, delete one first", ErrQuotaTrendRules, max)
 	}
 	return nil
 }

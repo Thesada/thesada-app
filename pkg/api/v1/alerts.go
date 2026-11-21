@@ -98,7 +98,11 @@ func (s *Server) handleSubsCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.services.Alerts.CreateSubscription(r.Context(), u.TenantID, u.ID, req.DevicePK, req.Channel, req.MinSeverity, req.Destination); err != nil {
 		if errors.Is(err, service.ErrNoChannel) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "add a " + req.Channel + " channel first"})
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "add or enable a " + req.Channel + " channel first"})
+			return
+		}
+		if errors.Is(err, service.ErrChannelTooLong) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "destination too long"})
 			return
 		}
 		slog.Error("api subs create failed", "user_id", u.ID, "err", err)

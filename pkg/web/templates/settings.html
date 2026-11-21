@@ -231,10 +231,10 @@
                 {{if .FollowsAccount}}
                 <p class="w-64 text-xs text-slate-500">Follows your account email.</p>
                 {{else}}
-                <input type="text" name="target" value="{{.Target}}" required
+                <input type="text" name="target" value="{{.Target}}" required maxlength="2048"
                        class="w-64 text-sm border border-slate-300 rounded px-2 py-1 font-mono">
                 {{end}}
-                <input type="text" name="label" value="{{.Label}}" placeholder="Label"
+                <input type="text" name="label" value="{{.Label}}" placeholder="Label" maxlength="80"
                        class="w-64 text-sm border border-slate-300 rounded px-2 py-1">
                 <label class="flex items-center gap-2 text-xs">
                   <input type="checkbox" name="enabled" {{if .Enabled}}checked{{end}}> enabled
@@ -269,13 +269,13 @@
     </div>
     <div>
       <label class="block text-xs font-medium mb-1" for="channel_target">Address, chat ID or URL</label>
-      <input type="text" id="channel_target" name="target" required
+      <input type="text" id="channel_target" name="target" required maxlength="2048"
              placeholder="name@example.com, 123456789 or https://example/hook"
              class="w-72 text-sm border border-slate-300 rounded px-2 py-1 font-mono">
     </div>
     <div>
       <label class="block text-xs font-medium mb-1" for="channel_label">Label</label>
-      <input type="text" id="channel_label" name="label" placeholder="Optional"
+      <input type="text" id="channel_label" name="label" placeholder="Optional" maxlength="80"
              class="text-sm border border-slate-300 rounded px-2 py-1">
     </div>
     <button type="submit"

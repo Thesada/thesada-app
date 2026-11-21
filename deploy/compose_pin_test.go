@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -31,9 +32,13 @@ func TestComposePinIsNotBehindNewestTag(t *testing.T) {
 		t.Fatal(err)
 	}
 	pin, _ := calVer(tag)
-	// The release workflow sets it to the tag it ships.
-	if rel := os.Getenv("THESADA_RELEASE_TAG"); rel != "" {
-		if err := releaseTagErr(rel); err != nil {
+	// The release workflow sets it to the tag it ships, and that tag must be the pin.
+	rel := os.Getenv("THESADA_RELEASE_TAG")
+	if err := releasePinErr(tag, rel, os.Getenv("GITHUB_REF_TYPE")); err != nil {
+		t.Fatal(err)
+	}
+	if rel != "" {
+		if err := releaseNotesErr(releaseNotesPath(rel)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -124,6 +129,45 @@ func TestReleaseTriggerIsCalVerOnly(t *testing.T) {
 	}
 }
 
+// A release ships exactly the version its compose file pins.
+func TestReleasePinErr(t *testing.T) {
+	for _, tc := range []struct {
+		pin, rel, refType string
+		ok                bool
+	}{
+		{"26.11.5", "26.11.5", "tag", true},
+		{"26.11.5", "26.11.6", "tag", false},
+		{"26.11.6", "26.11.5", "tag", false},
+		{"26.11.4", "26.11.5", "tag", false},
+		{"26.11.5", "v26.11.5", "tag", false},
+		{"26.11.5", "26.11.5-rc.1", "tag", false},
+		{"26.11.5", "", "tag", false},
+		{"26.11.5", "", "branch", true},
+		{"26.11.5", "", "", true},
+	} {
+		if err := releasePinErr(tc.pin, tc.rel, tc.refType); (err == nil) != tc.ok {
+			t.Errorf("releasePinErr(%q, %q, %q) = %v, want ok=%v", tc.pin, tc.rel, tc.refType, err, tc.ok)
+		}
+	}
+}
+
+// The image tag and the binary version come from the same tag the pin job checks.
+func TestReleaseShipsTheCheckedTag(t *testing.T) {
+	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := workflowJobs(string(raw))
+	for _, want := range []string{"type=ref,event=tag", "VERSION=${{ github.ref_name }}"} {
+		if !strings.Contains(jobs["image"], want) {
+			t.Errorf("image job lacks %q:\n%s", want, jobs["image"])
+		}
+	}
+	if !strings.Contains(jobs["binary"], "VERSION: ${{ github.ref_name }}") {
+		t.Errorf("binary job does not build VERSION from the tag:\n%s", jobs["binary"])
+	}
+}
+
 func TestReleaseTagErr(t *testing.T) {
 	for _, tc := range []struct {
 		tag string
@@ -185,8 +229,8 @@ func TestReleaseJobsWaitForThePinCheck(t *testing.T) {
 			t.Errorf("pin job lacks %q:\n%s", want, pin)
 		}
 	}
-	for _, name := range []string{"image", "binary"} {
-		if !strings.Contains("\n"+jobs[name], "\n    needs: pin\n") {
+	for _, name := range []string{"image", "binary", "notes"} {
+		if !slices.Contains(jobNeeds(jobs[name]), "pin") {
 			t.Errorf("release job %s does not need pin:\n%s", name, jobs[name])
 		}
 	}
@@ -237,4 +281,116 @@ func less(a, b [3]int) bool {
 		}
 	}
 	return false
+}
+
+// releasePinErr checks the pin against the tag being cut. in: pin, tag, GITHUB_REF_TYPE. out: error.
+func releasePinErr(pin, rel, refType string) error {
+	if rel == "" {
+		if refType == "tag" {
+			return errors.New("a tag build must set THESADA_RELEASE_TAG to the tag it releases")
+		}
+		return nil
+	}
+	if err := releaseTagErr(rel); err != nil {
+		return err
+	}
+	if pin != rel {
+		return fmt.Errorf("compose pins %s, the release tag is %s: run make release-pin RELEASE=%s", pin, rel, rel)
+	}
+	return nil
+}
+
+// releaseNotesPath is the notes file a release body starts with. in: tag. out: path from deploy/.
+func releaseNotesPath(tag string) string {
+	return filepath.Join("..", "docs", "release-notes", tag+".md")
+}
+
+// releaseNotesErr refuses a release without its notes file. in: path. out: error.
+func releaseNotesErr(path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("release notes %s: %w, the release PR adds it", path, err)
+	}
+	if strings.TrimSpace(string(raw)) == "" {
+		return fmt.Errorf("release notes %s are empty", path)
+	}
+	return nil
+}
+
+func TestReleaseNotesErr(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, tc := range []struct {
+		path string
+		ok   bool
+	}{
+		{filepath.Join(dir, "missing.md"), false},
+		{write("empty.md", ""), false},
+		{write("blank.md", " \n\t\n"), false},
+		{write("notes.md", "- a line\n"), true},
+	} {
+		if err := releaseNotesErr(tc.path); (err == nil) != tc.ok {
+			t.Errorf("releaseNotesErr(%s) = %v, want ok=%v", filepath.Base(tc.path), err, tc.ok)
+		}
+	}
+}
+
+// The release the compose file pins has its notes, so the release PR cannot leave them out.
+func TestReleaseNotesForThePin(t *testing.T) {
+	raw, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin, err := composeAppPin(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := releaseNotesErr(releaseNotesPath(pin)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The notes job creates the release with the notes file ahead of the generated notes,
+// and the upload jobs after it leave the body alone.
+func TestReleaseBodyCarriesTheNotes(t *testing.T) {
+	raw, err := os.ReadFile("../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := workflowJobs(string(raw))
+	for _, want := range []string{"body_path: docs/release-notes/${{ github.ref_name }}.md", "generate_release_notes: true"} {
+		if !strings.Contains(jobs["notes"], want) {
+			t.Errorf("notes job lacks %q:\n%s", want, jobs["notes"])
+		}
+	}
+	if !slices.Contains(jobNeeds(jobs["binary"]), "notes") {
+		t.Errorf("binary job uploads before the notes job made the release:\n%s", jobs["binary"])
+	}
+	for _, bad := range []string{"generate_release_notes", "body"} {
+		if strings.Contains(jobs["binary"], bad) {
+			t.Errorf("binary job sets %s, which rewrites the release body:\n%s", bad, jobs["binary"])
+		}
+	}
+}
+
+// jobNeeds reads a job's needs line, one name or a [list]. in: job body. out: job names.
+func jobNeeds(job string) []string {
+	for line := range strings.SplitSeq(job, "\n") {
+		v, ok := strings.CutPrefix(line, "    needs: ")
+		if !ok {
+			continue
+		}
+		out := strings.Split(strings.Trim(v, "[] "), ",")
+		for i, n := range out {
+			out[i] = strings.TrimSpace(n)
+		}
+		return out
+	}
+	return nil
 }

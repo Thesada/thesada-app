@@ -52,8 +52,10 @@ BEGIN
 END $$;
 
 -- Every account address, every saved chat id and every webhook URL in use.
+-- An account without an address gets no email channel, its email rule never sent.
 INSERT INTO notification_channels (user_id, kind, target)
 SELECT id, 'email', email::text FROM users
+ WHERE btrim(email::text) <> ''
 UNION
 SELECT id, 'telegram', btrim(telegram_chat_id) FROM users
  WHERE btrim(coalesce(telegram_chat_id, '')) <> ''

@@ -116,7 +116,7 @@ test: ## Unit tests, no database
 	$(GO) test -count=1 ./deploy/
 
 .PHONY: pin-check
-pin-check: ## Compose pins the newest release tag (the release workflow gate, THESADA_REQUIRE_TAGS=1 fails without tags)
+pin-check: ## Compose pin is not behind the newest tag and equals THESADA_RELEASE_TAG when set (the release workflow gate)
 	$(GO) test -count=1 -run '^TestComposePinIsNotBehindNewestTag$$' ./deploy/
 
 .PHONY: test-integration
