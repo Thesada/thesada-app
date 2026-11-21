@@ -13,7 +13,7 @@ func TestValidateTrendRule(t *testing.T) {
 		t.Fatalf("valid rule refused: %v", err)
 	}
 	// MQTT ingest keeps the whole sensor sub-path as the metric name.
-	for _, m := range []string{"current/house_pump", "temperature/28ff0a/temp_c"} {
+	for _, m := range []string{"current/house_pump", "temperature/28ff0a/temp_c", "temp boiler", "temp/Outdoor °C"} {
 		r := ok
 		r.Metric = m
 		if err := ValidateTrendRule(r); err != nil {
@@ -25,7 +25,10 @@ func TestValidateTrendRule(t *testing.T) {
 		"trailing slash":    func(r *TrendRule) { r.Metric = "current/" },
 		"empty segment":     func(r *TrendRule) { r.Metric = "current//pump" },
 		"empty metric":      func(r *TrendRule) { r.Metric = "" },
-		"metric with space": func(r *TrendRule) { r.Metric = "temp boiler" },
+		"plus wildcard":     func(r *TrendRule) { r.Metric = "temp/+" },
+		"hash wildcard":     func(r *TrendRule) { r.Metric = "temp/#" },
+		"control character": func(r *TrendRule) { r.Metric = "temp\nboiler" },
+		"invalid utf-8":     func(r *TrendRule) { r.Metric = "temp\xff" },
 		"long metric":       func(r *TrendRule) { r.Metric = string(make([]byte, 65)) },
 		"direction":         func(r *TrendRule) { r.Direction = "down" },
 		"zero delta":        func(r *TrendRule) { r.Delta = 0 },

@@ -121,6 +121,8 @@ type Config struct {
 	QuotaUsers        int
 	QuotaDevices      int
 	QuotaEventsPerDay int
+	// QuotaTrendRules caps stored trend rules per tenant, each one is work on every matching reading.
+	QuotaTrendRules int
 
 	// EnrollmentPruneInterval is the sweep cadence for stale unclaimed
 	// enrollment rows (one sweep runs immediately at startup). Default 1h.
@@ -165,6 +167,7 @@ func Load() (*Config, error) {
 		QuotaUsers:              envOrInt("THESADA_QUOTA_USERS", 25),
 		QuotaDevices:            envOrInt("THESADA_QUOTA_DEVICES", 50),
 		QuotaEventsPerDay:       envOrInt("THESADA_QUOTA_EVENTS_PER_DAY", 10000),
+		QuotaTrendRules:         envOrInt("THESADA_QUOTA_TREND_RULES", 50),
 		EnrollmentPruneInterval: envOrDuration("THESADA_ENROLLMENT_PRUNE_INTERVAL", time.Hour),
 	}
 	tp, err := parseNetList("THESADA_TRUSTED_PROXIES", os.Getenv("THESADA_TRUSTED_PROXIES"))

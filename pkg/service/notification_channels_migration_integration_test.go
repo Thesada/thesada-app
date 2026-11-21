@@ -92,3 +92,58 @@ func TestMigration0043_ChannelsFromOldColumns(t *testing.T) {
 		t.Fatalf("linked %d, unlinked %d, want 5 and 1", linked, unlinked)
 	}
 }
+
+// TestMigration0043_EmptyEmailDoesNotAbort: an account without an address gets no email
+// channel and its email rule stays unlinked, as it never sent, while the others migrate.
+func TestMigration0043_EmptyEmailDoesNotAbort(t *testing.T) {
+	env := servicetest.Start(t)
+	ctx := context.Background()
+	const tenant = "mig43e"
+	env.SeedTenant(t, tenant)
+	if _, err := env.Super.Exec(ctx, `
+		ALTER TABLE alert_subscriptions DROP COLUMN channel_id;
+		DROP TABLE notification_channels`); err != nil {
+		t.Fatalf("roll back 0043: %v", err)
+	}
+	var empty, blank, plain string
+	for _, u := range []struct {
+		email string
+		id    *string
+	}{{"", &empty}, {"  ", &blank}, {"plain@mig43e.test", &plain}} {
+		if err := env.Super.QueryRow(ctx, `INSERT INTO users (tenant_id, email) VALUES ($1, $2) RETURNING id`, tenant, u.email).Scan(u.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := env.Super.Exec(ctx, `
+		INSERT INTO alert_subscriptions (user_id, channel, min_severity, destination) VALUES
+		    ($1, 'email', 'warn', NULL), ($2, 'email', 'warn', NULL), ($3, 'email', 'warn', NULL)`,
+		empty, blank, plain); err != nil {
+		t.Fatal(err)
+	}
+	mctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for _, f := range []string{"0043_notification_channels.sql", "0044_channel_follows_account.sql"} {
+		body, err := migrations.FS.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := pgx.BeginFunc(mctx, env.Pools.App, func(tx pgx.Tx) error {
+			_, err := tx.Exec(mctx, string(body))
+			return err
+		}); err != nil {
+			t.Fatalf("%s with an empty email: %v", f, err)
+		}
+	}
+	for user, want := range map[string]int{empty: 0, blank: 0, plain: 1} {
+		var chans, linked int
+		if err := env.Super.QueryRow(ctx, `
+			SELECT (SELECT count(*) FROM notification_channels WHERE user_id = $1),
+			       (SELECT count(*) FROM alert_subscriptions WHERE user_id = $1 AND channel_id IS NOT NULL)`,
+			user).Scan(&chans, &linked); err != nil {
+			t.Fatal(err)
+		}
+		if chans != want || linked != want {
+			t.Errorf("user %s: %d channels, %d linked rules, want %d and %d", user, chans, linked, want, want)
+		}
+	}
+}

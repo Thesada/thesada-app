@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -121,6 +122,15 @@ func (s *Server) handleSettingsProfile(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/settings?saved=profile", http.StatusSeeOther)
 }
 
+// channelTooLongMsg names the channel field caps.
+var channelTooLongMsg = fmt.Sprintf("label (%d) or target (%d characters) too long", service.MaxChannelLabelLen, service.MaxChannelTargetLen)
+
+// formChecked reads a checkbox or a hidden true/false field. in: request, field. out: on.
+func formChecked(r *http.Request, field string) bool {
+	v := r.PostFormValue(field)
+	return v == "on" || v == "true"
+}
+
 // handleSettingsChannelAdd adds a notification channel. A target that does not
 // fit the kind is HTTP 400.
 // in: writer, POST form (kind, target, label). out: redirect or error.
@@ -138,6 +148,10 @@ func (s *Server) handleSettingsChannelAdd(w http.ResponseWriter, r *http.Request
 	id, err := s.services.Alerts.CreateChannel(r.Context(), u.TenantID, u.ID, kind, r.PostFormValue("target"), r.PostFormValue("label"))
 	if errors.Is(err, service.ErrBadChannelTarget) || errors.Is(err, service.ErrBadWebhook) {
 		http.Error(w, channelTargetHint(kind), http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, service.ErrChannelTooLong) {
+		http.Error(w, channelTooLongMsg, http.StatusBadRequest)
 		return
 	}
 	if err != nil {
@@ -260,12 +274,17 @@ func (s *Server) handleSettingsChannelUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	err = s.services.Alerts.UpdateChannel(r.Context(), u.TenantID, u.ID, id,
-		r.PostFormValue("target"), r.PostFormValue("label"), r.PostFormValue("enabled") == "on")
+		r.PostFormValue("target"), r.PostFormValue("label"), formChecked(r, "enabled"))
 	switch {
 	case errors.Is(err, service.ErrNotFound):
 		http.Error(w, "channel not found", http.StatusNotFound)
 	case errors.Is(err, service.ErrBadChannelTarget), errors.Is(err, service.ErrBadWebhook):
 		http.Error(w, "target does not fit the channel type", http.StatusBadRequest)
+	case errors.Is(err, service.ErrChannelTooLong):
+		http.Error(w, channelTooLongMsg, http.StatusBadRequest)
+	case errors.Is(err, service.ErrChannelExists):
+		slog.Info("settings channel update refused, duplicate target", "user_id", u.ID, "channel", id, "err", err)
+		http.Error(w, "you already have a channel with that target", http.StatusBadRequest)
 	case err != nil:
 		slog.Error("settings.save_failed", "part", "channel_update", "user_id", u.ID, "err", err)
 		http.Redirect(w, r, "/settings?err=channels#notifications", http.StatusSeeOther)
@@ -288,7 +307,7 @@ func (s *Server) handleSettingsChannelToggle(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "invalid channel", http.StatusBadRequest)
 		return
 	}
-	err = s.services.Alerts.SetChannelEnabled(r.Context(), u.TenantID, u.ID, id, r.PostFormValue("enabled") == "true")
+	err = s.services.Alerts.SetChannelEnabled(r.Context(), u.TenantID, u.ID, id, formChecked(r, "enabled"))
 	switch {
 	case errors.Is(err, service.ErrNotFound):
 		http.Error(w, "channel not found", http.StatusNotFound)

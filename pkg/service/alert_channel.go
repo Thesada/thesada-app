@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -46,6 +47,18 @@ var ErrConfirmLimited = errors.New("confirm mail rate limited")
 
 // ErrBadChannelTarget means the target does not fit the channel kind.
 var ErrBadChannelTarget = errors.New("bad channel target")
+
+// Caps on channel fields in characters, under the form body limit. The settings inputs carry the same maxlength.
+const (
+	MaxChannelLabelLen  = 80
+	MaxChannelTargetLen = 2048
+)
+
+// ErrChannelTooLong means a label or target is over its cap.
+var ErrChannelTooLong = errors.New("channel label or target too long")
+
+// ErrChannelExists means the user already has a channel of that kind with that target.
+var ErrChannelExists = errors.New("channel with that target exists")
 
 // ErrNoChannel means the user has no channel of the kind a subscription asked for.
 var ErrNoChannel = errors.New("no channel of that kind")
@@ -135,7 +148,18 @@ func (s *AlertService) CreateChannel(ctx context.Context, tenantID string, userI
 	return id, nil
 }
 
+// channelFieldsFit checks label and target against their caps. out: nil or ErrChannelTooLong.
+func channelFieldsFit(target, label string) error {
+	if utf8.RuneCountInString(target) > MaxChannelTargetLen || utf8.RuneCountInString(label) > MaxChannelLabelLen {
+		return ErrChannelTooLong
+	}
+	return nil
+}
+
 func createChannelTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, kind, target, label string) (uuid.UUID, error) {
+	if err := channelFieldsFit(target, label); err != nil {
+		return uuid.Nil, err
+	}
 	var id uuid.UUID
 	err := tx.QueryRow(ctx, `
 		SELECT id FROM notification_channels WHERE user_id = $1 AND kind = $2 AND target = $3`,
@@ -178,18 +202,28 @@ func (s *AlertService) UpdateChannel(ctx context.Context, tenantID string, userI
 			}
 			return err
 		}
+		label = strings.TrimSpace(label)
 		if follows {
+			if err := channelFieldsFit(old, label); err != nil {
+				return err
+			}
 			_, err := tx.Exec(ctx, `UPDATE notification_channels SET label = $1, enabled = $2 WHERE id = $3 AND user_id = $4`,
-				strings.TrimSpace(label), enabled, channelID, userID)
+				label, enabled, channelID, userID)
 			return err
 		}
 		t, err := NormalizeChannelTarget(kind, target, s.webhookAllow())
 		if err != nil {
 			return err
 		}
+		if err := channelFieldsFit(t, label); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE notification_channels SET target = $1, label = $2, enabled = $3
-			WHERE id = $4 AND user_id = $5`, t, strings.TrimSpace(label), enabled, channelID, userID); err != nil {
+			WHERE id = $4 AND user_id = $5`, t, label, enabled, channelID, userID); err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("%w: %w", ErrChannelExists, err)
+			}
 			return err
 		}
 		if kind == "email" && t != old {
@@ -287,7 +321,7 @@ func accountEmailChannelTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) (uu
 }
 
 // channelForKindTx finds the channel a kind-only subscription means: the account
-// address for email, the oldest telegram channel, or the webhook URL given.
+// address for email, the oldest enabled telegram channel, or the webhook URL given.
 func channelForKindTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, kind, destination string) (uuid.UUID, error) {
 	switch kind {
 	case "email":
@@ -295,7 +329,7 @@ func channelForKindTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, kind, de
 	case "telegram":
 		var id uuid.UUID
 		err := tx.QueryRow(ctx, `
-			SELECT id FROM notification_channels WHERE user_id = $1 AND kind = 'telegram'
+			SELECT id FROM notification_channels WHERE user_id = $1 AND kind = 'telegram' AND enabled
 			ORDER BY created_at, id LIMIT 1`, userID).Scan(&id)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return uuid.Nil, ErrNoChannel
