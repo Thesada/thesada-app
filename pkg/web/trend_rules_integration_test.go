@@ -5,6 +5,7 @@ package web
 import (
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -20,7 +21,7 @@ func TestTrendRuleAdd_RefusesBadInput(t *testing.T) {
 		"window too long":    func(v url.Values) { v.Set("window", "169"); v.Set("unit", "h") },
 		"unknown unit":       func(v url.Values) { v.Set("unit", "d") },
 		"direction":          func(v url.Values) { v.Set("direction", "down") },
-		"metric":             func(v url.Values) { v.Set("metric", "temp boiler") },
+		"metric":             func(v url.Values) { v.Set("metric", "temp/+") },
 		"device":             func(v url.Values) { v.Set("device", "not-a-uuid") },
 	}
 	for name, mut := range cases {
@@ -89,5 +90,26 @@ func TestTrendRules_Roles(t *testing.T) {
 	}
 	if n := f.count(t, `SELECT count(*) FROM alert_rules WHERE metric IN ('ct.roles', 'ct.wide')`); n != 2 {
 		t.Fatalf("allowed adds stored %d rules, want 2", n)
+	}
+}
+
+// TestTrendRuleAdd_RefusesPastTheTenantCap: the add past the cap is a 400 naming the cap and stores nothing.
+func TestTrendRuleAdd_RefusesPastTheTenantCap(t *testing.T) {
+	f := seedCrossTenant(t)
+	have := f.count(t, `SELECT count(*) FROM alert_rules WHERE tenant_id = $1`, ctTenantA)
+	f.env.Cfg.QuotaTrendRules = have
+	form := url.Values{"metric": {"ct.cap"}, "direction": {"rise"}, "delta": {"2"},
+		"window": {"10"}, "unit": {"min"}, "severity": {"warn"}, "device": {f.device.String()}}
+	rec := postAuthed(t, f.srv, "/alerts/rules/add", form, f.owner, "")
+	want := "at most " + strconv.Itoa(have) + " trend rules"
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), want) {
+		t.Fatalf("add past the cap: status %d body %q, want 400 with %q", rec.Code, rec.Body.String(), want)
+	}
+	if n := f.count(t, `SELECT count(*) FROM alert_rules WHERE metric = 'ct.cap'`); n != 0 {
+		t.Fatalf("refused add stored %d rules", n)
+	}
+	f.env.Cfg.QuotaTrendRules = have + 1
+	if rec := postAuthed(t, f.srv, "/alerts/rules/add", form, f.owner, ""); rec.Code != http.StatusSeeOther {
+		t.Fatalf("add under the cap: status %d", rec.Code)
 	}
 }

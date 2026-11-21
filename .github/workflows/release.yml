@@ -28,6 +28,20 @@ jobs:
           THESADA_REQUIRE_TAGS: "1"
           THESADA_RELEASE_TAG: ${{ github.ref_name }}
 
+  # The release body is docs/release-notes/<tag>.md, then the notes GitHub generates.
+  notes:
+    runs-on: ubuntu-latest
+    needs: pin
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          body_path: docs/release-notes/${{ github.ref_name }}.md
+          generate_release_notes: true
+
   image:
     runs-on: ubuntu-latest
     needs: pin
@@ -61,9 +75,10 @@ jobs:
             VERSION=${{ github.ref_name }}
             COMMIT=${{ github.sha }}
 
+  # Uploads only, the notes job wrote the body.
   binary:
     runs-on: ubuntu-latest
-    needs: pin
+    needs: [pin, notes]
     strategy:
       matrix:
         arch: [amd64, arm64]
@@ -85,4 +100,3 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           files: bin/thesada-app-linux-${{ matrix.arch }}
-          generate_release_notes: true

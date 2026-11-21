@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -41,15 +42,26 @@ const (
 // ErrTrendRuleInvalid wraps every validation refusal, so handlers can show the text.
 var ErrTrendRuleInvalid = errors.New("invalid trend rule")
 
-// Slash-separated segments: ingest keeps a sensor sub-path whole ("current/house_pump").
-var trendMetricRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]+(/[A-Za-z0-9_.:-]+)*$`)
+// validTrendMetric accepts any name ingest can store: the topic sub-path after sensor/
+// ("current/house_pump"), so no empty segment, no MQTT wildcard and no control character.
+func validTrendMetric(m string) bool {
+	if m == "" || len(m) > trendMetricMax || !utf8.ValidString(m) {
+		return false
+	}
+	for _, seg := range strings.Split(m, "/") {
+		if seg == "" || strings.ContainsAny(seg, "+#") || strings.IndexFunc(seg, unicode.IsControl) >= 0 {
+			return false
+		}
+	}
+	return true
+}
 
 // ValidateTrendRule checks a rule before it is stored.
 // in: rule. out: nil, or an error wrapping ErrTrendRuleInvalid.
 func ValidateTrendRule(r TrendRule) error {
 	bad := func(msg string) error { return fmt.Errorf("%w: %s", ErrTrendRuleInvalid, msg) }
 	switch {
-	case r.Metric == "" || len(r.Metric) > trendMetricMax || !trendMetricRe.MatchString(r.Metric):
+	case !validTrendMetric(r.Metric):
 		return bad("metric must be a telemetry metric name")
 	case r.Direction != "rise" && r.Direction != "fall" && r.Direction != "either":
 		return bad("direction must be rise, fall or either")
@@ -279,8 +291,8 @@ func (s *AlertService) ListTrendRules(ctx context.Context, tenantID string) ([]T
 var ErrTrendDevice = errors.New("device not found")
 
 // CreateTrendRule validates and stores a rule. A device must be visible to the tenant
-// (the FK check alone would accept another tenant's device).
-// in: ctx, tenant, rule. out: new id or error.
+// (the FK check alone would accept another tenant's device), and the tenant must be under its cap.
+// in: ctx, tenant, rule. out: new id, or an error wrapping ErrQuotaTrendRules among others.
 func (s *AlertService) CreateTrendRule(ctx context.Context, tenantID string, r TrendRule) (uuid.UUID, error) {
 	if err := ValidateTrendRule(r); err != nil {
 		return uuid.Nil, err
@@ -295,6 +307,9 @@ func (s *AlertService) CreateTrendRule(ctx context.Context, tenantID string, r T
 			} else if err != nil {
 				return err
 			}
+		}
+		if err := quotaAllowTrendRule(ctx, tx, tenantID, s.cfg.QuotaTrendRules); err != nil {
+			return err
 		}
 		return tx.QueryRow(ctx, `
 			INSERT INTO alert_rules (tenant_id, device_pk, kind, metric, direction, delta, window_s, severity)
