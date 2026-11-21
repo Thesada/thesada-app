@@ -4,6 +4,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/buildinfo"
 	"thesada.app/app/pkg/config"
 	"thesada.app/app/pkg/csrf"
 	"thesada.app/app/pkg/httpsec"
@@ -53,8 +55,13 @@ type Server struct {
 	waitlistNotify *ratelimit.Limiter
 	// claimLimits bounds self-service device claim attempts per user.
 	claimLimits *ratelimit.Limiter
-	cliRequests *cliRequestStore
-	jobs        *requestStore[jobResult]
+	// channelConfirms bounds email channel confirm mails per user.
+	channelConfirms *ratelimit.Limiter
+	cliRequests     *cliRequestStore
+	// rulePushes are tenant rule pushes, rulePushOwner maps each to its device.
+	rulePushes    *requestStore[*rulePushResult]
+	rulePushOwner sync.Map
+	jobs          *requestStore[jobResult]
 	// deviceWrites holds the device ids with a staged file write in flight.
 	deviceWrites sync.Map
 	// deviceOwners serializes delete and reassign per device id.
@@ -68,17 +75,19 @@ type Server struct {
 // in: cfg, services bundle, mailer. out: ready *Server.
 func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mqttClient *mqtt.Client, ca *pki.CA, notes *notify.Mail) *Server {
 	s := &Server{
-		cfg:            cfg,
-		services:       services,
-		mailer:         mail,
-		notes:          notes,
-		mqtt:           mqttClient,
-		ca:             ca,
-		mux:            http.NewServeMux(),
-		waitlistNotify: ratelimit.New(24*time.Hour, 1),
-		claimLimits:    newClaimLimiter(cfg),
-		cliRequests:    newCLIRequestStore(cfg.CLIRequestTimeout+60*time.Second, nil),
-		jobs:           newRequestStore[jobResult](10*time.Minute, nil),
+		cfg:             cfg,
+		services:        services,
+		mailer:          mail,
+		notes:           notes,
+		mqtt:            mqttClient,
+		ca:              ca,
+		mux:             http.NewServeMux(),
+		waitlistNotify:  ratelimit.New(24*time.Hour, 1),
+		claimLimits:     newClaimLimiter(cfg),
+		channelConfirms: ratelimit.New(channelConfirmWindow, channelConfirmMax),
+		cliRequests:     newCLIRequestStore(cfg.CLIRequestTimeout+60*time.Second, nil),
+		jobs:            newRequestStore[jobResult](10*time.Minute, nil),
+		rulePushes:      newRequestStore[*rulePushResult](cfg.CLIRequestTimeout+10*time.Minute, nil),
 	}
 	s.parseTemplates()
 	s.routes()
@@ -88,6 +97,7 @@ func New(cfg *config.Config, services *service.Services, mail *mailer.Mailer, mq
 	// unbounded. context.Background: sweepers live for the process lifetime.
 	s.waitlistNotify.StartSweeper(context.Background())
 	s.claimLimits.StartSweeper(context.Background())
+	s.channelConfirms.StartSweeper(context.Background())
 
 	return s
 }
@@ -114,9 +124,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // in: receiver. out: none (mutates s.templates).
 func (s *Server) parseTemplates() {
 	pages := []string{
-		"login.html", "login-totp.html", "login-verify.html", "devices.html", "device-detail.html", "alerts.html",
+		"login.html", "login-totp.html", "login-verify.html", "devices.html", "device-detail.html", "device-rules.html", "alerts.html",
 		"device-claim.html",
-		"signup.html", "settings.html", "forgot.html", "reset.html",
+		"signup.html", "settings.html", "forgot.html", "reset.html", "channel-confirm.html",
 		"admin-index.html", "admin-tenants.html", "admin-job.html",
 		"admin-tenant-users.html", "admin-tenant-user-edit.html",
 		"admin-devices.html",
@@ -149,6 +159,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /login", s.handleLoginSubmit)
 	s.mux.HandleFunc("GET /login/totp", s.handleTOTPForm)
 	s.mux.HandleFunc("POST /login/totp", s.handleTOTPSubmit)
+	s.mux.HandleFunc("POST /login/passkey/begin", s.handlePasskeyLoginBegin)
+	s.mux.HandleFunc("POST /login/passkey/finish", s.handlePasskeyLoginFinish)
 	s.mux.HandleFunc("GET /login/verify", s.handleMagicLinkForm)
 	s.mux.HandleFunc("POST /login/verify", s.handleMagicLinkVerify)
 	s.mux.HandleFunc("GET /forgot-password", s.handleForgotForm)
@@ -167,13 +179,32 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /devices/{id}/chart.json", authmw.RequireAuth(s.handleDeviceChartJSON))
 	s.mux.HandleFunc("POST /devices/{id}/sensors/delete", authmw.RequireAuth(s.handleDeviceSensorDelete))
 	s.mux.HandleFunc("POST /devices/{id}/revoke", authmw.RequireAuth(s.handleDeviceRevoke))
+	s.mux.HandleFunc("GET /devices/{id}/rules", authmw.RequireAuth(s.handleDeviceRules))
+	s.mux.HandleFunc("GET /devices/{id}/rules/workspace", authmw.RequireAuth(s.handleDeviceRulesWorkspaceGET))
+	s.mux.HandleFunc("POST /devices/{id}/rules/preview", authmw.RequireAuth(s.handleDeviceRulesPreview))
+	s.mux.HandleFunc("POST /devices/{id}/rules/workspace", authmw.RequireAuth(s.handleDeviceRulesSave))
+	s.mux.HandleFunc("POST /devices/{id}/rules/push", authmw.RequireAuth(s.handleDeviceRulesPush))
+	s.mux.HandleFunc("GET /devices/{id}/rules/push/result", authmw.RequireAuth(s.handleDeviceRulesPushResult))
 	s.mux.HandleFunc("GET /alerts", authmw.RequireAuth(s.handleAlertList))
+	s.mux.HandleFunc("POST /alerts/rules/add", authmw.RequireAuth(s.handleTrendRuleAdd))
+	s.mux.HandleFunc("POST /alerts/rules/{id}/toggle", authmw.RequireAuth(s.handleTrendRuleToggle))
+	s.mux.HandleFunc("POST /alerts/rules/{id}/delete", authmw.RequireAuth(s.handleTrendRuleDelete))
 	s.mux.HandleFunc("GET /settings", authmw.RequireAuth(s.handleSettingsForm))
 	s.mux.HandleFunc("POST /settings/profile", authmw.RequireAuth(s.handleSettingsProfile))
 	s.mux.HandleFunc("POST /settings/password", authmw.RequireAuth(s.handleSettingsPassword))
 	s.mux.HandleFunc("POST /settings/totp/begin", authmw.RequireAuth(s.handleTOTPBegin))
 	s.mux.HandleFunc("POST /settings/totp/confirm", authmw.RequireAuth(s.handleTOTPConfirm))
 	s.mux.HandleFunc("POST /settings/totp/disable", authmw.RequireAuth(s.handleTOTPDisable))
+	s.mux.HandleFunc("POST /settings/passkeys/begin", authmw.RequireAuth(s.handlePasskeyRegisterBegin))
+	s.mux.HandleFunc("POST /settings/passkeys/finish", authmw.RequireAuth(s.handlePasskeyRegisterFinish))
+	s.mux.HandleFunc("POST /settings/passkeys/{id}/delete", authmw.RequireAuth(s.handlePasskeyDelete))
+	s.mux.HandleFunc("POST /settings/channels/add", authmw.RequireAuth(s.handleSettingsChannelAdd))
+	s.mux.HandleFunc("POST /settings/channels/{id}/update", authmw.RequireAuth(s.handleSettingsChannelUpdate))
+	s.mux.HandleFunc("POST /settings/channels/{id}/toggle", authmw.RequireAuth(s.handleSettingsChannelToggle))
+	s.mux.HandleFunc("POST /settings/channels/{id}/delete", authmw.RequireAuth(s.handleSettingsChannelDelete))
+	s.mux.HandleFunc("POST /settings/channels/{id}/resend", authmw.RequireAuth(s.handleSettingsChannelResend))
+	s.mux.HandleFunc("GET /alerts/channels/confirm", s.handleChannelConfirmForm)
+	s.mux.HandleFunc("POST /alerts/channels/confirm", s.handleChannelConfirm)
 	s.mux.HandleFunc("POST /settings/notifications/add", authmw.RequireAuth(s.handleSettingsNotificationAdd))
 	s.mux.HandleFunc("POST /settings/notifications/delete", authmw.RequireAuth(s.handleSettingsNotificationDelete))
 	s.mux.HandleFunc("GET /auth/oidc/{slug}/start", s.handleOIDCStart)
@@ -211,7 +242,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/devices/{id}/config/cmd", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigCmd))
 	s.mux.HandleFunc("GET /admin/devices/{id}/config/cmd/result", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigCmdResult))
 	s.mux.HandleFunc("POST /admin/devices/{id}/config/write", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigWrite))
-	s.mux.HandleFunc("POST /admin/devices/{id}/config/snapshot", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigSnapshot))
+	s.mux.HandleFunc("POST /admin/devices/{id}/config/load", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigLoad))
 	s.mux.HandleFunc("GET /admin/devices/{id}/config/history", authmw.RequireSuperAdmin(s.handleAdminDeviceConfigHistory))
 	s.mux.HandleFunc("GET /admin/devices/{id}/rules", authmw.RequireSuperAdmin(s.handleAdminDeviceRules))
 	s.mux.HandleFunc("GET /admin/devices/{id}/rules/workspace", authmw.RequireSuperAdmin(s.handleAdminDeviceRulesWorkspaceGET))
@@ -222,6 +253,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /admin/devices/{id}/secrets", authmw.RequireSuperAdmin(s.handleAdminDeviceSecrets))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/set", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsSet))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/clear", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsClear))
+	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/clear-device", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsClearDevice))
 	s.mux.HandleFunc("POST /admin/devices/{id}/secrets/provision", authmw.RequireSuperAdmin(s.handleAdminDeviceSecretsProvision))
 	s.mux.HandleFunc("GET /admin/tenants/{slug}/secrets", authmw.RequireSuperAdmin(s.handleAdminTenantSecrets))
 	s.mux.HandleFunc("POST /admin/tenants/{slug}/secrets/set", authmw.RequireSuperAdmin(s.handleAdminTenantSecretsSet))
@@ -235,9 +267,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /admin/observability", authmw.RequireSuperAdmin(s.handleAdminObservability))
 }
 
-// render executes a parsed page template, injecting auth context into data.
-// in: writer, request, page filename, template data. out: HTML response.
+// render executes a page with 200. See renderStatus.
+// in: writer, request, page, data. out: HTML response.
 func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, data map[string]interface{}) {
+	s.renderStatus(w, r, http.StatusOK, page, data)
+}
+
+// renderStatus executes a parsed page template, injecting auth context into
+// data. in: writer, request, status, page filename, template data. out: HTML response.
+func (s *Server) renderStatus(w http.ResponseWriter, r *http.Request, status int, page string, data map[string]interface{}) {
 	t, ok := s.templates[page]
 	if !ok {
 		http.Error(w, "template not found: "+page, http.StatusInternalServerError)
@@ -246,8 +284,8 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, dat
 	if data == nil {
 		data = map[string]interface{}{}
 	}
-	if _, set := data["Now"]; !set {
-		data["Now"] = time.Now().Format("2006-01-02 15:04 MST")
+	if _, set := data["AppVersion"]; !set {
+		data["AppVersion"] = buildinfo.Version
 	}
 	if _, set := data["User"]; !set {
 		data["User"] = authmw.CurrentUser(r)
@@ -261,11 +299,16 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, page string, dat
 	if _, set := data["CSPNonce"]; !set {
 		data["CSPNonce"] = httpsec.Nonce(r.Context())
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := t.ExecuteTemplate(w, "layout", data); err != nil {
+	// Render into a buffer so a template error mid-page answers a clean 500.
+	var buf bytes.Buffer
+	if err := t.ExecuteTemplate(&buf, "layout", data); err != nil {
 		slog.Error("template execute failed", "page", page, "err", err)
 		http.Error(w, "render error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = buf.WriteTo(w)
 }
 
 // handleIndex sends the visitor to the device list (auth lands later).

@@ -7,6 +7,13 @@ cd "$(dirname "$0")"
 
 command -v docker >/dev/null 2>&1 || { echo "error: docker not found"; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "error: docker compose v2 required"; exit 1; }
+# `up --wait` needs compose 2.17 or newer.
+cv="$(docker compose version --short 2>/dev/null || true)"
+cv="${cv#v}"
+case "$cv" in
+  2.1[7-9]*|2.[2-9][0-9]*|[3-9].*) ;;
+  *) echo "error: docker compose 2.17 or newer required (found ${cv:-none})"; exit 1 ;;
+esac
 command -v openssl >/dev/null 2>&1 || { echo "error: openssl not found"; exit 1; }
 
 # hex secrets only (no sed-breaking chars).
@@ -27,6 +34,15 @@ fi
 
 echo "pulling images..."
 docker compose pull
+
+# A new image leaves an existing volume on the old extension version.
+# POSTGRES_USER is the superuser, -X keeps psqlrc out of the first statement.
+echo "updating the timescaledb extension..."
+docker compose up -d --wait timescaledb
+docker compose exec -T timescaledb psql -X -v ON_ERROR_STOP=1 -U thesada_app -d thesada_app \
+  -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+docker compose exec -T timescaledb psql -X -v ON_ERROR_STOP=1 -U thesada_app -d thesada_app \
+  -c "ALTER EXTENSION timescaledb UPDATE;"
 
 # one-shot; aborts before the app starts if a migration fails.
 echo "applying database migrations..."

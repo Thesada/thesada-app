@@ -92,6 +92,12 @@ func TestAlertHandlers(t *testing.T) {
 		t.Errorf("foreign device sub: got %d, want 404", rec.Code)
 	}
 
+	// A telegram subscription before the user has a telegram channel is the
+	// client's setup to fix, not a server failure.
+	if rec := post(srv, "/alert-subscriptions", `{"channel":"telegram"}`, auth); rec.Code != http.StatusConflict {
+		t.Errorf("telegram without a channel: got %d (%s), want 409", rec.Code, rec.Body.String())
+	}
+
 	// --- create -> list -> delete -------------------------------------------
 	if rec := post(srv, "/alert-subscriptions", `{"channel":"email","min_severity":"warn"}`, auth); rec.Code != http.StatusCreated {
 		t.Fatalf("create sub: got %d (%s), want 201", rec.Code, rec.Body.String())

@@ -35,7 +35,7 @@ pkg/web/templates/     html/template files embedded via embed.FS
 pkg/api/v1/            JSON REST handlers under /api/v1/
 pkg/ws/                WebSocket hub at /ws (live events)
 pkg/mqtt/              MQTT subscriber, writes via services, publishes to ws hub
-pkg/alerts/            email + telegram alert fan-out
+pkg/alerts/            alert fan-out to email, telegram and webhook channels
 pkg/mailer/            plain SMTP + STARTTLS wrapper
 pkg/authmw/            session cookie middleware + RequireAuth helper
 
@@ -51,6 +51,7 @@ One Go binary. Goroutines for HTTP, MQTT subscriber, background workers. No micr
 
 - Go 1.26.10 (the `go` directive in `go.mod`)
 - Postgres 14+
+- Device firmware (thesada-fw) 1.4.5 or later. Older or unknown firmware gets no file saves, rule pushes or drift snapshots, see "A stored device reply echoes its request id" in [docs/invariants.md](docs/invariants.md)
 - The Tailwind v4 standalone binary, downloaded into `tools/tailwindcss`:
 
   ```
@@ -101,6 +102,10 @@ Optional (but recommended):
   unset and bootstrap manually.
 - `THESADA_BASE_URL` - public base URL used for magic link emails. Default
   `http://localhost:8080`. Set to the real URL clients can reach.
+- `THESADA_WEBAUTHN_RP_ID` - passkey relying party, a host name. Default:
+  the host of `THESADA_BASE_URL`.
+- `THESADA_WEBAUTHN_ORIGINS` - comma-separated browser origins allowed to
+  answer a passkey ceremony. Default: the origin of `THESADA_BASE_URL`.
 - `THESADA_HTTP_ADDR` - default `:8080`
 - `THESADA_MQTT_URL` / `_USER` / `_PASS` / `_CLIENT_ID` / `_TOPIC_ROOT` - MQTT
   subscriber. If `THESADA_MQTT_URL` is empty, the subscriber is disabled.

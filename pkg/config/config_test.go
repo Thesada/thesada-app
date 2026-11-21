@@ -184,3 +184,34 @@ func TestParseNetListNamesTheVariable(t *testing.T) {
 		t.Fatalf("err = %v, want it to name THESADA_WEBHOOK_ALLOW_CIDRS", err)
 	}
 }
+
+func TestWebAuthnParties(t *testing.T) {
+	cases := []struct {
+		name, base, rp, origins string
+		wantRP                  string
+		wantOrigins             []string
+		wantErr                 bool
+	}{
+		{"defaults from base", "https://thesada.app", "", "", "thesada.app", []string{"https://thesada.app"}, false},
+		{"base with port and path", "http://localhost:8080/app", "", "", "localhost", []string{"http://localhost:8080"}, false},
+		{"overrides", "https://thesada.app", "example.org", "https://a.example.org, https://b.example.org/", "example.org", []string{"https://a.example.org", "https://b.example.org"}, false},
+		{"bad origin", "https://thesada.app", "", "thesada.app", "", nil, true},
+		{"origin with path", "https://thesada.app", "", "https://thesada.app/login", "", nil, true},
+		{"empty entry", "https://thesada.app", "", "https://a.example.org,,", "", nil, true},
+		{"relative base", "thesada.app", "", "", "", nil, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rp, origins, err := webAuthnParties(c.base, c.rp, c.origins)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
+			}
+			if c.wantErr {
+				return
+			}
+			if rp != c.wantRP || strings.Join(origins, " ") != strings.Join(c.wantOrigins, " ") {
+				t.Fatalf("got %q %v, want %q %v", rp, origins, c.wantRP, c.wantOrigins)
+			}
+		})
+	}
+}

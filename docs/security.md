@@ -181,6 +181,13 @@ device configs re-ingest (config ingest blanks `config.json` from then
 on, so a re-ingested config has nothing left to migrate). It does not
 purge plaintext from older `device_file_history` rows.
 
+`thesada-app migrate-legacy-wifi` re-keys each device's bare legacy
+`wifi.password` row to `wifi.password:<primary SSID>` of its stored config,
+and deletes the bare row where a per-SSID row for that SSID already exists.
+A current device read does the same for its device. A bare row with no
+known SSID stays inert and the secrets page lists it for Clear. Re-run it
+any time, it is idempotent.
+
 ### Provisioning
 
 At pair time (`handleAdminDevicePairIssue`), each set secret is decrypted

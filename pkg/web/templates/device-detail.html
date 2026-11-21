@@ -11,6 +11,7 @@
   {{freshnessBadge .Device.LastSeenAt}}
   {{derefOrDash .Device.HardwareType}} - fw {{derefOrDash .Device.FirmwareVersion}} - last seen {{timeOrDash .Device.LastSeenAt}}
 </p>
+<p class="text-sm mb-6 -mt-4"><a href="/devices/{{.Device.ID}}/rules" class="text-sky-700 hover:underline">Alert rules on the device</a></p>
 {{/* hx-preserve matches by id: a swap keeps the drawn card until the metric set changes. */}}
 <section class="mb-8" id="chart-card-{{setKey .NumericMetrics}}" data-chart-card hx-preserve>
   <div class="flex items-center justify-between mb-2 flex-wrap gap-2">

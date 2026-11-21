@@ -17,6 +17,7 @@ import (
 	"thesada.app/app/pkg/alerts"
 	apiv1 "thesada.app/app/pkg/api/v1"
 	"thesada.app/app/pkg/authmw"
+	"thesada.app/app/pkg/buildinfo"
 	"thesada.app/app/pkg/config"
 	"thesada.app/app/pkg/db"
 	"thesada.app/app/pkg/httpsec"
@@ -101,6 +102,19 @@ func main() {
 		return
 	}
 
+	// `migrate-legacy-wifi` re-keys each bare wifi.password device row to wifi.password:<primary SSID>
+	// of the stored config. Rows with no known SSID stay inert, the secrets page lists them for Clear.
+	if len(os.Args) > 1 && os.Args[1] == "migrate-legacy-wifi" {
+		res, err := service.MigrateLegacyWifi(rootCtx, services.Secrets, services.Devices, services.DeviceFiles)
+		if err != nil {
+			slog.Error("migrate-legacy-wifi failed", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("migrate-legacy-wifi done", "devices_scanned", res.Devices, "rekeyed", res.Rekeyed,
+			"duplicates_deleted", res.Duplicates, "no_ssid", res.NoSSID, "undecryptable", res.Undecryptable)
+		return
+	}
+
 	// `rotate-kek` re-wraps every tenant DEK from the live root KEK
 	// (THESADA_DEVICE_CONFIG_KEK) under a new one (THESADA_DEVICE_CONFIG_KEK_NEW).
 	// After it succeeds the operator swaps the live key to the new value and
@@ -127,6 +141,8 @@ func main() {
 		slog.Info("rotate-kek done", "rotated", res.Rotated, "already_new", res.AlreadyNew, "next", next)
 		return
 	}
+
+	slog.Info("starting", "build", buildinfo.String())
 
 	// Warm the tenant slug and settings caches before routing starts.
 	// Fatal on first load so a mis-seeded db is caught at boot, not on first

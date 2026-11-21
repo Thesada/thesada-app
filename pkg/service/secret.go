@@ -36,9 +36,8 @@ import (
 // row per network under the same key, so storage field == firmware field.
 const WifiPasswordPrefix = "wifi.password:"
 
-// LegacyWifiPassword is the bare storage field from before per-SSID support.
-// It carries no SSID, so provisioning appends the device's primary configured
-// SSID; new writes always use the per-SSID form.
+// LegacyWifiPassword is the bare storage field from before per-SSID support. It names no network,
+// so a current read or migrate-legacy-wifi re-keys it to the primary SSID. A bare row left is inert.
 const LegacyWifiPassword = "wifi.password"
 
 // ScalarSecretFields is the closed set of non-WiFi device-config secrets, each
@@ -86,6 +85,10 @@ func FirmwareSecretField(field, primarySSID string) (string, bool) {
 // feature is off (THESADA_DEVICE_CONFIG_KEK unset). Status stays available
 // because it only reads existence, not values.
 var ErrSecretsDisabled = errors.New("secret: device-config secrets disabled (THESADA_DEVICE_CONFIG_KEK unset)")
+
+// ErrEmptySecret refuses an empty value: "" is never a secret. An open WiFi network
+// is a row in device_open_networks, and clearing a field is ClearDeviceSecret.
+var ErrEmptySecret = errors.New("secret: empty value, an open network or a cleared field is not a secret")
 
 // SecretService encrypts, stores, and (server-side) decrypts device-config
 // secrets. keyring holds the deployment root KEK; nil means the feature is
@@ -175,29 +178,75 @@ func (s *SecretService) SetSecret(ctx context.Context, tenantID string, devicePk
 	if s.keyring == nil {
 		return ErrSecretsDisabled
 	}
+	if err := checkDeviceSecret(devicePk, field, value); err != nil {
+		return err
+	}
+	if field == LegacyWifiPassword {
+		return fmt.Errorf("secret: %q names no network, store %s<ssid>", LegacyWifiPassword, WifiPasswordPrefix)
+	}
+	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		// The device read path locks the row before its insert. The same order here, or the two deadlock.
+		if err := lockDeviceConfig(ctx, tx, devicePk, nil, nil); err != nil {
+			return err
+		}
+		return s.setSecretTx(ctx, tx, tenantID, devicePk, field, value)
+	})
+}
+
+// checkDeviceSecret refuses an unknown field, a missing device and an empty value.
+func checkDeviceSecret(devicePk uuid.UUID, field, value string) error {
 	if !validSecretField(field) {
 		return fmt.Errorf("secret: unknown field %q", field)
 	}
 	if devicePk == uuid.Nil {
 		return errors.New("secret: device-level SetSecret requires a device pk (use SetTenantSecret for tenant defaults)")
 	}
-	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
-		dek, err := s.tenantDEK(ctx, tx, tenantID)
-		if err != nil {
-			return err
-		}
-		blob, err := secrets.EncryptSecret(dek, []byte(value), secretAAD(tenantID, devicePk, field))
-		if err != nil {
-			return fmt.Errorf("secret: encrypt %s: %w", field, err)
-		}
-		_, err = tx.Exec(ctx, `
-			INSERT INTO device_config_secrets (tenant_id, device_pk, field, ciphertext)
-			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (device_pk, field) WHERE device_pk IS NOT NULL
-			DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = now()`,
-			tenantID, devicePk, field, blob)
+	if value == "" {
+		return ErrEmptySecret
+	}
+	return nil
+}
+
+// setSecretTx is SetSecret inside an open tenant tx that holds the device row lock.
+// Caller checked keyring != nil. in: ctx, tx, tenant_id, device pk, field, plaintext value. out: error.
+func (s *SecretService) setSecretTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, field, value string) error {
+	return s.writeSecretTx(ctx, tx, tenantID, devicePk, field, value, false)
+}
+
+// writeSecretTx is setSecretTx with the row's re-key flag, which only rekeyLegacyWifiTx sets.
+func (s *SecretService) writeSecretTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, field, value string, rekeyed bool) error {
+	if err := checkDeviceSecret(devicePk, field, value); err != nil {
 		return err
-	})
+	}
+	dek, err := s.tenantDEK(ctx, tx, tenantID)
+	if err != nil {
+		return err
+	}
+	blob, err := secrets.EncryptSecret(dek, []byte(value), secretAAD(tenantID, devicePk, field))
+	if err != nil {
+		return fmt.Errorf("secret: encrypt %s: %w", field, err)
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO device_config_secrets (tenant_id, device_pk, field, ciphertext, rekeyed)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (device_pk, field) WHERE device_pk IS NOT NULL
+		DO UPDATE SET ciphertext = EXCLUDED.ciphertext, rekeyed = EXCLUDED.rekeyed, updated_at = now()`,
+		tenantID, devicePk, field, blob, rekeyed)
+	return err
+}
+
+// hasSecretTx reports whether field resolves for the device: its own row, or a
+// tenant default it may inherit (the legacy bare key never inherits, as in Resolve).
+// Existence only, no decrypt. in: ctx, tx, device pk, field. out: stored, error.
+func hasSecretTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, field string) (bool, error) {
+	var found bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		    SELECT 1 FROM device_config_secrets
+		     WHERE field = $2
+		       AND (device_pk = $1 OR (device_pk IS NULL AND NOT $3)))`,
+		devicePk, field, field == LegacyWifiPassword).Scan(&found)
+	return found, err
 }
 
 // SetTenantSecret stores the tenant-wide default for field: the value every
@@ -222,6 +271,9 @@ func (s *SecretService) SetTenantSecret(ctx context.Context, tenantID, field, va
 	if field == LegacyWifiPassword {
 		return fmt.Errorf("secret: %q is device-level only; a tenant default must name its network (%s<ssid>)",
 			LegacyWifiPassword, WifiPasswordPrefix)
+	}
+	if value == "" {
+		return ErrEmptySecret
 	}
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		dek, err := s.tenantDEK(ctx, tx, tenantID)
@@ -566,12 +618,6 @@ func (s *SecretService) OriginStatus(ctx context.Context, tenantID string, devic
 // An overridden device is deliberately absent - rotating a default must not
 // disturb a device the operator has pinned.
 //
-// A pre-per-SSID device row (bare "wifi.password", still valid per migration
-// 0024) provisions onto wifi.password:<primary SSID>, the same NVS key a
-// per-SSID default writes. It counts as an override for any per-SSID WiFi
-// field, conservatively: skipping a device that may not have needed skipping
-// costs a re-provision, clobbering a pinned WiFi password costs the network.
-//
 // Devices that have never paired are excluded: there is no NVS to write and no
 // topic to reach them on, and pairing provisions from the store anyway.
 // in: ctx, tenant_id, field. out: device pks, error.
@@ -588,11 +634,9 @@ func (s *SecretService) ProvisionTargets(ctx context.Context, tenantID, field st
 			   AND d.paired_at IS NOT NULL
 			   AND NOT EXISTS (
 			       SELECT 1 FROM device_config_secrets s
-			        WHERE s.device_pk = d.id
-			          AND (s.field = $2
-			               OR ($2 LIKE $3 AND s.field = $4)))
+			        WHERE s.device_pk = d.id AND s.field = $2)
 			 ORDER BY d.last_seen_at DESC NULLS LAST`,
-			tenantID, field, WifiPasswordPrefix+"%", LegacyWifiPassword)
+			tenantID, field)
 		if err != nil {
 			return err
 		}
@@ -612,6 +656,34 @@ func (s *SecretService) ProvisionTargets(ctx context.Context, tenantID, field st
 	return out, nil
 }
 
+// PushUnlessOverridden runs push for one ProvisionTargets device only while it holds no override
+// for field. The device row lock SetSecret takes is held across the check and push, so an override
+// cannot land in between. in: ctx, tenant, device, field, push. out: pushed (false when overridden), error.
+func (s *SecretService) PushUnlessOverridden(ctx context.Context, tenantID string, devicePk uuid.UUID, field string, push func()) (bool, error) {
+	if !validSecretField(field) {
+		return false, fmt.Errorf("secret: unknown field %q", field)
+	}
+	ran := false
+	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		if err := lockDeviceConfig(ctx, tx, devicePk, nil, nil); err != nil {
+			return err
+		}
+		var overridden bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM device_config_secrets WHERE device_pk = $1 AND field = $2)`,
+			devicePk, field).Scan(&overridden); err != nil {
+			return fmt.Errorf("look up override %s: %w", field, err)
+		}
+		if overridden {
+			return nil
+		}
+		ran = true
+		push()
+		return nil
+	})
+	return ran, err
+}
+
 // ProvisionTargetCounts returns, per field, how many devices a default change
 // would have to reach. One query for the whole page: the per-field variant ran
 // its own transaction each time, which is a round trip per row rendered.
@@ -627,11 +699,9 @@ func (s *SecretService) ProvisionTargetCounts(ctx context.Context, tenantID stri
 			   AND d.paired_at IS NOT NULL
 			   AND NOT EXISTS (
 			       SELECT 1 FROM device_config_secrets o
-			        WHERE o.device_pk = d.id
-			          AND (o.field = t.field
-			               OR (t.field LIKE $2 AND o.field = $3)))
+			        WHERE o.device_pk = d.id AND o.field = t.field)
 			 WHERE t.device_pk IS NULL
-			 GROUP BY t.field`, tenantID, WifiPasswordPrefix+"%", LegacyWifiPassword)
+			 GROUP BY t.field`, tenantID)
 		if err != nil {
 			return err
 		}
@@ -789,6 +859,9 @@ const tenantDefaultMarker = "tenant-default"
 func tenantSecretAAD(tenantID, field string) []byte {
 	return []byte(tenantID + "\x00" + tenantDefaultMarker + "\x00" + field)
 }
+
+// ValidSecretField is validSecretField for callers outside the package.
+func ValidSecretField(field string) bool { return validSecretField(field) }
 
 // validSecretField reports whether field is a storable encrypted secret:
 // one of the 4 scalars, a per-SSID WiFi password ("wifi.password:<ssid>"),

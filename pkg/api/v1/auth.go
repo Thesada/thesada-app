@@ -88,13 +88,17 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secret, required, err := s.services.Auth.EnrolledTOTP(u.TenantID, u.ID)
+	secret, keys, err := s.services.Auth.SecondFactors(u.TenantID, u.ID)
 	if err != nil {
 		slog.Error("auth.totp.lookup_failed", "user_id", u.ID, "err", err, "surface", "api")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
 		return
 	}
-	if required {
+	if secret == "" && keys {
+		passkeyRequired(w, u)
+		return
+	}
+	if secret != "" {
 		slog.Info("auth.totp.state_change",
 			"from", "password", "to", "challenged",
 			"user_id", u.ID, "tenant", u.TenantID, "surface", "api")
@@ -173,13 +177,17 @@ func (s *Server) handleAuthMagicLinkVerify(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
 		return
 	}
-	_, required, err := s.services.Auth.EnrolledTOTP(u.TenantID, u.ID)
+	secret, keys, err := s.services.Auth.SecondFactors(u.TenantID, u.ID)
 	if err != nil {
 		slog.Error("auth.totp.lookup_failed", "user_id", u.ID, "err", err, "surface", "api")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "login failed"})
 		return
 	}
-	if required {
+	if secret == "" && keys {
+		passkeyRequired(w, u)
+		return
+	}
+	if secret != "" {
 		s.respondMagicLinkChallenge(w, r, u, req.Code)
 		return
 	}
@@ -317,4 +325,14 @@ func (s *Server) handleAuthSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// passkeyRequired refuses an API login for an account whose only second factor
+// is a passkey: a WebAuthn ceremony needs the browser sign-in.
+// in: writer, user. out: 401 {"error":"passkey_required"}.
+func passkeyRequired(w http.ResponseWriter, u *service.User) {
+	slog.Info("auth.passkey.state_change",
+		"from", "password", "to", "refused",
+		"user_id", u.ID, "tenant", u.TenantID, "surface", "api", "reason", "passkey_only")
+	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "passkey_required"})
 }

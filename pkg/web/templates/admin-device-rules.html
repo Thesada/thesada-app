@@ -174,6 +174,9 @@
     );
   }
 
+  // Set by the starter button: the next saves may overwrite tenant-editor rules.
+  var takeover = false;
+
   function saveWorkspace(source) {
     var state = ThesadaRules.serializeWorkspace(workspace);
     var lua = refreshPreview();
@@ -184,7 +187,8 @@
         slot: ruleSlot,
         workspace_json: JSON.stringify(state),
         lua_content: lua || "",
-        source: source || "editor"
+        source: source || "editor",
+        takeover: takeover
       })
     }).then(parseJSON).then(function(res) {
       if (!res.ok) throw new Error("save failed: " + JSON.stringify(res));
@@ -345,6 +349,7 @@
     });
 
     document.getElementById("btn-use-starter").addEventListener("click", function() {
+      takeover = true;
       writesAllowed = true;
       setWriteControls(true);
       this.classList.add("hidden");
@@ -432,6 +437,16 @@
   fetch("/admin/devices/" + deviceID + "/rules/workspace?slot=" + encodeURIComponent(ruleSlot), {
     headers: {"X-CSRF-Token": csrfToken}
   }).then(parseJSON).then(function(res) {
+    if (res.exists && res.source === "tenant") {
+      // Tenant-editor blocks are not defined here: lock writes, point there.
+      workspace = injectWorkspace({seed: false});
+      writesAllowed = false;
+      setWriteControls(false);
+      wireWorkspace();
+      document.getElementById("btn-use-starter").classList.remove("hidden");
+      status("these rules were made in the tenant editor at /devices/" + deviceID + "/rules, edit them there or use the starter to take them back", false);
+      return;
+    }
     var savedState = null;
     if (res.exists && res.workspace_json) {
       try { savedState = JSON.parse(res.workspace_json); }

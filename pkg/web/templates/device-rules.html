@@ -1,0 +1,52 @@
+{{define "title"}}Rules - {{.Device.DeviceID}} - thesada{{end}}
+{{define "content"}}
+<a href="/devices/{{.Device.ID}}" class="text-xs text-slate-500 hover:underline">&larr; {{.Device.DeviceID}}</a>
+<div class="flex items-center justify-between mt-2 mb-4 flex-wrap gap-2">
+  <div>
+    <h1 class="text-2xl font-semibold">Alert rules</h1>
+    <p class="text-sm text-slate-500">The device checks these rules itself. Save keeps them here, Push sends them to <span class="font-mono">{{.Path}}</span>.</p>
+  </div>
+  <div class="flex gap-2 flex-wrap">
+    <button type="button" id="btn-preview" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Preview</button>
+    {{if and .CanEdit (or (not .Managed) .Operator)}}
+    <button type="button" id="btn-save" class="text-sm px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">Save</button>
+    {{if not .Managed}}<button type="button" id="btn-push" class="text-sm px-3 py-1 rounded bg-slate-900 text-white hover:bg-slate-700">Push to device</button>{{end}}
+    {{else}}
+    <span class="text-sm text-slate-500">View only</span>
+    {{end}}
+  </div>
+</div>
+{{if .Managed}}<div class="mb-4 rounded-md bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">The operator manages the rules on this device.{{if .Operator}} Saving here hands them over to this editor.{{end}}</div>{{end}}
+<p id="rules-status" class="text-sm text-slate-500 mb-2"></p>
+
+<div id="tenant-rules" data-device="{{.Device.ID}}" data-can-edit="{{.CanEdit}}" data-csrf="{{.CSRFToken}}">
+  <div id="blockly-workspace" style="height:520px; width:100%;" class="border border-slate-200 rounded"></div>
+</div>
+
+<h2 class="text-lg font-semibold mt-6 mb-2">What the device runs</h2>
+<pre id="lua-preview" class="text-xs bg-slate-50 border border-slate-200 rounded p-3 overflow-x-auto max-h-96"></pre>
+
+<xml xmlns="https://developers.google.com/blockly/xml" id="toolbox" style="display:none">
+  <block type="thesada_tenant_rule"></block>
+</xml>
+
+<script nonce="{{.CSPNonce}}">
+  // Blockly injects <style> tags at runtime, a nonced style-src refuses them
+  // unless they carry the nonce. Same patch as the operator editor.
+  window.__CSP_NONCE = "{{.CSPNonce}}";
+  (function () {
+    var create = Document.prototype.createElement;
+    Document.prototype.createElement = function (name, options) {
+      var el = create.call(this, name, options);
+      if (String(name).toLowerCase() === "style" && window.__CSP_NONCE) {
+        el.nonce = window.__CSP_NONCE;
+      }
+      return el;
+    };
+  })();
+</script>
+<script src="/static/js/blockly/blockly_compressed.js"></script>
+<script src="/static/js/blockly/blocks_compressed.js"></script>
+<script src="/static/js/blockly/msg/en.js"></script>
+<script src="/static/js/blockly-tenant-rules.js"></script>
+{{end}}

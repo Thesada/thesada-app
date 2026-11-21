@@ -46,6 +46,7 @@ const (
 	DeviceReassign        Action = "device.reassign"
 	DeviceSecretSet       Action = "device_secret.set"
 	DeviceSecretClear     Action = "device_secret.clear"
+	DeviceSecretClearNVS  Action = "device_secret.clear_nvs"
 	DeviceSecretProvision Action = "device_secret.provision"
 	TenantSecretSet       Action = "tenant_secret.set"
 	TenantSecretClear     Action = "tenant_secret.clear"
@@ -65,6 +66,10 @@ const (
 	RulesWorkspaceSave    Action = "rules.workspace_save"
 	RuleTemplateSave      Action = "rule_template.save"
 	RuleTemplateDelete    Action = "rule_template.delete"
+	// Tenant rules editor (#2): an operator may act on any device, tenant
+	// admins and device owners are checked in the web handler.
+	RulesTenantSave Action = "rules.tenant_save"
+	RulesTenantPush Action = "rules.tenant_push"
 )
 
 // ErrForbidden is returned by Require when the user may not perform the
@@ -89,6 +94,7 @@ var superAdminActions = map[Action]bool{
 	DeviceReassign:          true,
 	DeviceSecretSet:         true,
 	DeviceSecretClear:       true,
+	DeviceSecretClearNVS:    true,
 	DeviceSecretProvision:   true,
 	TenantSecretSet:         true,
 	TenantSecretClear:       true,
@@ -108,6 +114,8 @@ var superAdminActions = map[Action]bool{
 	RulesWorkspaceSave:      true,
 	RuleTemplateSave:        true,
 	RuleTemplateDelete:      true,
+	RulesTenantSave:         true,
+	RulesTenantPush:         true,
 }
 
 // Actions returns every registered Action slug, sorted, for UIs that need

@@ -114,6 +114,10 @@ func (s *Server) bulkReassign(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, done.on("/admin/devices"), http.StatusFound)
 }
 
+// otaConfigWindow is how long after a bulk OTA dispatch device reads count as stale:
+// download, flash and reboot happen after the publish, out of the app's sight.
+const otaConfigWindow = 15 * time.Minute
+
 // bulkOTACheck publishes `cli/ota.check` with `--force` payload to every
 // device whose primary key was checked in the form. Fire-and-forget; we
 // do not wait for the device's CLI response because a fleet-wide bulk
@@ -145,9 +149,30 @@ func (s *Server) bulkOTACheck(w http.ResponseWriter, r *http.Request) {
 			failedIDs = append(failedIDs, raw)
 			continue
 		}
+		if device == nil {
+			failed++
+			failedIDs = append(failedIDs, raw)
+			continue
+		}
+		// A firmware update can migrate config.json, so it is a config change like ota.* from the CLI box.
+		claim, claimed := s.claimDeviceWrite(device.ID, time.Minute)
+		if !claimed {
+			slog.Warn("bulk ota: a write to the device is running, not sent", "device", device.DeviceID)
+			failed++
+			failedIDs = append(failedIDs, device.DeviceID)
+			continue
+		}
+		if err := s.markConfigChanging(r.Context(), device, otaConfigWindow); err != nil {
+			s.releaseDeviceWrite(device.ID, claim)
+			slog.Error("bulk ota: could not record the config change, not sent", "device", device.DeviceID, "err", err)
+			failed++
+			failedIDs = append(failedIDs, device.DeviceID)
+			continue
+		}
 		topicPrefix := s.deviceTopicPrefix(device)
 		cmdTopic := mqtt.CLICommandTopic(topicPrefix, "ota.check")
 		err = s.mqtt.PublishRaw(cmdTopic, []byte("--force"), 0, false)
+		s.releaseDeviceWrite(device.ID, claim)
 		if errors.Is(err, mqtt.ErrPublishTimeout) {
 			// The write may still go out, so this device is neither ok nor failed.
 			slog.Warn("bulk ota: publish unconfirmed", "device", device.DeviceID, "topic", cmdTopic, "err", err)
@@ -571,13 +596,13 @@ const stopMargin = 3 * time.Second
 type cascadeVerdict int
 
 const (
-	cascadeOK       cascadeVerdict = iota
-	cascadeOKSealed                // deleted, but the enrollment rows may still be sealed
-	cascadeRefused                 // recovery gate, nothing touched
-	cascadeFailed                  // revoke or DB delete failed
-	cascadeStopped                 // shutdown landed before the DB delete, row kept for a retry
-	cascadeMoved                   // the row left its tenant or is gone since the job read it, nothing touched
-	cascadeNotStarted              // shutdown landed while waiting for the device lock, nothing touched
+	cascadeOK         cascadeVerdict = iota
+	cascadeOKSealed                  // deleted, but the enrollment rows may still be sealed
+	cascadeRefused                   // recovery gate, nothing touched
+	cascadeFailed                    // revoke or DB delete failed
+	cascadeStopped                   // shutdown landed before the DB delete, row kept for a retry
+	cascadeMoved                     // the row left its tenant or is gone since the job read it, nothing touched
+	cascadeNotStarted                // shutdown landed while waiting for the device lock, nothing touched
 )
 
 // retryGoneEnrollmentReset resets the enrollment of a device whose row is

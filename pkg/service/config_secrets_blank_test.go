@@ -2,6 +2,9 @@ package service
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
+	"sort"
 	"testing"
 )
 
@@ -188,4 +191,107 @@ func TestBlankConfigSecrets(t *testing.T) {
 			}
 		}
 	})
+}
+
+// Empty secret leaves come back as storage fields, so the write guard can ask
+// the store which of them are real open networks (#88). An empty sensitive
+// leaf with no storage field is reported as unknown.
+func TestBlankSecretFields(t *testing.T) {
+	cases := []struct {
+		content string
+		fields  []string
+		unknown bool
+	}{
+		{`{"mqtt":{"password":"","host":"b"}}`, []string{"mqtt.password"}, false},
+		{`{"wifi":{"networks":[{"ssid":"home","password":""}]}}`, []string{"wifi.password:home"}, false},
+		{`{"wifi":{"networks":[{"ssid":"a","password":"pw"},{"ssid":"b","password":""}]}}`, []string{"wifi.password:b"}, false},
+		{`{"telegram":{"bot_token":""},"wifi":{"ap_password":""}}`, []string{"telegram.bot_token", "wifi.ap_password"}, false},
+		{`{"wifi":{"networks":[{"password":""}]}}`, nil, true},
+		{`{"ota":{"api_key":""}}`, nil, true},
+		{`{"mqtt":{"password":"s3cret","host":"b"}}`, nil, false},
+		{`{"mqtt":{"host":"b"}}`, nil, false},
+		{`{"wifi":{"networks":[{"ssid":"home","password":"pw"}]},"web":{}}`, nil, false},
+	}
+	// Anything that is not one JSON object must never reach the device as config.json.
+	for _, bad := range []string{`not json at all`, `[]`, `null`, `42`, `"x"`, ``, `{"mqtt":`} {
+		if _, _, err := BlankSecretFields(bad); err == nil {
+			t.Errorf("%q: want an error, got none", bad)
+		}
+	}
+	for _, c := range cases {
+		fields, unknown, err := BlankSecretFields(c.content)
+		if err != nil {
+			t.Fatalf("%s: %v", c.content, err)
+		}
+		sort.Strings(fields)
+		if !slices.Equal(fields, c.fields) || (len(unknown) > 0) != c.unknown {
+			t.Errorf("%s: got %v unknown=%v, want %v unknown=%v", c.content, fields, unknown, c.fields, c.unknown)
+		}
+	}
+}
+
+// A device read records a network open only for an explicit "" password (#88).
+// Secrets never carry "": extractConfigSecrets skips every empty leaf.
+func TestOpenWifiSSIDs(t *testing.T) {
+	content := `{"mqtt":{"password":"m"},"web":{"password":""},` +
+		`"wifi":{"networks":[{"ssid":"home","password":"pw"},{"ssid":"cafe","password":""},{"ssid":"lab"},{"password":""}]}}`
+	if got := openWifiSSIDs(content); !slices.Equal(got, []string{"cafe"}) {
+		t.Errorf("open = %v, want [cafe]", got)
+	}
+	want := map[string]string{"mqtt.password": "m", "wifi.password:home": "pw"}
+	if got := extractConfigSecrets(content); !maps.Equal(got, want) {
+		t.Errorf("secrets = %v, want %v", got, want)
+	}
+}
+
+// Each entry counts on its own: an empty password after a set one for the same SSID is still open.
+func TestOpenWifiSSIDs_RepeatedSSID(t *testing.T) {
+	content := `{"wifi":{"networks":[{"ssid":"cafe","password":"pw"},{"ssid":"cafe","password":""},{"ssid":"cafe","password":""}]}}`
+	if got := openWifiSSIDs(content); !slices.Equal(got, []string{"cafe"}) {
+		t.Errorf("open = %v, want [cafe]", got)
+	}
+}
+
+// The key pattern names the leaves snapshots blank and the write guard checks.
+func TestSensitiveConfigKey(t *testing.T) {
+	for _, k := range []string{
+		"password", "ap_password", "bot_token", "client_secret", "api_key", "client_key",
+		"passphrase", "credential", "pass", "web_pass", "pwd", "mqtt_pwd", "psk", "PSK",
+		"pin", "sim_pin", "seed", "wallet_seed", "passwd", "Password",
+	} {
+		if !sensitiveConfigKeyRE.MatchString(k) {
+			t.Errorf("%q: want a match", k)
+		}
+	}
+	for _, k := range []string{
+		"ssid", "host", "bypass", "compass", "spin", "spinning", "pinout", "pins",
+		"seeded", "proceed", "user", "chat_id", "port", "passive", "pass_through",
+	} {
+		if sensitiveConfigKeyRE.MatchString(k) {
+			t.Errorf("%q: want no match", k)
+		}
+	}
+}
+
+// A null secret leaf reaches the firmware as "", so the guard counts it as empty.
+func TestBlankSecretFields_NullIsEmpty(t *testing.T) {
+	for _, c := range []struct {
+		content string
+		fields  []string
+		unknown bool
+	}{
+		{`{"mqtt":{"password":null}}`, []string{"mqtt.password"}, false},
+		{`{"wifi":{"networks":[{"ssid":"home","password":null}]}}`, []string{"wifi.password:home"}, false},
+		{`{"cellular":{"sim_pin":null}}`, nil, true},
+		{`{"lora":{"meshtastic":{"psk":""}}}`, nil, true},
+	} {
+		fields, unknown, err := BlankSecretFields(c.content)
+		if err != nil {
+			t.Fatalf("%s: %v", c.content, err)
+		}
+		sort.Strings(fields)
+		if !slices.Equal(fields, c.fields) || (len(unknown) > 0) != c.unknown {
+			t.Errorf("%s: got %v unknown=%v, want %v unknown=%v", c.content, fields, unknown, c.fields, c.unknown)
+		}
+	}
 }

@@ -46,6 +46,7 @@ These need shell access to the host and, for some, an env var. An operator who o
 | Run DB migrations | `thesada-app migrate` |
 | Encrypt the CA private key at rest | `thesada-app ca-encrypt` (needs `THESADA_CA_KEY_PASSPHRASE`) |
 | Backfill device secrets into the encrypted store | `thesada-app backfill-secrets` |
+| Re-key bare legacy `wifi.password` rows to the primary SSID | `thesada-app migrate-legacy-wifi` |
 | Rotate the device-config root KEK (re-wrap every tenant DEK) | `thesada-app rotate-kek` (needs `THESADA_DEVICE_CONFIG_KEK_NEW`) |
 
 ---

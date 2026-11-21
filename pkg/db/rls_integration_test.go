@@ -232,6 +232,10 @@ func seedTenants(t *testing.T, p *rlsPools) {
 			`INSERT INTO deleted_device_tombstones (tenant_id, device_id, topic_prefix)
 			 VALUES ($1, $2, $3)`,
 			tid, "gone-"+tid, "thesada/"+tid+"/gone")
+		batch.Queue(
+			`INSERT INTO alert_rules (tenant_id, metric, direction, delta, window_s, severity)
+			 VALUES ($1, 'temp.boiler', 'fall', 5, 600, 'warn')`,
+			tid)
 		br := p.super.SendBatch(ctx, batch)
 		for q := 0; q < batch.Len(); q++ {
 			if _, err := br.Exec(); err != nil {
@@ -272,7 +276,7 @@ func TestRLSTenantIsolation(t *testing.T) {
 
 	// Every tenant-scoped table seeded with exactly one row per tenant.
 	// Under RLS the App pool must see its own row and nothing else.
-	scoped := []string{"devices", "magic_link_tokens", "deleted_device_tombstones"}
+	scoped := []string{"devices", "magic_link_tokens", "deleted_device_tombstones", "alert_rules"}
 
 	t.Run("app_pool_sees_only_own_tenant", func(t *testing.T) {
 		for _, table := range scoped {

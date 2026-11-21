@@ -72,6 +72,9 @@ type Client struct {
 	// no slot is free the alert dead-letters to the log immediately instead
 	// of piling up unbounded goroutines.
 	insertRetrySlots chan struct{}
+
+	// cliTimeout bounds each drift-pull CLI round trip (cfg.CLIRequestTimeout).
+	cliTimeout time.Duration
 }
 
 // Start connects to the MQTT broker and subscribes to the tenant topic tree.
@@ -82,6 +85,7 @@ func Start(ctx context.Context, cfg *config.Config, pool *db.Pool, notifier *ale
 		return &Client{}, nil
 	}
 	cli := &Client{pool: pool, notifier: notifier, hub: hub, services: services, root: cfg.MQTTTopicRoot,
+		cliTimeout:       cfg.CLIRequestTimeout,
 		insertRetrySlots: make(chan struct{}, alertInsertRetrySlots)}
 	opts := buildMQTTOptions(cfg, cli)
 
@@ -164,7 +168,7 @@ func (c *Client) Stop() {
 
 // cacheRetainedManifest stores the device's retained-topics manifest
 // (firmware) keyed by the device's MQTT topic prefix. Called from
-// onMessage when a retained `<prefix>/info/retained_topics` arrives.
+// onMessage when `<prefix>/info/retained_topics` arrives, retained or live.
 // Empty payload (cleared on the broker) wipes the cached entry. JSON
 // parse failures are logged at debug and the cache is left untouched.
 // in: topicPrefix (e.g. "thesada/default/sht31"), JSON-array payload.
@@ -331,9 +335,12 @@ func (c *Client) onMessage(_ mqttlib.Client, msg mqttlib.Message) {
 			c.handleStatus(tenant, device, topicPrefix, msg.Payload(), retained)
 		}
 	case "info":
-		if sub == "" {
+		switch sub {
+		case "":
 			c.handleInfo(tenant, device, topicPrefix, msg.Payload(), retained)
-		} else if sub == "retained_topics" && retained {
+		case "retained_topics":
+			// A running app sees the manifest live (retain=0), so cache both.
+			// An empty live payload is the broker forwarding a retained delete.
 			c.cacheRetainedManifest(topicPrefix, msg.Payload())
 		}
 	case "alert":
