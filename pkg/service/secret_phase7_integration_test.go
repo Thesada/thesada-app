@@ -32,7 +32,7 @@ func TestSecretRotation(t *testing.T) {
 	const tenant = "rot-a"
 	env.SeedTenant(t, tenant)
 	pk := mustUpsert(t, env.Services.Devices, tenant, "rot-dev", "", "", "", "")
-	if err := oldSvc.SetSecret(ctx, tenant, pk, "wifi.password", "rotate-me"); err != nil {
+	if err := oldSvc.SetSecret(ctx, tenant, pk, "wifi.password:home", "rotate-me"); err != nil {
 		t.Fatalf("SetSecret: %v", err)
 	}
 
@@ -76,13 +76,13 @@ func TestSecretRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
-	got, found, err := newSvc.Reveal(ctx, tenant, pk, "wifi.password")
+	got, found, err := newSvc.Reveal(ctx, tenant, pk, "wifi.password:home")
 	if err != nil || !found || got != "rotate-me" {
 		t.Errorf("Reveal under new KEK = %q found=%v err=%v, want rotate-me", got, found, err)
 	}
 
 	// The OLD key can no longer unwrap the re-wrapped DEK.
-	if _, _, err := oldSvc.Reveal(ctx, tenant, pk, "wifi.password"); err == nil {
+	if _, _, err := oldSvc.Reveal(ctx, tenant, pk, "wifi.password:home"); err == nil {
 		t.Error("Reveal under old KEK should fail after rotation")
 	}
 }

@@ -57,6 +57,69 @@ Assume broker credentials and/or the dynsec store are untrusted.
 4. If migrations are stuck: `thesada-app migrate` on the host. See [Migrations](#migrations) for the role grant they need.
 5. Restore path (if the DB itself is lost): TimescaleDB restores must be **version-matched** to the dump.
 
+## Self-host upgrade
+
+`deploy/startup.sh` creates the timescaledb extension when it is missing, then runs `ALTER EXTENSION timescaledb UPDATE` before the migrations.
+
+1. Docker Compose 2.17 or newer is required (`up --wait`). The script stops on an older one.
+2. Rerunning it on a live stack recreates the database container when the image changed. The app loses its database for that restart, and the ALTER takes catalog locks against live sessions. Run it in a quiet window.
+3. Rolling the image back to an older timescaledb than the volume holds fails the ALTER, and the script stops before the migrations. The database container already runs the older image by then, so the stack is not as it was. Put the newer timescaledb image back in the compose file and rerun the script, or restore the database from a backup made before the upgrade.
+4. Update devices to firmware 1.4.5 or later before the app rollout. The app refuses file saves and rule pushes to older or unknown firmware with a 409 naming 1.4.5, and drift pulls skip it with `drift pull skipped, firmware below the supported floor` in the log.
+5. The release PR runs `make release-pin RELEASE=<version>`, so the compose file in a release tag runs that release. `go test ./deploy/` fails when the pin is older than the newest tag. The release workflow runs the same check (`make pin-check`, all tags fetched) on the tagged commit and also requires the pin to equal the tag being cut. A tag build without that tag name fails, and so does one without `docs/release-notes/<version>.md`. The image, notes and binary jobs wait for it.
+6. Releases are CalVer only (`YY.MM.N`, no `v`). The release workflow fires on CalVer-shaped tags, and its pin job fails on any tag that is not `YY.MM.N`.
+7. The release PR adds `docs/release-notes/<version>.md` with what an operator must do before upgrading (`go test ./deploy/` fails without it for the pinned version). The release body is that file, then the notes GitHub generates from the merged PRs.
+
+## Roll back the app
+
+Roll back when the new release breaks something a forward fix cannot cover in
+time: sign-in, ingest, alert delivery, or the app does not come up. A failed
+`migrate` is not a reason: the deploy stops there with the old app serving
+(see [Migrations](#migrations)), fix the cause and rerun.
+
+| Step | What to do |
+|---|---|
+| 1. Find the previous image | Production: the deploy role's image pin before the release bump, the multi-arch index digest (its git history). Self-host: the previous `ghcr.io/thesada/thesada-app:<version>` in `deploy/docker-compose.yml` |
+| 2. Pin it back | Production: revert the pin bump and run the app deploy. Self-host: set the old tag in compose and run `docker compose up -d app` |
+| 3. Migrations | Nothing to undo, no down SQL. The old binary's `migrate` skips every version it knows and leaves newer rows alone (`applied_now` 0). Do not run the `Rollback:` SQL in the migration headers: it drops data the next roll forward needs |
+| 4. Database image | Leave it. `ALTER EXTENSION timescaledb UPDATE` cannot go back, an older timescaledb image fails on a volume the newer one updated |
+| 5. Verify | `/api/v1/version` names the old release, `/api/v1/readyz` is ok, devices show new `last_seen_at`, one test alert arrives |
+
+26.11.4 runs on the 0049 schema: it selects no `*`, and every new column is
+nullable or has a default. A migrate run that stopped partway leaves a recorded
+prefix the old binary also runs on. Both were checked with an upgrade test on
+26.11.4-shaped data before the 26.11.5 release. What 26.11.4 does with data
+26.11.5 wrote:
+
+| Migration | Under 26.11.4 |
+|---|---|
+| 0042 passkeys | No passkey factor. An account whose only second factor is a passkey signs in with password or magic link alone, TOTP accounts keep TOTP. Keys stay stored |
+| 0043, 0044 channels | Email goes to the account address, telegram to the account's old chat id column, a webhook to the URL 26.11.5 mirrors into the subscription. A telegram channel or an extra email channel added on 26.11.5 does not deliver (an extra email subscription goes to the account address). The channel on/off switch is not read, so a subscription on a switched-off channel sends again |
+| 0047 email confirmation | Not read. Mail goes only to the account address |
+| 0045, 0046 trend rules | Not evaluated. No trend alerts, open trend alerts stay open until the new release runs again |
+| 0048 open networks, config staleness | The open WiFi markers moved out of the secret store are not seen, device reads are not checked for staleness. How a 26.11.4 config save treats an open network after the move: not verified |
+| 0049 `rekeyed` | Rows 26.11.4 writes take the default `false`, right for every write it makes |
+
+Back on the new release later: a subscription 26.11.4 created has no
+`channel_id` and does not deliver. List them with `SELECT id, user_id, channel
+FROM alert_subscriptions WHERE channel_id IS NULL` and add them again from the
+alerts page (not verified as a procedure).
+
+Last resort, when the data itself is damaged: restore the database dump taken
+right before the deploy, then pin the old image as above. Everything written
+after the dump is lost: telemetry, alerts, accounts, channels, device secrets
+and certificates issued since (those devices need a re-pair). The dump only
+restores into the same timescaledb version it came from (see
+[DB role lockout](#db-role-lockout), step 5). The restore steps belong to the
+deploy's backup procedure and are not repeated here.
+
+## One app instance
+
+Run one app container per database. Device write claims, request polls, rate
+limits and the alert dispatch claim live in process memory, so a second
+instance or a rolling deploy with two replicas overlaps device writes and
+sends alerts twice. The list is in `docs/invariants.md`, "The app runs as one
+instance". Upgrade by stopping the old container before the new one starts.
+
 ## Migrations
 
 `thesada-app migrate` runs as `thesada_app`, the owner of every table. Tenant tables are `FORCE ROW LEVEL SECURITY`, so the owner sees no rows: a data step (`UPDATE` / `INSERT` / `DELETE`) on one switches to the BYPASSRLS role with `SET LOCAL ROLE thesada_app_admin`. Since 0040 that switch needs a membership grant.
@@ -66,6 +129,7 @@ Assume broker credentials and/or the dynsec store are untrusted.
 2. Check it: `SELECT pg_has_role('thesada_app', 'thesada_app_admin', 'MEMBER');` returns `t`.
 3. Without it, 0040 and 0041 fail with `permission denied to set role "thesada_app_admin"` and the deploy stops with the old binary still serving. Grant, then rerun `thesada-app migrate`.
 4. An `UPDATE` or `DELETE` without the switch does not fail, it changes 0 rows. An `INSERT` without it fails the RLS `WITH CHECK` policy, which stops the migration with an error. `go test ./migrations/` refuses either (`TestMigrations_RLSDataStepsSetRole`).
+5. A migration that creates a table and then writes it as `thesada_app_admin` grants that table to `thesada_app_admin` explicitly (0038, 0043). The default privileges from 0001 cover only tables `thesada_app` creates, so under a superuser migrator (`pkg/db` RLS test, a hand-run `psql`) the data step fails with `permission denied for table`.
 
 ## Magic-link mail broken
 

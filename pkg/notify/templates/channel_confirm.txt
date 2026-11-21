@@ -1,0 +1,12 @@
+Confirm thesada alert emails
+
+A thesada user added this address to receive device alerts. Open the
+link below and press Confirm to start receiving them. The link is valid
+for 24 hours and can only be used once.
+
+{{.Link}}
+
+If you do not want these alerts, ignore this email. Nothing is sent to
+this address until it is confirmed.
+
+- thesada

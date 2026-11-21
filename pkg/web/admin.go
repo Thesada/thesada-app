@@ -22,6 +22,7 @@ type adminTenantRow struct {
 	UserCount       int
 	DeviceCount     int
 	EventCount      int
+	SubscriberCount int // users with a subscription on an enabled channel
 	IsDefault       bool
 	IsCurrent       bool // caller's effective tenant
 	CrossTenantRead bool // mqtt_cross_tenant_read on this tenant - paired devices subscribe across all tenants
@@ -66,20 +67,7 @@ func (s *Server) handleAdminTenants(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "list failed", http.StatusInternalServerError)
 		return
 	}
-	effective := authmw.EffectiveTenantID(r)
-	rows := make([]adminTenantRow, 0, len(tenants))
-	for _, t := range tenants {
-		uc, dc, ec := s.countTenantUsage(t.ID)
-		rows = append(rows, adminTenantRow{
-			Tenant:          t,
-			UserCount:       uc,
-			DeviceCount:     dc,
-			EventCount:      ec,
-			IsDefault:       t.ID == "default",
-			IsCurrent:       t.ID == effective,
-			CrossTenantRead: s.services.Settings.GetBool(t.ID, "mqtt_cross_tenant_read", t.ID == "default"),
-		})
-	}
+	rows := s.adminTenantRows(r, tenants)
 	ok, bad := adminFlash(r.URL.Query())
 	s.render(w, r, "admin-tenants.html", map[string]interface{}{
 		"Rows":            rows,
@@ -368,20 +356,7 @@ func (s *Server) renderAdminTenantsWithError(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "list failed", http.StatusInternalServerError)
 		return
 	}
-	effective := authmw.EffectiveTenantID(r)
-	rows := make([]adminTenantRow, 0, len(tenants))
-	for _, t := range tenants {
-		uc, dc, ec := s.countTenantUsage(t.ID)
-		rows = append(rows, adminTenantRow{
-			Tenant:          t,
-			UserCount:       uc,
-			DeviceCount:     dc,
-			EventCount:      ec,
-			IsDefault:       t.ID == "default",
-			IsCurrent:       t.ID == effective,
-			CrossTenantRead: s.services.Settings.GetBool(t.ID, "mqtt_cross_tenant_read", t.ID == "default"),
-		})
-	}
+	rows := s.adminTenantRows(r, tenants)
 	s.render(w, r, "admin-tenants.html", map[string]interface{}{
 		"Rows":            rows,
 		"Error":           msg,
@@ -460,7 +435,7 @@ func (s *Server) handleAdminWaitlistConvert(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		slog.Error("admin waitlist convert failed", "waitlist_id", id, "err", err)
-		http.Redirect(w, r, "/admin/waitlist?error=convert+failed", http.StatusFound)
+		http.Redirect(w, r, flashWaitlistConvert.on("/admin/waitlist"), http.StatusFound)
 		return
 	}
 	// Best-effort reset email; admin can re-send from /admin if SMTP fails.
@@ -478,7 +453,7 @@ func (s *Server) handleAdminWaitlistConvert(w http.ResponseWriter, r *http.Reque
 		TargetType: "user", TargetID: u.ID.String(), TenantID: u.TenantID,
 		Detail: map[string]any{"email": u.Email, "waitlist_id": id.String(), "is_admin": isAdmin},
 	})
-	http.Redirect(w, r, "/admin/waitlist?ok=converted", http.StatusFound)
+	http.Redirect(w, r, flashWaitlistConverted.on("/admin/waitlist"), http.StatusFound)
 }
 
 // handleAdminWaitlistDelete removes a pending waitlist entry.
@@ -495,14 +470,14 @@ func (s *Server) handleAdminWaitlistDelete(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		slog.Error("admin waitlist delete failed", "waitlist_id", id, "err", err)
-		http.Redirect(w, r, "/admin/waitlist?error=delete+failed", http.StatusFound)
+		http.Redirect(w, r, flashWaitlistDelete.on("/admin/waitlist"), http.StatusFound)
 		return
 	}
 	slog.Info("admin waitlist delete ok", "waitlist_id", id)
 	s.audit(r.Context(), authmw.CurrentUser(r), authz.WaitlistDelete, service.AuditEntry{
 		TargetType: "waitlist", TargetID: id.String(),
 	})
-	http.Redirect(w, r, "/admin/waitlist?ok=deleted", http.StatusFound)
+	http.Redirect(w, r, flashWaitlistDeleted.on("/admin/waitlist"), http.StatusFound)
 }
 
 // countTenantUsersDevices returns user/device counts for a tenant; best-effort, errors logged as zero so the dashboard still renders.
@@ -510,6 +485,31 @@ func (s *Server) handleAdminWaitlistDelete(w http.ResponseWriter, r *http.Reques
 func (s *Server) countTenantUsersDevices(tenantID string) (int, int) {
 	users, devices, _ := s.countTenantUsage(tenantID)
 	return users, devices
+}
+
+// adminTenantRows builds the tenants list rows with their usage counts.
+// in: request, tenants. out: rows.
+func (s *Server) adminTenantRows(r *http.Request, tenants []service.Tenant) []adminTenantRow {
+	effective := authmw.EffectiveTenantID(r)
+	rows := make([]adminTenantRow, 0, len(tenants))
+	for _, t := range tenants {
+		uc, dc, ec := s.countTenantUsage(t.ID)
+		sc, err := s.services.Tenants.CountSubscribersAny(t.ID)
+		if err != nil {
+			slog.Warn("tenant subscriber count failed", "tenant", t.ID, "err", err)
+		}
+		rows = append(rows, adminTenantRow{
+			Tenant:          t,
+			UserCount:       uc,
+			DeviceCount:     dc,
+			EventCount:      ec,
+			SubscriberCount: sc,
+			IsDefault:       t.ID == "default",
+			IsCurrent:       t.ID == effective,
+			CrossTenantRead: s.services.Settings.GetBool(t.ID, "mqtt_cross_tenant_read", t.ID == "default"),
+		})
+	}
+	return rows
 }
 
 // countTenantUsage returns users, devices, and alerts in the last day.
@@ -596,7 +596,7 @@ func (s *Server) handleAdminTenantUserCreate(w http.ResponseWriter, r *http.Requ
 	displayName := strings.TrimSpace(r.PostFormValue("display_name"))
 	isAdmin := r.PostFormValue("is_admin") == "on"
 	if email == "" {
-		http.Redirect(w, r, "/admin/tenants/"+slug+"/users?error=email+required", http.StatusFound)
+		http.Redirect(w, r, flashUserEmailRequired.on("/admin/tenants/"+slug+"/users"), http.StatusFound)
 		return
 	}
 	created, err := s.services.Auth.CreateUser(slug, email, displayName, isAdmin)
@@ -606,7 +606,7 @@ func (s *Server) handleAdminTenantUserCreate(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		slog.Error("admin user create failed", "slug", slug, "email", email, "err", err)
-		http.Redirect(w, r, "/admin/tenants/"+slug+"/users?error=create+failed", http.StatusFound)
+		http.Redirect(w, r, flashUserCreateFailed.on("/admin/tenants/"+slug+"/users"), http.StatusFound)
 		return
 	}
 	s.audit(r.Context(), authmw.CurrentUser(r), authz.UserCreate, service.AuditEntry{
@@ -650,12 +650,12 @@ func (s *Server) handleAdminTenantUserDelete(w http.ResponseWriter, r *http.Requ
 	}
 	me := authmw.CurrentUser(r)
 	if me != nil && me.ID == uid {
-		http.Redirect(w, r, "/admin/tenants/"+slug+"/users?error=cannot+delete+self", http.StatusFound)
+		http.Redirect(w, r, flashUserDeleteSelf.on("/admin/tenants/"+slug+"/users"), http.StatusFound)
 		return
 	}
 	if err := s.services.Auth.DeleteUser(slug, uid); err != nil {
 		if errors.Is(err, service.ErrSuperAdminProtected) {
-			http.Redirect(w, r, "/admin/tenants/"+slug+"/users?error=cannot+delete+super-admin", http.StatusFound)
+			http.Redirect(w, r, flashUserDeleteSuper.on("/admin/tenants/"+slug+"/users"), http.StatusFound)
 			return
 		}
 		slog.Error("admin user delete failed", "user", uid, "err", err)
@@ -687,10 +687,13 @@ func (s *Server) handleAdminTenantUserEdit(w http.ResponseWriter, r *http.Reques
 		http.NotFound(w, r)
 		return
 	}
+	ok, bad := adminFlash(r.URL.Query())
 	s.render(w, r, "admin-tenant-user-edit.html", map[string]interface{}{
 		"Tenant":   tenant,
 		"EditUser": u,
 		"Me":       authmw.CurrentUser(r),
+		"Flash":    ok,
+		"FlashErr": bad,
 	})
 }
 
@@ -739,13 +742,13 @@ func (s *Server) handleAdminTenantUserSendReset(w http.ResponseWriter, r *http.R
 	token, _, err := s.services.Auth.CreateResetLink(uid)
 	if err != nil {
 		slog.Error("admin send-reset link create failed", "user_id", uid, "err", err)
-		http.Redirect(w, r, "/admin/tenants/"+slug+"/users/"+uid.String()+"/edit?error=link+failed", http.StatusFound)
+		http.Redirect(w, r, flashUserResetLink.on("/admin/tenants/"+slug+"/users/"+uid.String()+"/edit"), http.StatusFound)
 		return
 	}
 	link := s.cfg.BaseURL + "/reset-password?token=" + token
 	if serr := s.notes.SendResetLink(u.Email, link); serr != nil {
 		slog.Error("admin send-reset email send failed", "user_id", uid, "email", u.Email, "err", serr)
-		http.Redirect(w, r, "/admin/tenants/"+slug+"/users/"+uid.String()+"/edit?error=smtp+failed", http.StatusFound)
+		http.Redirect(w, r, flashUserResetSMTP.on("/admin/tenants/"+slug+"/users/"+uid.String()+"/edit"), http.StatusFound)
 		return
 	}
 	slog.Info("admin send-reset ok", "user_id", uid, "email", u.Email)
@@ -753,7 +756,7 @@ func (s *Server) handleAdminTenantUserSendReset(w http.ResponseWriter, r *http.R
 		TargetType: "user", TargetID: uid.String(), TenantID: slug,
 		Detail: map[string]any{"email": u.Email},
 	})
-	http.Redirect(w, r, "/admin/tenants/"+slug+"/users/"+uid.String()+"/edit?ok=reset+sent", http.StatusFound)
+	http.Redirect(w, r, flashUserResetSent.on("/admin/tenants/"+slug+"/users/"+uid.String()+"/edit"), http.StatusFound)
 }
 
 // ---------------------------------------------------------------------------

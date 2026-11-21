@@ -122,6 +122,12 @@ func TestAlertService(t *testing.T) {
 		if err := al.CreateSubscription(ctx, tA, u.ID, &pk, "email", "warn", ""); err != nil {
 			t.Fatalf("CreateSubscription device: %v", err)
 		}
+		if err := al.CreateSubscription(ctx, tA, u.ID, nil, "telegram", "crit", ""); !errors.Is(err, service.ErrNoChannel) {
+			t.Fatalf("telegram without a channel = %v, want ErrNoChannel", err)
+		}
+		if _, err := al.CreateChannel(ctx, tA, u.ID, "telegram", "12345", ""); err != nil {
+			t.Fatalf("CreateChannel telegram: %v", err)
+		}
 		if err := al.CreateSubscription(ctx, tA, u.ID, nil, "telegram", "crit", ""); err != nil {
 			t.Fatalf("CreateSubscription all: %v", err)
 		}

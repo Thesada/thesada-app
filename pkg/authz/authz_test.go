@@ -28,6 +28,7 @@ var allActions = []Action{
 	DeviceReassign,
 	DeviceSecretSet,
 	DeviceSecretClear,
+	DeviceSecretClearNVS,
 	DeviceSecretProvision,
 	TenantSecretSet,
 	TenantSecretClear,
@@ -47,6 +48,8 @@ var allActions = []Action{
 	RulesWorkspaceSave,
 	RuleTemplateSave,
 	RuleTemplateDelete,
+	RulesTenantSave,
+	RulesTenantPush,
 }
 
 func TestAuthz_GrantTableCoversEveryAction(t *testing.T) {

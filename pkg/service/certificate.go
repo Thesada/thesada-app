@@ -114,9 +114,12 @@ func (s *CertificateService) Issue(ctx context.Context, tenantID string, deviceP
 			return err
 		}
 		// Mark device as paired
-		_, err := tx.Exec(ctx,
-			`UPDATE devices SET paired_at = NOW() WHERE id = $1`, devicePk)
-		return err
+		if _, err := tx.Exec(ctx,
+			`UPDATE devices SET paired_at = NOW() WHERE id = $1`, devicePk); err != nil {
+			return err
+		}
+		ensureTenantSubscriptionTx(ctx, tx, tenantID, devicePk)
+		return nil
 	})
 }
 
@@ -133,9 +136,12 @@ func (s *CertificateService) IssueWithIdentity(ctx context.Context, tenantID str
 		if _, err := issueTx(ctx, tx, devicePk, serialHex, cn, notBefore, notAfter, certPEM, CertStatusActive, pubkeyHex); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx,
-			`UPDATE devices SET paired_at = NOW() WHERE id = $1`, devicePk)
-		return err
+		if _, err := tx.Exec(ctx,
+			`UPDATE devices SET paired_at = NOW() WHERE id = $1`, devicePk); err != nil {
+			return err
+		}
+		ensureTenantSubscriptionTx(ctx, tx, tenantID, devicePk)
+		return nil
 	})
 }
 
@@ -182,9 +188,12 @@ func (s *CertificateService) Activate(ctx context.Context, tenantID string, cert
 		if tag.RowsAffected() == 0 {
 			return ErrCertNotPending
 		}
-		_, err = tx.Exec(ctx,
-			`UPDATE devices SET paired_at = NOW() WHERE id = $1`, devicePk)
-		return err
+		if _, err := tx.Exec(ctx,
+			`UPDATE devices SET paired_at = NOW() WHERE id = $1`, devicePk); err != nil {
+			return err
+		}
+		ensureTenantSubscriptionTx(ctx, tx, tenantID, devicePk)
+		return nil
 	})
 }
 

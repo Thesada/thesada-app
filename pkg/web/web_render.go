@@ -41,6 +41,7 @@ var funcMap = template.FuncMap{
 	"metricLeaf":       metricLeaf,
 	"groupLatest":      groupLatestByPrefix,
 	"setKey":           setKey,
+	"trendWindow":      service.TrendWindowText,
 }
 
 // setKey hashes a set of names into a short id suffix, so an element id

@@ -48,8 +48,7 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 			}
 			if errors.Is(err, service.ErrLoginRateLimited) {
 				slog.Warn("auth.login.rate_limited", "ip", ip)
-				w.WriteHeader(http.StatusTooManyRequests)
-				s.render(w, r, "login.html", map[string]interface{}{"Error": "Too many attempts. Wait a few minutes and try again."})
+				s.renderStatus(w, r, http.StatusTooManyRequests, "login.html", map[string]interface{}{"Error": "Too many attempts. Wait a few minutes and try again."})
 				return
 			}
 			slog.Error("auth.password.verify_failed", "ip", ip, "err", err)

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 
 	"thesada.app/app/pkg/config"
@@ -30,6 +31,9 @@ type AuthService struct {
 
 	loginEmailLimits *ratelimit.Limiter
 	loginIPLimits    *ratelimit.Limiter
+
+	// rp runs passkey ceremonies, nil when the config cannot back one.
+	rp *webauthn.WebAuthn
 }
 
 // Per IP is looser than per email so a shared NAT does not lock out an office.
@@ -51,6 +55,7 @@ func NewAuthService(cfg *config.Config, pools db.Pools) *AuthService {
 		pools:            pools,
 		loginEmailLimits: ratelimit.New(loginWindow, loginMaxPerEmail),
 		loginIPLimits:    ratelimit.New(loginWindow, loginMaxPerIP),
+		rp:               newRelyingParty(cfg),
 	}
 	s.loginEmailLimits.StartSweeper(context.Background())
 	s.loginIPLimits.StartSweeper(context.Background())

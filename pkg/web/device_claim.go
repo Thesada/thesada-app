@@ -176,8 +176,7 @@ func (s *Server) deviceClaimTopicPrefix(tenantID, deviceID string) string {
 // so a wrong guess is not written back into the page.
 func (s *Server) claimError(w http.ResponseWriter, r *http.Request, msg string) {
 	id, _ := service.ClaimFormPrefill(r.FormValue("device_id"), "")
-	w.WriteHeader(http.StatusBadRequest)
-	s.render(w, r, "device-claim.html", map[string]interface{}{
+	s.renderStatus(w, r, http.StatusBadRequest, "device-claim.html", map[string]interface{}{
 		"Title":     "Claim a device",
 		"Error":     msg,
 		"DeviceID":  id,

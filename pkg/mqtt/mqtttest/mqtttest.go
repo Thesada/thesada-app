@@ -161,6 +161,8 @@ type FakeDevice struct {
 	handlers map[string]Handler
 	calls    map[string]int
 	respMode CLIResponseMode
+	// omitReqID names commands answered without req_id, the way pre-1.4.5 firmware does.
+	omitReqID map[string]bool
 
 	// live is read-held by every onCommand; Cleanup write-locks it so it
 	// waits out an in-flight reply before disconnecting.
@@ -174,6 +176,18 @@ func (fd *FakeDevice) SetCLIResponseMode(m CLIResponseMode) {
 	fd.mu.Lock()
 	defer fd.mu.Unlock()
 	fd.respMode = m
+}
+
+// OmitReqID sets whether the device answers cmds without req_id, as pre-1.4.5 firmware does.
+func (fd *FakeDevice) OmitReqID(omit bool, cmds ...string) {
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	if fd.omitReqID == nil {
+		fd.omitReqID = make(map[string]bool)
+	}
+	for _, c := range cmds {
+		fd.omitReqID[c] = omit
+	}
 }
 
 // NewFakeDevice connects a fake device for topicPrefix (e.g. "thesada/t1/dev1")
@@ -298,6 +312,7 @@ func (fd *FakeDevice) onCommand(_ paho.Client, msg paho.Message) {
 	fd.mu.Lock()
 	h := fd.handlers[cmd]
 	fd.calls[cmd]++
+	echo := env.ReqID != "" && !fd.omitReqID[cmd]
 	fd.mu.Unlock()
 
 	responses := []Response{{OK: false, Output: []string{"fake device: no handler for " + cmd}}}
@@ -307,7 +322,7 @@ func (fd *FakeDevice) onCommand(_ paho.Client, msg paho.Message) {
 
 	for _, resp := range responses {
 		body := map[string]any{"cmd": cmd, "ok": resp.OK}
-		if env.ReqID != "" {
+		if echo {
 			body["req_id"] = env.ReqID
 		}
 		if resp.Output != nil {

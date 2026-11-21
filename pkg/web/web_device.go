@@ -26,7 +26,22 @@ func (s *Server) handleDeviceList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "device list failed", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, r, "devices.html", map[string]interface{}{"Devices": devices})
+	s.render(w, r, "devices.html", map[string]interface{}{
+		"Devices":       devices,
+		"AlertsUnheard": s.alertsUnheard(r, tenantID),
+	})
+}
+
+// alertsUnheard is true while the tenant has a paired device and no subscriber.
+// A failed check logs and shows no banner.
+// in: request, tenant id. out: bool.
+func (s *Server) alertsUnheard(r *http.Request, tenantID string) bool {
+	paired, subs, err := s.services.Alerts.AlertCoverage(r.Context(), tenantID)
+	if err != nil {
+		slog.Error("alerts.coverage_failed", "tenant", tenantID, "err", err)
+		return false
+	}
+	return paired && subs == 0
 }
 
 // deviceInScope is the one tenant-scope rule for /devices/{id} handlers:

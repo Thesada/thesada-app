@@ -1,0 +1,216 @@
+// Orders device reads of config.json against config changes and keeps the open WiFi
+// markers the write guard reads. Kept in the database, on the database clock (0048).
+package service
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
+	"slices"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"thesada.app/app/pkg/db"
+)
+
+// ReadStart is the database clock before a device read is sent, handed to
+// UpsertFromDevice with what the read returned. in: ctx, tenant. out: start, error.
+func (s *DeviceFilesService) ReadStart(ctx context.Context, tenantID string) (time.Time, error) {
+	var t time.Time
+	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&t)
+	})
+	return t, err
+}
+
+// MarkConfigChanged records a config.json change on the device. Reads started earlier
+// store nothing, markers seen earlier stop counting. in: ctx, tenant, device. out: error.
+func (s *DeviceFilesService) MarkConfigChanged(ctx context.Context, tenantID string, devicePk uuid.UUID) error {
+	return s.MarkConfigChanging(ctx, tenantID, devicePk, 0)
+}
+
+// MarkConfigChanging records a change that may land for up to window: the stamp is now plus
+// window, so reads and markers in it stay stale even when no closing MarkConfigChanged commits.
+// in: ctx, tenant, device, window. out: error.
+func (s *DeviceFilesService) MarkConfigChanging(ctx context.Context, tenantID string, devicePk uuid.UUID, window time.Duration) error {
+	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		// Locked first, so the stamp is taken after a refresh holding the row committed.
+		if err := lockDeviceConfig(ctx, tx, devicePk, nil, nil); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx,
+			`UPDATE devices SET config_changed_at = clock_timestamp() + $2 * interval '1 millisecond' WHERE id = $1`,
+			devicePk, window.Milliseconds())
+		return err
+	})
+}
+
+// lockDeviceConfig locks the device row for one config change or read, and reads
+// its order stamps into changedAt and readAt when they are not nil.
+func lockDeviceConfig(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID, changedAt, readAt **time.Time) error {
+	var c, r *time.Time
+	err := tx.QueryRow(ctx,
+		`SELECT config_changed_at, config_read_at FROM devices WHERE id = $1 FOR UPDATE`, devicePk).Scan(&c, &r)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("device %s not found", devicePk)
+	}
+	if err != nil {
+		return fmt.Errorf("lock device %s: %w", devicePk, err)
+	}
+	if changedAt != nil {
+		*changedAt = c
+	}
+	if readAt != nil {
+		*readAt = r
+	}
+	return nil
+}
+
+// UpsertFromDevice is Upsert for content the device reported or confirmed. config.json runs in one
+// tx under the device row lock: a stale read writes nothing, a current one refreshes the store too.
+// out: stored (false for a stale read, which is dropped with a nil error), error.
+func (s *DeviceFilesService) UpsertFromDevice(ctx context.Context, tenantID string, devicePk uuid.UUID, path, content, sha256hex, source string, createdBy *uuid.UUID, readStart time.Time) (bool, error) {
+	if !isConfigJSON(path) {
+		err := s.Upsert(ctx, tenantID, devicePk, path, content, sha256hex, source, createdBy)
+		return err == nil, err
+	}
+	if readStart.IsZero() {
+		return false, errors.New("device read of config.json without a read start")
+	}
+	blanked, err := blankedContent(path, content)
+	if err != nil {
+		return false, err
+	}
+	stale := false
+	legacy := LegacyNone
+	err = db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		var changedAt, readAt *time.Time
+		if err := lockDeviceConfig(ctx, tx, devicePk, &changedAt, &readAt); err != nil {
+			return err
+		}
+		if (changedAt != nil && !changedAt.Before(readStart)) || (readAt != nil && readAt.After(readStart)) {
+			stale = true
+			return nil
+		}
+		if _, err := tx.Exec(ctx, `UPDATE devices SET config_read_at = $2 WHERE id = $1`, devicePk, readStart); err != nil {
+			return err
+		}
+		if s.secrets != nil && s.secrets.Enabled() {
+			stored, err := storedPrimaryTx(ctx, tx, devicePk)
+			if err != nil {
+				return err
+			}
+			// First, so the gap fill sees the per-SSID row a legacy one became.
+			if legacy, err = s.secrets.rekeyLegacyWifiTx(ctx, tx, tenantID, devicePk, primaryWifiSSID(content), stored); err != nil {
+				return err
+			}
+			if err := s.refreshStoreTx(ctx, tx, tenantID, devicePk, content); err != nil {
+				return err
+			}
+		}
+		if err := recordOpenNetworksTx(ctx, tx, tenantID, devicePk, content, source, readStart); err != nil {
+			return err
+		}
+		return upsertTx(ctx, tx, devicePk, path, blanked, sha256hex, source, createdBy)
+	})
+	if err != nil {
+		return false, err
+	}
+	if stale {
+		slog.Info("device.read.stale_dropped", "device", devicePk, "source", source)
+	}
+	if legacy == LegacyDropped {
+		s.auditLegacyDropped(ctx, tenantID, devicePk, createdBy)
+	}
+	return !stale, nil
+}
+
+// storedPrimaryTx is the primary SSID of the config.json the app holds for the device, "" without one.
+func storedPrimaryTx(ctx context.Context, tx pgx.Tx, devicePk uuid.UUID) (string, error) {
+	var content string
+	err := tx.QueryRow(ctx,
+		`SELECT content FROM device_files WHERE device_pk = $1 AND path = 'config.json'`, devicePk).Scan(&content)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read stored config.json: %w", err)
+	}
+	return primaryWifiSSID(content), nil
+}
+
+// auditLegacyDropped records the dropped bare WiFi password, field name only. The drop has
+// committed, so a failed audit write is logged, not returned.
+func (s *DeviceFilesService) auditLegacyDropped(ctx context.Context, tenantID string, devicePk uuid.UUID, actor *uuid.UUID) {
+	err := db.WithAdminAudit(ctx, s.pools.Admin, "device_secret.legacy_wifi_dropped", func(tx pgx.Tx) error {
+		return auditInsertTx(ctx, tx, AuditEntry{
+			ActorUserID: actor, ActorEmail: "system", Action: "device_secret.legacy_wifi_dropped",
+			TargetType: "device", TargetID: devicePk.String(), TenantID: tenantID,
+			Detail: map[string]any{"field": LegacyWifiPassword, "reason": "primary ssid changed"},
+		})
+	})
+	if err != nil {
+		slog.Error("device_secret.legacy_wifi_drop_audit_failed", "device", devicePk, "err", err)
+	}
+}
+
+// refreshStoreTx fills only fields the store has nothing for, as the firmware resolves NVS first (C1).
+func (s *DeviceFilesService) refreshStoreTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, content string) error {
+	found := extractConfigSecrets(content)
+	for _, field := range slices.Sorted(maps.Keys(found)) {
+		has, err := hasSecretTx(ctx, tx, devicePk, field)
+		if err != nil {
+			return fmt.Errorf("look up device secret %s: %w", field, err)
+		}
+		if has {
+			continue
+		}
+		if err := s.secrets.setSecretTx(ctx, tx, tenantID, devicePk, field, found[field]); err != nil {
+			return fmt.Errorf("store device secret %s: %w", field, err)
+		}
+	}
+	return nil
+}
+
+// recordOpenNetworksTx sets the device's markers to the networks whose password this read shows
+// as "" in the file. It holds no secret, so it runs with the store off too.
+func recordOpenNetworksTx(ctx context.Context, tx pgx.Tx, tenantID string, devicePk uuid.UUID, content, source string, seenAt time.Time) error {
+	// Non-nil: ANY over a NULL array matches nothing, and NOT of that deletes nothing.
+	// A file fact only. Whether NVS holds a password is asked of the device at write time.
+	open := append([]string{}, openWifiSSIDs(content)...)
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM device_open_networks WHERE device_pk = $1 AND NOT (ssid = ANY($2::text[]))`,
+		devicePk, open); err != nil {
+		return fmt.Errorf("drop open networks: %w", err)
+	}
+	for _, ssid := range open {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO device_open_networks (tenant_id, device_pk, ssid, seen_at, source)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (device_pk, ssid) DO UPDATE SET seen_at = EXCLUDED.seen_at, source = EXCLUDED.source`,
+			tenantID, devicePk, ssid, seenAt, source); err != nil {
+			return fmt.Errorf("record open network: %w", err)
+		}
+	}
+	return nil
+}
+
+// OpenNetworkCurrent reports whether a device read after the device's last config change
+// showed "" for ssid's password in config.json. in: ctx, tenant, device, ssid. out: open, error.
+func (s *DeviceFilesService) OpenNetworkCurrent(ctx context.Context, tenantID string, devicePk uuid.UUID, ssid string) (bool, error) {
+	var open bool
+	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT EXISTS (
+			    SELECT 1 FROM device_open_networks o
+			      JOIN devices d ON d.id = o.device_pk
+			     WHERE o.device_pk = $1 AND o.ssid = $2
+			       AND (d.config_changed_at IS NULL OR o.seen_at > d.config_changed_at))`,
+			devicePk, ssid).Scan(&open)
+	})
+	return open, err
+}

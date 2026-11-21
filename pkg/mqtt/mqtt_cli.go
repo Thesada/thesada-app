@@ -1,10 +1,12 @@
 package mqtt
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -31,7 +33,12 @@ type CLIResponse struct {
 	Length *int    `json:"length,omitempty"`
 	Done   *bool   `json:"done,omitempty"`
 	Data   *string `json:"data,omitempty"`
+	// Correlated is set by CLIRequest when every page echoed this request's req_id.
+	Correlated bool `json:"-"`
 }
+
+// ErrUncorrelated is a reply that did not echo the request's req_id. A stored fact needs the echo.
+var ErrUncorrelated = errors.New("device reply did not echo the request id")
 
 // awaitPagedCLIResponse reads cli_response payloads off ch and assembles a
 // complete CLIResponse. Firmware v1.4.6+ paginates oversized output across
@@ -48,6 +55,7 @@ func awaitPagedCLIResponse(ctx context.Context, ch <-chan []byte) (*CLIResponse,
 	var (
 		final     CLIResponse
 		haveFinal bool
+		ids       = make(map[string]bool)
 	)
 	for {
 		select {
@@ -61,6 +69,7 @@ func awaitPagedCLIResponse(ctx context.Context, ch <-chan []byte) (*CLIResponse,
 				page = *resp.Page
 			}
 			pages[page] = resp.Output
+			ids[resp.ReqID] = true
 			// More absent or false marks the last page. Older firmware
 			// omits More entirely, so its single message is the final
 			// (and only) page.
@@ -91,6 +100,10 @@ func awaitPagedCLIResponse(ctx context.Context, ch <-chan []byte) (*CLIResponse,
 			final.Output = combined
 			final.Page = nil
 			final.More = nil
+			// Pages under different ids are not one echoed reply.
+			if len(ids) > 1 {
+				final.ReqID = ""
+			}
 			return &final, nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -194,8 +207,8 @@ func (c *Client) tapCLIResponses(topicPrefix string, fn func([]byte)) (func(), e
 // race on the shared cli_response topic. req_id correlation (firmware
 // v1.4.5+) filters out late or retained-replay responses with a different
 // id so the second call cannot accidentally consume the first call's
-// late reply. Older firmware that ignores req_id still works - the mutex
-// alone makes the response unambiguous.
+// late reply. Older firmware that ignores req_id is matched on cmd only,
+// so a late reply to an earlier same-command request can still be taken.
 // in: ctx, topicPrefix, command, payload. out: *CLIResponse, error.
 func (c *Client) CLIRequest(ctx context.Context, topicPrefix, command, payload string) (*CLIResponse, error) {
 	if c.c == nil || !c.c.IsConnected() {
@@ -243,15 +256,49 @@ func (c *Client) CLIRequest(ctx context.Context, topicPrefix, command, payload s
 		return nil, fmt.Errorf("publish: %w", err)
 	}
 
-	return awaitPagedCLIResponse(ctx, ch)
+	resp, err := awaitPagedCLIResponse(ctx, ch)
+	if resp != nil {
+		resp.Correlated = resp.ReqID == reqID
+	}
+	return resp, err
 }
 
-// CLIRequestRaw sends a CLI command with a raw byte payload (for fs.write
-// and fs.append where the payload contains path + newline + binary content).
-// Firmware binary handlers read payload as raw bytes and would not parse a
-// JSON envelope, so this path does not wrap. The per-device mutex still
-// serializes against any concurrent CLIRequest on the same device.
-// in: ctx, topicPrefix, command, rawPayload. out: *CLIResponse, error.
+// CLIRequestStateful is CLIRequest for a reply that feeds a stored fact. A reply without
+// the echoed req_id comes back with ErrUncorrelated, for display only. out: response, error.
+func (c *Client) CLIRequestStateful(ctx context.Context, topicPrefix, command, payload string) (*CLIResponse, error) {
+	resp, err := c.CLIRequest(ctx, topicPrefix, command, payload)
+	if err == nil && !resp.Correlated {
+		return resp, ErrUncorrelated
+	}
+	return resp, err
+}
+
+// CLIRequestFieldsStateful is CLIRequestFields under the CLIRequestStateful rule. A payload
+// that cannot go in the envelope is never sent, as its reply could not correlate.
+func (c *Client) CLIRequestFieldsStateful(ctx context.Context, topicPrefix, command string, payload []byte) (*CLIResponse, error) {
+	if !utf8.Valid(payload) || bytes.IndexByte(payload, 0) >= 0 {
+		return nil, ErrUncorrelated
+	}
+	return c.CLIRequestStateful(ctx, topicPrefix, command, string(payload))
+}
+
+// CLIRequestFields sends a "<key>\n<value>" payload (cert.set, secret.set)
+// inside the req_id envelope, so the reply correlates on req_id. Firmware
+// unwraps args before its binary handlers. Bytes JSON cannot carry exactly
+// (invalid UTF-8, NUL) fall back to CLIRequestRaw.
+// in: ctx, topicPrefix, command, payload. out: *CLIResponse, error.
+func (c *Client) CLIRequestFields(ctx context.Context, topicPrefix, command string, payload []byte) (*CLIResponse, error) {
+	if utf8.Valid(payload) && bytes.IndexByte(payload, 0) < 0 {
+		return c.CLIRequest(ctx, topicPrefix, command, string(payload))
+	}
+	return c.CLIRequestRaw(ctx, topicPrefix, command, payload)
+}
+
+// CLIRequestRaw sends a CLI command with a raw byte payload, used for the
+// fs.write and fs.append chunks. Firmware would unwrap an envelope here too,
+// but JSON escaping grows a 3900-byte chunk past the device input buffer and
+// a chunk cut inside a UTF-8 rune would be rewritten, so chunks stay raw and
+// correlate on the command name. The per-device mutex still serializes.
 func (c *Client) CLIRequestRaw(ctx context.Context, topicPrefix, command string, rawPayload []byte) (*CLIResponse, error) {
 	if c.c == nil || !c.c.IsConnected() {
 		return nil, errors.New("mqtt client not connected")

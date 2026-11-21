@@ -43,10 +43,10 @@ func TestSecretService(t *testing.T) {
 
 	t.Run("Set_Reveal_roundtrip", func(t *testing.T) {
 		pk := mustUpsert(t, dev, tA, "sec-dev-1", "", "", "", "")
-		if err := sec.SetSecret(ctx, tA, pk, "wifi.password", "hunter2"); err != nil {
+		if err := sec.SetSecret(ctx, tA, pk, "wifi.password:home", "hunter2"); err != nil {
 			t.Fatalf("SetSecret: %v", err)
 		}
-		got, found, err := sec.Reveal(ctx, tA, pk, "wifi.password")
+		got, found, err := sec.Reveal(ctx, tA, pk, "wifi.password:home")
 		if err != nil || !found {
 			t.Fatalf("Reveal = %q found=%v err=%v, want value", got, found, err)
 		}

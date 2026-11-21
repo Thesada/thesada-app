@@ -108,3 +108,22 @@ func TestAwaitPagedCLIResponse(t *testing.T) {
 		}
 	})
 }
+
+// A paged reply is correlated only when every page carries the same req_id.
+func TestAwaitPagedCLIResponse_MixedReqIDsClearTheID(t *testing.T) {
+	ch := feed(t,
+		CLIResponse{Cmd: "fs.ls", ReqID: "a", OK: true, Page: intp(0), More: boolp(true), Output: []string{"x"}},
+		CLIResponse{Cmd: "fs.ls", OK: true, Page: intp(1), More: boolp(false), Output: []string{"y"}},
+	)
+	resp, err := awaitPagedCLIResponse(context.Background(), ch)
+	if err != nil || resp.ReqID != "" {
+		t.Fatalf("resp = %+v, %v, want the req_id cleared", resp, err)
+	}
+	ch = feed(t,
+		CLIResponse{Cmd: "fs.ls", ReqID: "a", OK: true, Page: intp(0), More: boolp(true), Output: []string{"x"}},
+		CLIResponse{Cmd: "fs.ls", ReqID: "a", OK: true, Page: intp(1), More: boolp(false), Output: []string{"y"}},
+	)
+	if resp, err := awaitPagedCLIResponse(context.Background(), ch); err != nil || resp.ReqID != "a" {
+		t.Fatalf("resp = %+v, %v, want req_id a kept", resp, err)
+	}
+}

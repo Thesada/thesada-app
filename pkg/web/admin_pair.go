@@ -579,7 +579,7 @@ func (s *Server) pushCertPart(ctx context.Context, topicPrefix, partType, pem st
 	payload = append(payload, '\n')
 	payload = append(payload, []byte(pem)...)
 
-	resp, err := s.mqtt.CLIRequestRaw(cctx, topicPrefix, "cert.set", payload)
+	resp, err := s.mqtt.CLIRequestFields(cctx, topicPrefix, "cert.set", payload)
 	if err != nil {
 		return "push+" + partType + "+failed+(device+unreachable)", false
 	}
@@ -606,11 +606,8 @@ func (s *Server) runCLI(ctx context.Context, topicPrefix, command, payload strin
 	return "", true
 }
 
-// secretProvisionFields is the ordered storage-field list to provision to a
-// device: the scalars, then one wifi.password:<ssid> per configured network,
-// then the legacy bare wifi.password for any pre-per-SSID stored row. reveal
-// skips the ones that are not stored, so unconfigured / absent fields drop out.
-// out: field list, primary SSID (for the legacy remap; "" if no networks).
+// secretProvisionFields is the ordered storage-field list to provision: the scalars, then one
+// wifi.password:<ssid> per configured network. A bare legacy row is inert. out: fields, primary SSID.
 func secretProvisionFields(ssids []string) ([]string, string) {
 	fields := append([]string{}, service.ScalarSecretFields...)
 	for _, ssid := range ssids {
@@ -618,7 +615,6 @@ func secretProvisionFields(ssids []string) ([]string, string) {
 			fields = append(fields, f)
 		}
 	}
-	fields = append(fields, service.LegacyWifiPassword)
 	primary := ""
 	if len(ssids) > 0 {
 		primary = ssids[0]
@@ -654,7 +650,8 @@ func provisionDeviceSecrets(fields []string, ssid string,
 			out.AbortMsg = "secret+decrypt+failed"
 			return out
 		}
-		if !found {
+		// secret.set with "" clears NVS on the firmware (C1), so empty counts as unset.
+		if !found || value == "" {
 			out.SkippedUnset = append(out.SkippedUnset, field)
 			continue
 		}
@@ -679,6 +676,10 @@ func provisionDeviceSecrets(fields []string, ssid string,
 // in: ctx, topic prefix, firmware field key, plaintext value.
 // out: user-facing short message (if !ok), ok flag.
 func (s *Server) pushSecret(ctx context.Context, topicPrefix, fwField, value string) (string, bool) {
+	// Never sent empty: the firmware takes that as a clear, which is secret.clear's job.
+	if value == "" {
+		return "secret+empty+not+sent", false
+	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -687,7 +688,7 @@ func (s *Server) pushSecret(ctx context.Context, topicPrefix, fwField, value str
 	payload = append(payload, '\n')
 	payload = append(payload, []byte(value)...)
 
-	resp, err := s.mqtt.CLIRequestRaw(cctx, topicPrefix, "secret.set", payload)
+	resp, err := s.mqtt.CLIRequestFields(cctx, topicPrefix, "secret.set", payload)
 	if err != nil {
 		return "push+secret+failed+(device+unreachable)", false
 	}
