@@ -637,3 +637,57 @@ func TestStagedWrite_MaskedCopyThatDiffersFails(t *testing.T) {
 		})
 	}
 }
+
+// Masked firmware serves the masked size after a timed-out fs.mv too, so the
+// readback compares masked for the staging copy and the destination alike.
+func TestStagedWrite_MaskedRenameTimeoutReadsBackTheOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		renamed  bool
+		served   string
+		wantErr  string
+		wantLive string
+	}{
+		{"rename landed", true, maskedServed, "", maskedWritten},
+		{"rename never ran", false, maskedServed, "timed out", oldConfig},
+		{"destination differs", true, strings.Replace(maskedServed, `"h"`, `"other"`, 1), "rename outcome is unknown", maskedWritten},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeFS(map[string]string{"/config.json": oldConfig})
+			sizeChecked := false
+			fs.view = func(_, body string) string {
+				if body == maskedWritten {
+					if sizeChecked {
+						return tc.served
+					}
+					return maskedServed
+				}
+				return body
+			}
+			fs.hook = func(_ int, cmd, _ string) *fakeReply {
+				if cmd != "fs.mv" {
+					return nil
+				}
+				sizeChecked = true
+				if tc.renamed {
+					fs.files["/config.json"] = fs.files["/config.json.new"]
+					delete(fs.files, "/config.json.new")
+				}
+				return &fakeReply{err: errTimeout}
+			}
+			err := stagedWrite(context.Background(), fs, 50*time.Millisecond, "p", "/config.json", []byte(maskedWritten))
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("stagedWrite = %v, want success read back", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+			if err != nil && tc.wantErr == "timed out" && strings.Contains(err.Error(), "unknown") {
+				t.Fatalf("err = %v, want the staging copy read as no rename", err)
+			}
+			if fs.files["/config.json"] != tc.wantLive {
+				t.Fatalf("config.json = %q, want %q", fs.files["/config.json"], tc.wantLive)
+			}
+		})
+	}
+}

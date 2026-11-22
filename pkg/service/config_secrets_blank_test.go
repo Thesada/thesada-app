@@ -391,6 +391,12 @@ func TestBlankMaskMarkers(t *testing.T) {
 			t.Errorf("%s changed to %s", same, got)
 		}
 	}
+	// Trailing input after the object is not JSON, so the write guard still refuses it.
+	for _, junk := range []string{`{"mqtt":{"password":"(set)"}}]`, `{"mqtt":{"password":"(set)"}}}`, `{"mqtt":{"password":"(set)"}} {}`} {
+		if got := BlankMaskMarkers(junk); got != junk || HasMaskMarker(junk) {
+			t.Errorf("%s changed to %s, want it unchanged", junk, got)
+		}
+	}
 }
 
 // The firmware serves a config-shaped file masked and pretty printed. A copy

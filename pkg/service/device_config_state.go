@@ -34,34 +34,44 @@ func (s *DeviceFilesService) MarkConfigChanged(ctx context.Context, tenantID str
 	return err
 }
 
-// MarkConfigChanging records a change that may land for up to window: the stamp is now plus
-// window, or a later stamp already set, so reads and markers in it stay stale without a closing mark.
-// in: ctx, tenant, device, window. out: the stamp it replaced, for EndConfigChange, error.
-func (s *DeviceFilesService) MarkConfigChanging(ctx context.Context, tenantID string, devicePk uuid.UUID, window time.Duration) (*time.Time, error) {
-	var prev *time.Time
-	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
-		// Locked first, so the stamp is taken after a refresh holding the row committed.
-		if err := lockDeviceConfig(ctx, tx, devicePk, &prev, nil); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx,
-			`UPDATE devices SET config_changed_at = GREATEST(config_changed_at, clock_timestamp() + $2 * interval '1 millisecond') WHERE id = $1`,
-			devicePk, window.Milliseconds())
-		return err
-	})
-	return prev, err
+// ConfigChange is one open MarkConfigChanging window: the stamp it replaced and the stamp it set.
+// The zero value closes nothing.
+type ConfigChange struct {
+	prev *time.Time
+	set  time.Time
 }
 
-// EndConfigChange closes the window a MarkConfigChanging opened: the stamp is now, or prev, the
-// stamp that mark replaced, while prev is still ahead (a bulk OTA). in: ctx, tenant, device, prev. out: error.
-func (s *DeviceFilesService) EndConfigChange(ctx context.Context, tenantID string, devicePk uuid.UUID, prev *time.Time) error {
+// MarkConfigChanging records a change that may land for up to window: the stamp is now plus
+// window, or just past a later stamp already set, so reads and markers in it stay stale without a closing mark.
+// in: ctx, tenant, device, window. out: the window, for EndConfigChange, error.
+func (s *DeviceFilesService) MarkConfigChanging(ctx context.Context, tenantID string, devicePk uuid.UUID, window time.Duration) (ConfigChange, error) {
+	var c ConfigChange
+	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		// Locked first, so the stamp is taken after a refresh holding the row committed.
+		if err := lockDeviceConfig(ctx, tx, devicePk, &c.prev, nil); err != nil {
+			return err
+		}
+		// Always moves, so an earlier mark's close sees its stamp replaced and leaves it.
+		return tx.QueryRow(ctx,
+			`UPDATE devices SET config_changed_at = GREATEST(config_changed_at + interval '1 microsecond', clock_timestamp() + $2 * interval '1 millisecond') WHERE id = $1 RETURNING config_changed_at`,
+			devicePk, window.Milliseconds()).Scan(&c.set)
+	})
+	return c, err
+}
+
+// EndConfigChange closes the window c opened: the stamp is now, or the stamp c replaced while
+// that is still ahead (a bulk OTA). A later mark's stamp stays. in: ctx, tenant, device, c. out: error.
+func (s *DeviceFilesService) EndConfigChange(ctx context.Context, tenantID string, devicePk uuid.UUID, c ConfigChange) error {
+	if c.set.IsZero() {
+		return nil
+	}
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		if err := lockDeviceConfig(ctx, tx, devicePk, nil, nil); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx,
-			`UPDATE devices SET config_changed_at = GREATEST(clock_timestamp(), $2::timestamptz) WHERE id = $1`,
-			devicePk, prev)
+			`UPDATE devices SET config_changed_at = GREATEST(clock_timestamp(), $2::timestamptz) WHERE id = $1 AND config_changed_at = $3`,
+			devicePk, c.prev, c.set)
 		return err
 	})
 }

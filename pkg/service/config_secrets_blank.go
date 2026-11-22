@@ -19,7 +19,9 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"regexp"
 	"slices"
@@ -383,7 +385,11 @@ func decodeConfig(content string) (any, bool) {
 	dec := json.NewDecoder(strings.NewReader(content))
 	dec.UseNumber()
 	var v any
-	if dec.Decode(&v) != nil || dec.More() {
+	if dec.Decode(&v) != nil {
+		return nil, false
+	}
+	// More stops at a closing delimiter, so only EOF proves nothing trails the value.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, false
 	}
 	return v, true
