@@ -33,6 +33,62 @@ The rule itself is the pure `snapshotAllowed(pairedAt)` in
 lookup failure resolves to unpaired and logs the skip - not a silent
 fallback: guessing "paired" costs a burst of refused CLI requests.
 
+### Masked firmware: a read marker is never a secret value
+
+Firmware with secret masking reads every secret field back as `(set)`, or
+`(empty)` for an empty string, on `config.dump`, `fs.cat`, Load from device
+and every other read. Older firmware still sends the values. The fleet runs
+both, so no rule here depends on the firmware version.
+
+| Marker seen in | What the app does |
+|---|---|
+| a device read (drift pull, CLI `config.dump`, Load from device, confirmed write) | not a secret: gap fill and backfill skip it. `(empty)` on a WiFi password marks the network open like `""`, `(set)` does not. The stored snapshot blanks it like a value |
+| Set on the secrets page, a tenant default, `SetSecret` | refused with `ErrMarkerSecret`, as the firmware's `secret.set` refuses it |
+| a posted `config.json` (editor save, snapshot restore) | sent as `""`, never as the marker, in the handler and again in the write worker. The write guard then runs for that field as for any blank one |
+| Load from device | shown blank in the editor, as snapshots are |
+| a drift `config.dump` whose sha differs from `config_hash` | stored under the device `config_hash`, as the masked bytes never hash to it. Without a marker under a secret key a mismatch is still dropped |
+| the size check of a staged write | a reported size other than the content's is read back whole and passes only when the copy equals the written content masked the same way |
+
+A marker is matched exactly: `(set)x`, `(SET)` or a marker under a key that
+is not secret is a value. A real secret equal to a marker cannot be stored on
+masked firmware, so the app refuses it everywhere.
+
+The secret key pattern is the firmware list (`config_mask_policy.h`): long
+words as a suffix (`password`, `passwd`, `secret`, `token`, `key`,
+`passphrase`, `credential`, `claim_code`), short ones as the whole key or
+after `_ . -` (`pass`, `pwd`, `psk`, `seed`, `sim_pin`). A bare `pin` is a GPIO
+number on the device.
+
+Drift stays a sha compare: a changed non-secret key, or a secret set or
+cleared in `config.json`, changes `config_hash` and pulls again. A secret in
+NVS never shows in `config.json` and is asked through `secret.info`.
+
+Not covered: a whole-file save of a config holding `sim_pin` or a LoRa `psk`
+on masked firmware is refused by the guard, as the app cannot ask the device
+about them. Push config keys still works. A `fs.mv` that timed out reads its
+destination back byte for byte, so on masked firmware it reports unknown.
+
+How verified: `pkg/service/config_secrets_blank_test.go`
+(`TestMaskMarkers_BothFirmwareGenerations`, `TestBlankSecretFields_MarkerIsBlank`,
+`TestBlankMaskMarkers`, `TestMaskedConfigEqual`, `TestSensitiveConfigKey`),
+`pkg/service/secret_fields_test.go` (`TestCheckDeviceSecret_RefusesMarkers`),
+`pkg/service/device_files_secrets_integration_test.go`
+(`a_masked_read_stores_no_secret`, `a_marker_is_never_a_secret_value`),
+`pkg/mqtt/broker_integration_test.go`
+(`masked_dump_is_stored_under_the_device_sha`,
+`marker_under_a_plain_key_is_still_a_sha_mismatch`,
+`TestBrokerHandleInfo_MaskedDumpIsInSync`),
+`pkg/web/admin_config_write_test.go`
+(`TestStagedWrite_MaskedCopyPassesTheSizeCheck`,
+`TestStagedWrite_MaskedCopyThatDiffersFails`),
+`pkg/web/admin_config_masked_integration_test.go` (`TestMaskedConfigWrite`
+for both firmware generations, `TestMaskedConfigLoad`).
+
+Dated 2026-11-19
+
+Source: `pkg/service/config_secrets_blank.go`, `pkg/service/secret.go`,
+`pkg/mqtt/mqtt_snapshot.go`, `pkg/web/admin_config.go`.
+
 ### A device file write never leaves the live file half written
 
 This holds for every device file write: the config editor and snapshot
@@ -42,7 +98,8 @@ at a time. A second write to a device while one runs gets 409 before
 anything is sent. The chunks go to `<path>.new`, never to `<path>`. The
 app sends `fs.mv <path>.new <path>` only after every chunk ack named the
 staged path with its full byte count and a correlated `fs.cat` reports a committed
-size equal to the content, and LittleFS applies that rename as one
+size equal to the content (or, on masked firmware, the staged copy read back
+equals the content masked the same way), and LittleFS applies that rename as one
 metadata commit. A failed, short or unanswered step removes
 `<path>.new` with `fs.rm` and marks the request failed, so
 `/config.json` stays the last good file and the next boot does not fall
@@ -67,6 +124,8 @@ How enforced: `claimDeviceWrite` and `stagedWrite` in
 (command sequence, every failure step, ack path, size check, `/sd`) and
 `admin_config_integration_test.go` (the same over a real broker, plus
 the 409 for an overlapping write).
+
+Dated 2026-11-19
 
 ### A stored device reply echoes its request id
 
@@ -324,6 +383,9 @@ takes the slot back. The server holds that lock too: an admin save
 (`source` `editor` or `push`, nothing else) over a slot whose latest save
 has `source` `tenant` answers 409 unless the body carries `takeover`, which
 only the editor's starter button sets. The audit row records `takeover`.
+The source check sits in the upsert itself (`SaveUnlessSource`), so a
+tenant save that commits during an admin save without `takeover` is kept,
+the admin save answers 409 and writes no history row.
 
 An operator saving over a managed slot hands it to the tenant editor, but
 only with at least one rule: a workspace that parses to zero rules over a
@@ -335,11 +397,12 @@ rule blocks.
 How enforced: `pkg/rulesgen` goldens, a hostile-string golden and a Lua run
 of the generated script against firmware mocks (skipped without `lua`),
 `TestDeviceRules_RolesSaveAndRefusals`, `TestDeviceRules_PushWritesServerLuaAndReloads`,
-`TestDeviceRules_OperatorHandoverNeedsRules`, `TestAdminRules_TenantSlotNeedsTakeover`, `TestTenantRulesScriptSeedsRootForHandover`
+`TestDeviceRules_OperatorHandoverNeedsRules`, `TestAdminRules_TenantSlotNeedsTakeover`, `TestAdminRules_TenantSaveRacingAnAdminSaveWins`, `TestTenantRulesScriptSeedsRootForHandover`
 (node harness), and the cross-tenant cases for every `/devices/{id}/rules` route.
 
-Source: `pkg/rulesgen/`, `pkg/web/device_rules.go`,
-`pkg/web/static/js/blockly-tenant-rules.js`.
+Dated 2026-11-20
+Source: `pkg/rulesgen/`, `pkg/web/device_rules.go`, `pkg/web/admin_rules.go`,
+`pkg/service/device_rule_workspaces.go`, `pkg/web/static/js/blockly-tenant-rules.js`.
 
 ## Tenant isolation
 
@@ -1016,11 +1079,11 @@ Rules:
 | A marker is a fact about the file only. `SetSecret`, provisioning and Clear on device never touch markers | what NVS holds is the guard's own question, asked at write time |
 | The `config.json` write guard passes an empty WiFi password only for a current marker and a correlated `secret.info` reporting nothing in NVS for that field. It passes an empty scalar secret (`mqtt.password`, `telegram.bot_token`, `web.password`, `wifi.ap_password`) only when a correlated `secret.info` reports it in NVS. One `secret.info` per guard run. NVS holding a WiFi password, a scalar not in NVS, `secret.info` failing, answering without the `req_id` or not telling two SSIDs apart refuses with its own message naming the field. `null` counts as empty. An empty sensitive leaf the store has no field for (`cellular.sim_pin`, `lora.meshtastic.psk`) is refused by its path, since nothing on the device can be asked about it. The guard works the same with the KEK unset | the marker describes the file the write replaces, NVS is what the firmware reads first, so an empty scalar beside an NVS value changes nothing on the device |
 | The guard runs at enqueue and again in the worker under the claim, right before the first chunk, each time with its own `secret.info`. A marker lookup has a 10 s deadline, `secret.info` 5 s, and the worker renews its claim after the guard or sends nothing | a marker can go stale and NVS can gain a password while a write waits, and a stalled lookup must not let a second write take the device |
-| `config_changed_at` is set by every `config.json` write (after the write-time guard and before the first chunk, nothing is sent when that fails, and again once the rename is confirmed, before its own refresh), every config-changing CLI command (before it is sent and again after it answers) and a failed or unknown rename. The mark before sending stamps now plus the claim's lifetime, the later marks stamp now | a write whose refresh then fails still leaves every older marker stale, and a read of the old file during the change stays stale when the mark after it fails, so the guard fails closed |
+| `config_changed_at` is set by every `config.json` write (after the write-time guard and before the first chunk, nothing is sent when that fails, and again once the rename is confirmed, before its own refresh), every config-changing CLI command (before it is sent and again after it answers) and a failed or unknown rename. The mark before sending stamps now plus the claim's lifetime, the later marks stamp now, or the stamp the first mark replaced while that is still ahead. No mark moves the stamp earlier than one still ahead | a write whose refresh then fails still leaves every older marker stale, and a read of the old file during the change stays stale when the mark after it fails, so the guard fails closed |
 | A device read carries its start, taken from the database clock before the request goes out. A stale read writes nothing, is logged as `device.read.stale_dropped`, and `UpsertFromDevice` reports it not stored (nil error), so the drift pull logs `device_file saved` only for a stored snapshot | the check, the legacy re-key, the gap fill, the markers and the snapshot run in one transaction under `SELECT ... FOR UPDATE` on the device row, so a change cannot land between them, and a refresh that fails part way rolls back whole |
 | A failed store after a confirmed `config.json` write marks the request failed. For any other file the snapshot row is not load-bearing: the failure is logged and the write stands, so the rules push still reloads | the guard depends on the `config.json` refresh, nothing depends on a script snapshot |
 | A config-changing CLI command (`config.*` apart from `config.dump`, `fs.format`, `ota.*` apart from `ota.status` as a firmware update can migrate the file, any `fs.*` naming `config.json` or holding `*` or `?`, since a glob in a `/.` directory reaches past the firmware's root skip) takes the device write claim, 409 while a write holds it | a staged write that already passed the guard cannot be overtaken by a command that sets a password |
-| A bulk OTA from the devices page takes the device write claim for the publish (a device with a write running is skipped and counted failed) and stamps `config_changed_at` now plus 15 minutes before it publishes, nothing is sent when that fails | the device downloads, flashes and reboots after the publish where the app cannot see it, and the new firmware can migrate `config.json` |
+| A bulk OTA from the devices page takes the device write claim for the publish (a device with a write running is skipped and counted failed) and stamps `config_changed_at` now plus 15 minutes before it publishes, nothing is sent when that fails. A config write or command inside those 15 minutes ends its own window, not the OTA's, so its confirmed write is not stored as a read until the OTA window ends | the device downloads, flashes and reboots after the publish where the app cannot see it, and the new firmware can migrate `config.json` |
 | The bare legacy `wifi.password` row is re-keyed once to `wifi.password:<primary SSID>`: decrypt under the old AAD, encrypt under the new one with `rekeyed = true`, delete the bare row, in one tx under the device row lock. Every other write of a device row (Set, gap fill) stores `rekeyed = false`, so the flag means the re-key wrote the row and nothing since (0049, rows before it read false). A per-SSID row already there wins and the bare row is deleted, logged with device and field. When the stored `config.json` (the snapshot before this read or confirmed write) names a primary SSID other than the read's, the bare row is deleted and audited `device_secret.legacy_wifi_dropped`, never re-keyed. Blind spot: the bare row carries no SSID, so a primary that changed before the first snapshot the app holds, or changed and changed back between two reads, reads as unchanged. No stored snapshot, or one that names no network, also re-keys. A tenant default for that network does not count as such a row: the legacy value becomes a device override, so the store matches what the device holds, and later tenant rotations of that network skip the device until the override is removed. A bare row left (no SSID known, or it does not decrypt) is inert: not provisioned, not read, no override in `ProvisionTargets` / `ProvisionTargetCounts`, listed on the secrets page for Clear, refused by Clear on device | the bare key names no network, and three operations each used to infer one |
 | Provisioning never sends an empty or unset value, and `pushSecret` refuses `""` itself | `secret.set <field> ""` clears NVS and can take a remote device off WiFi |
 | A tenant default fan-out checks each target for an override again at push time, holding the device row lock across the check and the push (`PushUnlessOverridden`). A device overridden since `ProvisionTargets` is skipped and counted `overridden`, not `pushed`. Each target runs under its own `fanOutPerDeviceBudget` (15 s) for the lock wait and the push, so a device stuck on its row lock is counted `skipped` alone and the sweep goes on | `SetSecret` takes the same lock, so an override cannot land between the check and the push and be overwritten in NVS by the default |
@@ -1048,12 +1111,13 @@ How verified, per cell:
 | Stale read | `a_stale_read_writes_nothing`, `TestBrokerDriftStaleReadLogsNoSave`, `an_older_read_after_a_newer_one_is_dropped`, `a_marker_older_than_a_config_change_does_not_count`, `a_new_service_instance_still_refuses_a_stale_marker`, `TestLegacyWifi/a_stale_read_rekeys_nothing` |
 | Set | `set_secret_does_not_change_the_file_fact`, `set_secret_beside_a_read_does_not_deadlock`, `an_empty_value_is_not_a_secret`, `TestLegacyWifi/set_secret_refuses_the_bare_field` |
 | Guard | `pkg/web/open_wifi_guard_integration_test.go` (`guard_passes_when_secret_info_reports_nothing_in_nvs`, `guard_refuses_when_nvs_holds_a_password`, `guard_refuses_when_secret_info_is_uncorrelated`, `guard_refuses_when_secret_info_fails`, `a_password_provisioned_after_the_open_read_is_refused_at_write_time`), `pkg/web/admin_config_integration_test.go` (`TestAdminConfigWrite_GuardRunsAgainAtWriteTime`, `TestAdminConfigWrite_StaleMarkerRefusedAfterRestart`, `TestAdminConfigLoad_RefreshesMarkers`), `pkg/web/admin_config_blank_integration_test.go` (`TestBlankSecretGuard_Scalars`, `TestBlankSecretGuard_StoreOff`), `pkg/web/admin_config_restore_test.go`, `pkg/service/config_secrets_blank_test.go` (`TestSensitiveConfigKey`, `TestBlankSecretFields_NullIsEmpty`) |
-| Write, CLI command, rename | `TestAdminConfigWrite_RefreshesTheSecretStore`, `TestAdminConfigCmd_ConfigRenameMakesMarkersStale`, `TestAdminConfigCmd_ConfigChangeIs409WhileAWriteRuns`, `TestAdminConfigWrite_UnknownRenameMarksConfigChanged`, `TestAdminConfigWrite_MarksChangeBeforeSending`, `TestAdminConfigWrite_FailedMarkAfterRenameKeepsMarkersStale`, `TestAdminConfigWrite_SnapshotFailureKeepsOtherWrites` |
+| Write, CLI command, rename | `TestAdminConfigWrite_RefreshesTheSecretStore`, `TestAdminConfigCmd_ConfigRenameMakesMarkersStale`, `TestAdminConfigCmd_ConfigChangeIs409WhileAWriteRuns`, `TestAdminConfigWrite_UnknownRenameMarksConfigChanged`, `TestAdminConfigWrite_MarksChangeBeforeSending`, `TestAdminConfigWrite_FailedMarkAfterRenameKeepsMarkersStale`, `TestAdminConfigWrite_SnapshotFailureKeepsOtherWrites`, `TestAdminBulkOTA_CountsAsAConfigChange`, `TestAdminBulkOTA_LaterConfigChangeKeepsTheWindow` |
 | Provision | `pkg/web/provision_test.go`, `TestAdminDeviceSecretsProvision_Integration`, `pkg/web/tenant_fanout_override_integration_test.go` (`an_override_after_the_target_list_is_skipped`, `an_override_write_waits_for_a_running_push`, `TestTenantFanOutDeviceBudget`) |
 | Clear on device | `TestAdminDeviceSecretsClearDevice`, `TestAdminDeviceSecretsClearDevice_DropsWifiRow`, `pkg/web/clear_on_device_integration_test.go` (`a_tenant_default_password_is_refused`, `an_override_over_a_tenant_default_is_cleared_and_dropped`, `a_failed_row_drop_is_reported`, `a_password_saved_during_the_clear_survives`), `TestLegacyWifi/a_password_saved_after_the_mark_is_kept`, `TestLegacyWifi/a_rekey_during_the_clear_is_dropped`, `TestLegacyWifi/a_rekey_then_a_new_save_during_the_clear_keeps_the_save`, `TestLegacyWifi/a_rekey_then_a_same_value_save_during_the_clear_keeps_the_save`, `TestLegacyWifi/a_same_value_save_then_a_rekey_during_the_clear_keeps_the_save`, `TestLegacyWifi/a_same_value_resave_of_the_marked_row_is_kept`, `TestLegacyWifi/the_mark_reads_both_rows_under_the_device_lock`, `TestLegacyWifi/without_a_legacy_row_a_clear_drops_and_a_save_is_kept`, `TestLegacyWifi/a_verified_clear_of_the_primary_drops_the_bare_row_too`, `TestLegacyWifi/a_verified_clear_without_a_stored_config_drops_the_bare_row`, `TestLegacyWifi/a_verified_clear_with_no_networks_stored_drops_the_bare_row`, `TestLegacyWifi/a_verified_clear_of_another_network_keeps_the_bare_row` |
 | Legacy re-key and sweep | `pkg/service/legacy_wifi_integration_test.go` (`TestLegacyWifi`, `TestLegacyWifi/only_the_rekey_marks_its_row`, `TestLegacyWifiSweep`: with and without a snapshot, with and without a per-SSID row, flagged, idempotent), `migrations/secret_rekeyed_integration_test.go` (`TestMigration0049_RekeyedFlag`), `pkg/service/secret_tenant_integration_test.go` (`a_bare_device_row_is_not_an_override_for_a_per_SSID_default`, `a_planted_bare_tenant_default_is_never_inherited`) |
 | Reassign | `a_reassign_to_the_same_tenant_keeps_device_secrets`, `a_read_after_a_reassign_stores_under_the_new_tenant`, `migrations/open_networks_integration_test.go` |
 
+Dated 2026-11-20
 Source: `pkg/service/device_config_state.go`, `pkg/service/secret.go`,
 `pkg/service/secret_legacy_wifi.go`, `pkg/web/admin_config.go`,
 `pkg/web/admin_pair.go`, `pkg/web/admin_secrets.go`,

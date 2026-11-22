@@ -212,6 +212,7 @@ func (s *Server) guardCLI(reqID uuid.UUID, site, deviceID string, body func()) {
 // CLIRequestTimeout deadline below.
 func (s *Server) runCLICmd(parentCtx context.Context, reqID, claim uuid.UUID, device *service.Device, topicPrefix, command, payload string, userID *uuid.UUID) {
 	changes := claim != uuid.Nil
+	var prevChange *time.Time
 	if changes {
 		defer s.releaseDeviceWrite(device.ID, claim)
 		if !s.renewDeviceWrite(device.ID, claim, cmdClaimTTL(s.cfg.CLIRequestTimeout)) {
@@ -219,7 +220,8 @@ func (s *Server) runCLICmd(parentCtx context.Context, reqID, claim uuid.UUID, de
 			return
 		}
 		// Reads already running turn stale. Without the mark the command is not sent.
-		if err := s.markConfigChanging(parentCtx, device, cmdClaimTTL(s.cfg.CLIRequestTimeout)); err != nil {
+		var err error
+		if prevChange, err = s.markConfigChanging(parentCtx, device, cmdClaimTTL(s.cfg.CLIRequestTimeout)); err != nil {
 			s.releaseDeviceWrite(device.ID, claim)
 			s.cliRequests.markError(reqID, reqStatusError, "could not record the config change, nothing was sent")
 			return
@@ -240,7 +242,7 @@ func (s *Server) runCLICmd(parentCtx context.Context, reqID, claim uuid.UUID, de
 	resp, err := s.mqtt.CLIRequest(ctx, topicPrefix, command, payload)
 	if changes {
 		// A read served while the command ran is stale too.
-		if merr := s.markConfigChanged(parentCtx, device); merr != nil {
+		if merr := s.endConfigChange(parentCtx, device, prevChange); merr != nil {
 			slog.Error("mark config changed after a CLI command", "device", device.DeviceID, "err", merr)
 		}
 		// Released before the entry turns terminal, so a write posted on done is not a 409.
@@ -271,15 +273,17 @@ func cmdClaimTTL(step time.Duration) time.Duration {
 	return step + 2*snapshotUpsertTimeout + time.Minute
 }
 
-// markConfigChanged records a config.json change on the device under its own deadline.
-// in: parent ctx, device. out: error.
-func (s *Server) markConfigChanged(parentCtx context.Context, device *service.Device) error {
-	return s.markConfigChanging(parentCtx, device, 0)
+// endConfigChange closes the window markConfigChanging opened, under its own deadline.
+// in: parent ctx, device, the stamp that mark replaced. out: error.
+func (s *Server) endConfigChange(parentCtx context.Context, device *service.Device, prev *time.Time) error {
+	ctx, cancel := context.WithTimeout(parentCtx, snapshotUpsertTimeout)
+	defer cancel()
+	return s.services.DeviceFiles.EndConfigChange(ctx, device.TenantID, device.ID, prev)
 }
 
-// markConfigChanging is markConfigChanged for a change that may land within window, the
-// claim it runs under. A later markConfigChanged closes the window. out: error.
-func (s *Server) markConfigChanging(parentCtx context.Context, device *service.Device, window time.Duration) error {
+// markConfigChanging records a config change that may land within window, the claim it runs
+// under, under its own deadline. out: the stamp it replaced, for endConfigChange, error.
+func (s *Server) markConfigChanging(parentCtx context.Context, device *service.Device, window time.Duration) (*time.Time, error) {
 	ctx, cancel := context.WithTimeout(parentCtx, snapshotUpsertTimeout)
 	defer cancel()
 	return s.services.DeviceFiles.MarkConfigChanging(ctx, device.TenantID, device.ID, window)
@@ -418,6 +422,9 @@ func (s *Server) handleAdminDeviceConfigWrite(w http.ResponseWriter, r *http.Req
 		http.Error(w, "path and content required", http.StatusBadRequest)
 		return
 	}
+	if service.IsConfigJSON(req.Path) {
+		req.Content = service.BlankMaskMarkers(req.Content)
+	}
 	if msg := firmwareRefusal(device, "Saving a file"); msg != "" {
 		http.Error(w, msg, http.StatusConflict)
 		return
@@ -480,8 +487,11 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID, claim uuid.UUID, 
 		return
 	}
 	configPath := service.IsConfigJSON(path)
+	var prevChange *time.Time
 	// Again at write time: the markers may have gone stale since the enqueue check.
 	if configPath {
+		// A read marker goes out as "", which the guard then checks on the device.
+		content = service.BlankMaskMarkers(content)
 		if msg := configWriteRefusal(path, content, s.blankSecretLookup(parentCtx, device, content)); msg != "" {
 			s.releaseDeviceWrite(device.ID, claim)
 			s.cliRequests.markError(reqID, reqStatusError, msg)
@@ -494,7 +504,8 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID, claim uuid.UUID, 
 		}
 		// After the guard, which needs the markers current. Without the mark nothing is sent.
 		// It spans the claim, so a read of the old file stays stale if the mark after the rename fails.
-		if err := s.markConfigChanging(parentCtx, device, writeClaimTTL(s.cfg.CLIRequestTimeout, len(content))); err != nil {
+		var err error
+		if prevChange, err = s.markConfigChanging(parentCtx, device, writeClaimTTL(s.cfg.CLIRequestTimeout, len(content))); err != nil {
 			s.releaseDeviceWrite(device.ID, claim)
 			s.cliRequests.markError(reqID, reqStatusError, "could not record the config change, nothing was sent")
 			return
@@ -506,7 +517,7 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID, claim uuid.UUID, 
 		errors.As(err, &f)
 		// Closes the window either way: an unknown rename counts as a change, a failed one changed nothing.
 		if configPath {
-			if merr := s.markConfigChanged(parentCtx, device); merr != nil {
+			if merr := s.endConfigChange(parentCtx, device, prevChange); merr != nil {
 				slog.Error("mark config changed after a failed write", "device", device.DeviceID, "err", merr)
 			}
 		}
@@ -523,12 +534,12 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID, claim uuid.UUID, 
 	h := sha256.Sum256(contentBytes)
 	hashHex := hex.EncodeToString(h[:])
 	// stagedWrite verified the bytes on the device, so they are device truth from here on.
-	if err := s.storeWritten(parentCtx, device, path, content, hashHex, userID); err != nil {
+	if err := s.storeWritten(parentCtx, device, path, content, hashHex, userID, prevChange); err != nil {
 		slog.Error("write device_file upsert failed", "path", path, "err", err)
 		// Only config.json feeds the guard. Elsewhere the row is a snapshot and the write stands.
 		if configPath {
 			// Once more, so Load from device is not held off until the window ends.
-			if merr := s.markConfigChanged(parentCtx, device); merr != nil {
+			if merr := s.endConfigChange(parentCtx, device, prevChange); merr != nil {
 				slog.Error("mark config changed after a failed store", "device", device.DeviceID, "err", merr)
 			}
 			s.releaseDeviceWrite(device.ID, claim)
@@ -549,15 +560,15 @@ func (s *Server) runCLIWrite(parentCtx context.Context, reqID, claim uuid.UUID, 
 	})
 }
 
-// storeWritten stores confirmed written content. config.json is marked changed first, in its
-// own tx, so a failed refresh still leaves older markers stale. out: error.
-func (s *Server) storeWritten(parentCtx context.Context, device *service.Device, path, content, hashHex string, userID *uuid.UUID) error {
+// storeWritten stores confirmed written content. config.json closes its change window first, in
+// its own tx, so a failed refresh still leaves older markers stale. out: error.
+func (s *Server) storeWritten(parentCtx context.Context, device *service.Device, path, content, hashHex string, userID *uuid.UUID, prevChange *time.Time) error {
 	ctx, cancel := context.WithTimeout(parentCtx, snapshotUpsertTimeout)
 	defer cancel()
 	if !service.IsConfigJSON(path) {
 		return s.services.DeviceFiles.Upsert(ctx, device.TenantID, device.ID, path, content, hashHex, "write", userID)
 	}
-	if err := s.services.DeviceFiles.MarkConfigChanged(ctx, device.TenantID, device.ID); err != nil {
+	if err := s.services.DeviceFiles.EndConfigChange(ctx, device.TenantID, device.ID, prevChange); err != nil {
 		return err
 	}
 	start, err := s.services.DeviceFiles.ReadStart(ctx, device.TenantID)
@@ -649,10 +660,15 @@ func writeChunkCount(n int) int { return (n + writeChunkSize - 1) / writeChunkSi
 const readbackChunkSize = 2048
 
 // writeSteps is the CLI round trips a write may take: chunks, fs.cat, fs.mv,
-// the staging check, then fs.rm or a full readback of the destination.
+// the staging check, then fs.rm or a full readback of the destination, plus a
+// read of a masked staged copy.
 func writeSteps(n int) int {
-	return writeChunkCount(n) + 3 + max(1, (n+readbackChunkSize-1)/readbackChunkSize)
+	return writeChunkCount(n) + 3 + max(1, (n+readbackChunkSize-1)/readbackChunkSize) + maskedReadSteps(n)
 }
+
+// maskedReadSteps bounds the read of a masked staged copy of n bytes. Markers and
+// pretty printing grow the copy, escaping shrinks each chunk.
+func maskedReadSteps(n int) int { return max(1, (4*n+readbackChunkSize-1)/readbackChunkSize) }
 
 // configWriteRefusal stops a config.json write with empty secret fields, which would erase the device's secrets (#85).
 // An empty field passes only when check says so (#88). in: path, content, check (nil refuses all). out: message or "".
@@ -856,7 +872,7 @@ func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration
 	if f != nil {
 		return cleanup(f)
 	}
-	if resp.Total == nil || *resp.Total != len(content) {
+	if resp.Total == nil || (*resp.Total != len(content) && !maskedCopyMatches(step, cli, topicPrefix, staged, content, *resp.Total)) {
 		got := "no size"
 		if resp.Total != nil {
 			got = strconv.Itoa(*resp.Total) + " bytes"
@@ -879,6 +895,31 @@ func stagedWrite(parentCtx context.Context, cli cliSender, timeout time.Duration
 		return cleanup(&writeFailure{status: reqStatusError, msg: fmt.Sprintf("%s failed: %s", label, strings.Join(resp.Output, " "))})
 	}
 	return nil
+}
+
+// maskedCopyMatches reads the staged copy whole and compares it masked. Masked
+// firmware serves a config-shaped file with secrets as markers and reports that
+// size. in: step, sender, topic prefix, staged path, content, reported size. out: match.
+func maskedCopyMatches(step writeStep, cli cliSender, topicPrefix, staged string, content []byte, total int) bool {
+	if !strings.HasPrefix(strings.TrimSpace(string(content)), "{") {
+		return false
+	}
+	var b strings.Builder
+	for i, off := 0, 0; off < total; i++ {
+		if i == maskedReadSteps(len(content)) {
+			return false
+		}
+		resp, f := step("read back "+staged, func(ctx context.Context) (*mqtt.CLIResponse, error) {
+			return cli.CLIRequestStateful(ctx, topicPrefix, "fs.cat", fmt.Sprintf("%s %d %d", staged, off, readbackChunkSize))
+		})
+		if f != nil || resp.Total == nil || *resp.Total != total || resp.Data == nil ||
+			resp.Offset == nil || *resp.Offset != off || *resp.Data == "" {
+			return false
+		}
+		b.WriteString(*resp.Data)
+		off += len(*resp.Data)
+	}
+	return b.Len() == total && service.MaskedConfigEqual(string(content), b.String())
 }
 
 // writeStep is stagedWrite's bounded CLI round trip.
@@ -1008,7 +1049,9 @@ func (s *Server) runConfigLoad(parentCtx context.Context, reqID uuid.UUID, devic
 		cancel()
 	}
 	done := true
-	s.cliRequests.markDone(reqID, &mqtt.CLIResponse{Cmd: "fs.cat", OK: true, Done: &done, Data: &content})
+	// The editor shows a masked secret blank, as snapshots do.
+	shown := service.BlankMaskMarkers(content)
+	s.cliRequests.markDone(reqID, &mqtt.CLIResponse{Cmd: "fs.cat", OK: true, Done: &done, Data: &shown})
 }
 
 // handleAdminDeviceConfigHistory returns the version history for a device+path
