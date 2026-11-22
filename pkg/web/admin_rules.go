@@ -112,23 +112,20 @@ func (s *Server) handleAdminDeviceRulesWorkspacePOST(w http.ResponseWriter, r *h
 		http.Error(w, "invalid source", http.StatusBadRequest)
 		return
 	}
-	if !req.Takeover {
-		cur, err := s.services.RuleWorkspaces.Latest(r.Context(), device.TenantID, device.ID, req.Slot)
-		if err != nil {
-			slog.Error("rule.workspace.load_failed", "device", device.DeviceID, "slot", req.Slot, "err", err)
-			http.Error(w, "workspace load failed", http.StatusInternalServerError)
-			return
-		}
-		if cur != nil && cur.Source == tenantRuleSource {
-			http.Error(w, "these rules belong to the tenant editor, use the starter workspace to take them over", http.StatusConflict)
-			return
-		}
+	// Without takeover a tenant slot is kept, checked in the write itself.
+	keep := tenantRuleSource
+	if req.Takeover {
+		keep = ""
 	}
 	user := authmw.CurrentUser(r)
-	sha, err := s.services.RuleWorkspaces.Save(
+	sha, err := s.services.RuleWorkspaces.SaveUnlessSource(
 		r.Context(), device.TenantID, device.ID,
-		req.Slot, req.WorkspaceJSON, req.LuaContent, req.Source, &user.ID,
+		req.Slot, req.WorkspaceJSON, req.LuaContent, req.Source, &user.ID, keep,
 	)
+	if errors.Is(err, service.ErrRuleSlotHeld) {
+		http.Error(w, "these rules belong to the tenant editor, use the starter workspace to take them over", http.StatusConflict)
+		return
+	}
 	if err != nil {
 		slog.Error("rule.workspace.save_failed",
 			"user", user.Email, "device", device.DeviceID, "slot", req.Slot, "err", err)

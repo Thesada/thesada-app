@@ -208,6 +208,39 @@ func TestBrokerPullAndSnapshot(t *testing.T) {
 		}
 	})
 
+	// Masked firmware dumps (set) for a clear secret, so the dump never hashes
+	// to config_hash. The device sha stays the fingerprint.
+	t.Run("masked dump is stored under the device sha", func(t *testing.T) {
+		raw := `{"mqtt":{"password":"clear-pw","host":"h"}}`
+		masked := `{"mqtt":{"password":"(set)","host":"h"}}`
+		fd.Handle("config.dump", func(string, []byte) []mqtttest.Response {
+			return mqtttest.OK(masked)
+		})
+		c.pullAndSnapshot(tenant, devicePk, prefix, "config.json", "drift", sha256Hex(raw))
+		snap, err := env.Services.DeviceFiles.Latest(ctx, tenant, devicePk, "config.json")
+		if err != nil || snap == nil || snap.SHA256 != sha256Hex(raw) {
+			t.Fatalf("Latest(config.json) = %+v, %v; want the device sha", snap, err)
+		}
+		if strings.Contains(snap.Content, "(set)") || !strings.Contains(snap.Content, `"h"`) {
+			t.Errorf("stored content = %s, want the marker blanked and host kept", snap.Content)
+		}
+	})
+
+	t.Run("marker under a plain key is still a sha mismatch", func(t *testing.T) {
+		fd.Handle("config.dump", func(string, []byte) []mqtttest.Response {
+			return mqtttest.OK(`{"device":{"name":"(set)"}}`)
+		})
+		before, err := env.Services.DeviceFiles.Latest(ctx, tenant, devicePk, "config.json")
+		if err != nil || before == nil {
+			t.Fatalf("latest before: %+v err=%v", before, err)
+		}
+		c.pullAndSnapshot(tenant, devicePk, prefix, "config.json", "drift", sha256Hex("something else"))
+		after, err := env.Services.DeviceFiles.Latest(ctx, tenant, devicePk, "config.json")
+		if err != nil || after == nil || after.SHA256 != before.SHA256 {
+			t.Fatalf("snapshot changed: before=%s after=%+v err=%v", before.SHA256, after, err)
+		}
+	})
+
 	t.Run("non-object config content is not stored", func(t *testing.T) {
 		fd.Handle("config.dump", func(string, []byte) []mqtttest.Response {
 			return mqtttest.OK("ERROR: not json at all")
@@ -270,5 +303,55 @@ func TestBrokerDiscoverScripts(t *testing.T) {
 	}
 	if got := fd.Calls("fs.cat"); got != 1 {
 		t.Errorf("fs.cat calls = %d, want exactly 1 (known.lua skipped, notes.txt ignored)", got)
+	}
+}
+
+// A masked dump of an unchanged config is in sync: the next info pulls nothing.
+func TestBrokerHandleInfo_MaskedDumpIsInSync(t *testing.T) {
+	env := servicetest.Start(t)
+	broker := mqtttest.StartMosquitto(t)
+	c := startBrokerClient(t, env, broker)
+
+	const tenant = "brk5"
+	env.SeedTenant(t, tenant)
+	if err := env.Services.Tenants.Refresh(); err != nil {
+		t.Fatalf("refresh tenant slugs: %v", err)
+	}
+	prefix := "thesada/" + tenant + "/dev5"
+	ctx := context.Background()
+
+	raw := `{"device":{"name":"dev5"},"mqtt":{"password":"clear-pw"}}`
+	fd := mqtttest.NewFakeDevice(t, broker, prefix)
+	fd.Handle("config.dump", func(string, []byte) []mqtttest.Response {
+		return mqtttest.OK(`{"device":{"name":"dev5"},"mqtt":{"password":"(set)"}}`)
+	})
+	fd.Handle("fs.ls", func(string, []byte) []mqtttest.Response { return mqtttest.OK() })
+	devicePk, err := env.Services.Devices.Upsert(tenant, "dev5", "", "", "", prefix)
+	if err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	if _, err := env.Super.Exec(ctx, `UPDATE devices SET paired_at = now() WHERE id = $1`, devicePk); err != nil {
+		t.Fatalf("mark device paired: %v", err)
+	}
+	publish := func(fw string) {
+		payload, _ := json.Marshal(map[string]any{"firmware_version": fw, "hardware_type": "esp32-s3", "config_hash": sha256Hex(raw)})
+		if err := c.PublishRaw(prefix+"/info", payload, 0, false); err != nil {
+			t.Fatalf("publish info: %v", err)
+		}
+		waitFor(t, 15*time.Second, "info "+fw, func() bool {
+			var n int
+			_ = env.Super.QueryRow(ctx, `SELECT count(*) FROM devices WHERE id = $1 AND firmware_version = $2`, devicePk, fw).Scan(&n)
+			return n == 1
+		})
+	}
+	publish("26.06.1")
+	waitFor(t, 15*time.Second, "masked snapshot", func() bool {
+		sha, err := env.Services.DeviceFiles.LatestSHA(ctx, tenant, devicePk, "config.json")
+		return err == nil && sha == sha256Hex(raw)
+	})
+	publish("26.06.2")
+	time.Sleep(2 * time.Second)
+	if n := fd.Calls("config.dump"); n != 1 {
+		t.Fatalf("config.dump calls = %d, want 1: the second info must find the config in sync", n)
 	}
 }

@@ -30,21 +30,38 @@ func (s *DeviceFilesService) ReadStart(ctx context.Context, tenantID string) (ti
 // MarkConfigChanged records a config.json change on the device. Reads started earlier
 // store nothing, markers seen earlier stop counting. in: ctx, tenant, device. out: error.
 func (s *DeviceFilesService) MarkConfigChanged(ctx context.Context, tenantID string, devicePk uuid.UUID) error {
-	return s.MarkConfigChanging(ctx, tenantID, devicePk, 0)
+	_, err := s.MarkConfigChanging(ctx, tenantID, devicePk, 0)
+	return err
 }
 
 // MarkConfigChanging records a change that may land for up to window: the stamp is now plus
-// window, so reads and markers in it stay stale even when no closing MarkConfigChanged commits.
-// in: ctx, tenant, device, window. out: error.
-func (s *DeviceFilesService) MarkConfigChanging(ctx context.Context, tenantID string, devicePk uuid.UUID, window time.Duration) error {
-	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+// window, or a later stamp already set, so reads and markers in it stay stale without a closing mark.
+// in: ctx, tenant, device, window. out: the stamp it replaced, for EndConfigChange, error.
+func (s *DeviceFilesService) MarkConfigChanging(ctx context.Context, tenantID string, devicePk uuid.UUID, window time.Duration) (*time.Time, error) {
+	var prev *time.Time
+	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		// Locked first, so the stamp is taken after a refresh holding the row committed.
+		if err := lockDeviceConfig(ctx, tx, devicePk, &prev, nil); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx,
+			`UPDATE devices SET config_changed_at = GREATEST(config_changed_at, clock_timestamp() + $2 * interval '1 millisecond') WHERE id = $1`,
+			devicePk, window.Milliseconds())
+		return err
+	})
+	return prev, err
+}
+
+// EndConfigChange closes the window a MarkConfigChanging opened: the stamp is now, or prev, the
+// stamp that mark replaced, while prev is still ahead (a bulk OTA). in: ctx, tenant, device, prev. out: error.
+func (s *DeviceFilesService) EndConfigChange(ctx context.Context, tenantID string, devicePk uuid.UUID, prev *time.Time) error {
+	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		if err := lockDeviceConfig(ctx, tx, devicePk, nil, nil); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx,
-			`UPDATE devices SET config_changed_at = clock_timestamp() + $2 * interval '1 millisecond' WHERE id = $1`,
-			devicePk, window.Milliseconds())
+			`UPDATE devices SET config_changed_at = GREATEST(clock_timestamp(), $2::timestamptz) WHERE id = $1`,
+			devicePk, prev)
 		return err
 	})
 }

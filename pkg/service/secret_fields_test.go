@@ -1,6 +1,11 @@
 package service
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/google/uuid"
+)
 
 func TestFirmwareSecretField(t *testing.T) {
 	// The four scalars map 1:1 to the firmware key.
@@ -51,6 +56,20 @@ func TestWifiSecretFieldAndValidation(t *testing.T) {
 	for _, f := range invalid {
 		if validSecretField(f) {
 			t.Errorf("validSecretField(%q) = true, want false", f)
+		}
+	}
+}
+
+// A read marker is never stored as a secret, device row or tenant default.
+func TestCheckDeviceSecret_RefusesMarkers(t *testing.T) {
+	for _, v := range []string{"(set)", "(empty)"} {
+		if err := checkDeviceSecret(uuid.New(), "mqtt.password", v); !errors.Is(err, ErrMarkerSecret) {
+			t.Errorf("%q: err = %v, want ErrMarkerSecret", v, err)
+		}
+	}
+	for _, v := range []string{"(set)x", "(SET)", "s3cret"} {
+		if err := checkDeviceSecret(uuid.New(), "mqtt.password", v); err != nil {
+			t.Errorf("%q: err = %v, want nil", v, err)
 		}
 	}
 }

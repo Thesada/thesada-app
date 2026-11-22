@@ -201,7 +201,8 @@ func (c *Client) discoverAndSnapshotScripts(tenant string, devicePk uuid.UUID, t
 //   - script files must be non-empty and not look like shell errors.
 //   - if expectedSha is non-empty, the local sha of received content must
 //     match the device-reported hash that triggered the pull. Mismatch =
-//     captured someone else's response in the CLI window; abort.
+//     captured someone else's response in the CLI window; abort. A masked
+//     config.dump (a marker under a secret key) is stored under expectedSha.
 //
 // in: tenant id, device pk, topic prefix, file path, source label, expected
 // sha (empty string when caller has no reference hash). out: none.
@@ -248,9 +249,13 @@ func (c *Client) pullAndSnapshot(tenant string, devicePk uuid.UUID, topicPrefix,
 	hashHex := hex.EncodeToString(h[:])
 
 	if expectedSha != "" && hashHex != expectedSha {
-		slog.Warn("drift pull sha mismatch - not stored",
-			"path", path, "expected", expectedSha, "got", hashHex)
-		return
+		if path != "config.json" || !service.HasMaskMarker(content) {
+			slog.Warn("drift pull sha mismatch - not stored",
+				"path", path, "expected", expectedSha, "got", hashHex)
+			return
+		}
+		// A masked dump never hashes to config_hash, so the device sha stays the fingerprint.
+		hashHex = expectedSha
 	}
 
 	uctx, cancel := context.WithTimeout(context.Background(), driftUpsertTimeout)
