@@ -308,8 +308,8 @@ func TestStagedWrite_RefusesPathsTheShellSplits(t *testing.T) {
 }
 
 func TestWriteSteps_CoversChunksSizeCheckRenameAndRemove(t *testing.T) {
-	if got := writeSteps(writeChunkSize + 1); got != 15 {
-		t.Fatalf("writeSteps = %d, want 2 chunks + fs.cat + fs.mv + staging check + 2 readback reads + 8 masked copy reads", got)
+	if got := writeSteps(writeChunkSize + 1); got != 22 {
+		t.Fatalf("writeSteps = %d, want 2 chunks + fs.cat + fs.mv + staging check + fs.rm + 2x8 masked copy reads", got)
 	}
 }
 
@@ -682,11 +682,52 @@ func TestStagedWrite_MaskedRenameTimeoutReadsBackTheOutcome(t *testing.T) {
 			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
+			if n, budget := len(fs.calls), writeSteps(len(maskedWritten)); n > budget {
+				t.Fatalf("%d round trips %q, writeSteps budgets %d", n, cmdNames(fs.calls), budget)
+			}
 			if err != nil && tc.wantErr == "timed out" && strings.Contains(err.Error(), "unknown") {
 				t.Fatalf("err = %v, want the staging copy read as no rename", err)
 			}
 			if fs.files["/config.json"] != tc.wantLive {
 				t.Fatalf("config.json = %q, want %q", fs.files["/config.json"], tc.wantLive)
+			}
+		})
+	}
+}
+
+// A masked copy can keep the byte count: a 5-letter password is served as (set).
+// After a timed-out fs.mv the destination then still compares masked.
+func TestStagedWrite_SameSizeMaskedRenameTimeoutReadsBackTheOutcome(t *testing.T) {
+	written := `{"mqtt":{"host":"h","password":"abcde"}}`
+	served := strings.Replace(written, `"abcde"`, `"(set)"`, 1)
+	for _, tc := range []struct {
+		name, served, wantErr string
+	}{
+		{"rename landed", served, ""},
+		{"plain value differs", strings.Replace(served, `"h"`, `"x"`, 1), "rename outcome is unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeFS(map[string]string{"/config.json": oldConfig})
+			fs.view = func(_, body string) string {
+				if body == written {
+					return tc.served
+				}
+				return body
+			}
+			fs.hook = func(_ int, cmd, _ string) *fakeReply {
+				if cmd != "fs.mv" {
+					return nil
+				}
+				fs.files["/config.json"] = fs.files["/config.json.new"]
+				delete(fs.files, "/config.json.new")
+				return &fakeReply{err: errTimeout}
+			}
+			err := stagedWrite(context.Background(), fs, 50*time.Millisecond, "p", "/config.json", []byte(written))
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("stagedWrite = %v, want success read back", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
 		})
 	}

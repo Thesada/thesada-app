@@ -47,6 +47,9 @@ func (s *Server) continueLocalLogin(w http.ResponseWriter, r *http.Request, u *s
 			Name: loginReturnCookie, Value: url.QueryEscape(rt), Path: "/login",
 			Expires: expires, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
 		})
+	} else {
+		// An abandoned challenge's target must not ride this one.
+		s.clearTOTPCookie(w, loginReturnCookie, "/login")
 	}
 	slog.Info("auth.totp.state_change",
 		"from", method, "to", "challenged",

@@ -35,7 +35,9 @@ func TestHoldReaper_KeepsAContainerWithNoClientOfItsOwn(t *testing.T) {
 			// The session id hashes the parent pid, so a shell in between gives each
 			// child its own session and a Ryuk that sees only that child's clients.
 			cmd := exec.Command("sh", "-c", `"$0" "$@"; exit $?`, os.Args[0], "-test.run=^TestReaperChild$", "-test.count=1")
-			cmd.Env = append(os.Environ(), childMode+"="+tc.mode, "TESTCONTAINERS_RYUK_RECONNECTION_TIMEOUT=2s")
+			// The unprefixed name wins over the TESTCONTAINERS_ one, so set both.
+			cmd.Env = append(os.Environ(), childMode+"="+tc.mode,
+				"RYUK_RECONNECTION_TIMEOUT=2s", "TESTCONTAINERS_RYUK_RECONNECTION_TIMEOUT=2s")
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("child: %v\n%s", err, out)

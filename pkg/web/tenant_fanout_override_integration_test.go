@@ -1,8 +1,8 @@
 //go:build integration
 
-// A tenant default fan-out re-checks each device's override at push time, under the device row
-// lock an override write takes, so a device overridden after the target list was read is skipped.
-// Each device has its own budget, so one device stuck on its row lock is skipped alone.
+// A tenant default fan-out re-checks each device's override before the push, so a device overridden
+// after the target list was read is skipped. No row lock is held across the push, and a value written
+// during it is sent after it. Each device has its own budget, so one stuck on its row lock is skipped alone.
 //
 //	go test -tags integration -run 'TestTenantFanOut' ./pkg/web/...
 package web
@@ -191,38 +191,75 @@ func TestTenantFanOutOverride(t *testing.T) {
 		}
 	})
 
-	t.Run("an_override_write_waits_for_a_running_push", func(t *testing.T) {
-		pk, fd := device("ovr2")
-		list := targets(pk)
-		overrideDone := make(chan error, 1)
-		var early atomic.Bool
-		fd.Handle("secret.set", func(string, []byte) []mqtttest.Response {
-			go func() { overrideDone <- env.Services.Secrets.SetSecret(ctx, tenant, pk, field, "own") }()
-			select {
-			case err := <-overrideDone:
-				early.Store(true)
-				overrideDone <- err
-			case <-time.After(time.Second):
+	// blockedPush records each secret.set value. The first call runs write while the push is blocked.
+	blockedPush := func(t *testing.T, fd *mqtttest.FakeDevice, write func() error) (func() []string, *atomic.Bool) {
+		var mu sync.Mutex
+		var sent []string
+		var during atomic.Bool
+		fd.Handle("secret.set", func(_ string, raw []byte) []mqtttest.Response {
+			_, v, _ := strings.Cut(string(raw), "\n")
+			mu.Lock()
+			sent = append(sent, v)
+			first := len(sent) == 1
+			mu.Unlock()
+			if first {
+				done := make(chan error, 1)
+				go func() { done <- write() }()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Errorf("write during the push: %v", err)
+					}
+					during.Store(true)
+				case <-time.After(5 * time.Second):
+				}
 			}
 			return mqtttest.OK("stored")
 		})
+		return func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]string(nil), sent...)
+		}, &during
+	}
+
+	t.Run("an_override_write_completes_during_a_running_push", func(t *testing.T) {
+		pk, fd := device("ovr2")
+		list := targets(pk)
+		sent, during := blockedPush(t, fd, func() error {
+			return env.Services.Secrets.SetSecret(ctx, tenant, pk, field, "own")
+		})
 		out := s.fanOutTenantSecret(ctx, tenant, field, "default", list)
-		if out.Pushed != 1 {
-			t.Fatalf("fan-out = %+v, want the device pushed", out)
+		if !during.Load() {
+			t.Fatal("the override write waited for the push: the device row stayed locked across it")
 		}
-		if early.Load() {
-			t.Error("an override write landed while the push for that device was running")
+		if got := sent(); len(got) != 2 || got[0] != "default" || got[1] != "own" {
+			t.Errorf("secret.set values = %q, want default, then the override sent after it", got)
 		}
-		select {
-		case err := <-overrideDone:
-			if err != nil {
-				t.Fatalf("override after the push: %v", err)
-			}
-		case <-time.After(15 * time.Second):
-			t.Fatal("the override write never finished")
+		if out.Overridden != 1 || out.Pushed != 0 || out.Unreachable != 0 || out.Rejected != 0 || out.Skipped != 0 {
+			t.Errorf("fan-out = %+v, want the device counted overridden", out)
 		}
 		if v, _, err := env.Services.Secrets.Reveal(ctx, tenant, pk, field); err != nil || v != "own" {
 			t.Errorf("override = %q, %v, want own kept after the push", v, err)
+		}
+	})
+
+	t.Run("a_newer_default_during_a_running_push_is_sent_after_it", func(t *testing.T) {
+		pk, fd := device("ovr3")
+		list := targets(pk)
+		t.Cleanup(func() { _ = env.Services.Secrets.SetTenantSecret(ctx, tenant, field, "default") })
+		sent, during := blockedPush(t, fd, func() error {
+			return env.Services.Secrets.SetTenantSecret(ctx, tenant, field, "newer")
+		})
+		out := s.fanOutTenantSecret(ctx, tenant, field, "default", list)
+		if !during.Load() {
+			t.Fatal("the default write waited for the push")
+		}
+		if got := sent(); len(got) != 2 || got[0] != "default" || got[1] != "newer" {
+			t.Errorf("secret.set values = %q, want default, then the newer default sent after it", got)
+		}
+		if out.Pushed != 1 || out.Overridden != 0 {
+			t.Errorf("fan-out = %+v, want the device pushed", out)
 		}
 	})
 }

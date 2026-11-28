@@ -22,10 +22,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/big"
 	"reflect"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -452,13 +455,45 @@ func maskLikeFirmware(v any) {
 // back, is written once masked the same way. Numbers compare by value, as the
 // firmware prints them again. in: written content, served copy. out: equal.
 func MaskedConfigEqual(written, served string) bool {
-	var w, s any
-	if json.Unmarshal([]byte(written), &w) != nil || json.Unmarshal([]byte(served), &s) != nil {
+	w, okW := decodeConfig(written)
+	s, okS := decodeConfig(served)
+	if !okW || !okS {
 		return false
 	}
 	if _, ok := w.(map[string]any); !ok {
 		return false
 	}
 	maskLikeFirmware(w)
-	return reflect.DeepEqual(w, s)
+	return reflect.DeepEqual(exactNumbers(w), exactNumbers(s))
+}
+
+// exactInt is an integer as its decimal digits, so 2^53+1 stays apart from 2^53.
+type exactInt string
+
+// exactNumbers swaps each json.Number in v for an exactInt, or a float64 for a
+// fraction. A float that is an integer below 2^53 counts as that integer. in: tree. out: tree.
+func exactNumbers(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, e := range t {
+			t[k] = exactNumbers(e)
+		}
+	case []any:
+		for i, e := range t {
+			t[i] = exactNumbers(e)
+		}
+	case json.Number:
+		if i, ok := new(big.Int).SetString(string(t), 10); ok {
+			return exactInt(i.String())
+		}
+		f, err := t.Float64()
+		if err != nil {
+			return t
+		}
+		if f == math.Trunc(f) && math.Abs(f) < 1<<53 {
+			return exactInt(strconv.FormatInt(int64(f), 10))
+		}
+		return f
+	}
+	return v
 }

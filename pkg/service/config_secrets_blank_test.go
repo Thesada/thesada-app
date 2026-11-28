@@ -424,3 +424,26 @@ func TestMaskedConfigEqual(t *testing.T) {
 		t.Error("non-JSON content: want not equal, the bytes compare already ran")
 	}
 }
+
+// Integers compare exactly past 2^53, where float64 cannot tell them apart.
+// The same number in another spelling stays equal.
+func TestMaskedConfigEqual_NumbersCompareExactly(t *testing.T) {
+	written := `{"mqtt":{"password":"pw"},"n":9007199254740992,"rate":1.50,"k":100}`
+	for name, served := range map[string]string{
+		"2^53+1 for 2^53": `{"mqtt":{"password":"(set)"},"n":9007199254740993,"rate":1.5,"k":100}`,
+		"string for 100":  `{"mqtt":{"password":"(set)"},"n":9007199254740992,"rate":1.5,"k":"100"}`,
+	} {
+		if MaskedConfigEqual(written, served) {
+			t.Errorf("%s: want not equal", name)
+		}
+	}
+	for name, served := range map[string]string{
+		"printed again": `{"mqtt":{"password":"(set)"},"n":9007199254740992,"rate":1.5,"k":100}`,
+		"exponent":      `{"mqtt":{"password":"(set)"},"n":9007199254740992,"rate":15e-1,"k":1e2}`,
+		"trailing zero": `{"mqtt":{"password":"(set)"},"n":9007199254740992,"rate":1.5,"k":100.0}`,
+	} {
+		if !MaskedConfigEqual(written, served) {
+			t.Errorf("%s: want equal", name)
+		}
+	}
+}

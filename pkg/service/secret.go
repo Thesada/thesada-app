@@ -666,32 +666,65 @@ func (s *SecretService) ProvisionTargets(ctx context.Context, tenantID, field st
 	return out, nil
 }
 
-// PushUnlessOverridden runs push for one ProvisionTargets device only while it holds no override
-// for field. The device row lock SetSecret takes is held across the check and push, so an override
-// cannot land in between. in: ctx, tenant, device, field, push. out: pushed (false when overridden), error.
-func (s *SecretService) PushUnlessOverridden(ctx context.Context, tenantID string, devicePk uuid.UUID, field string, push func()) (bool, error) {
+// DefaultPush is what PushUnlessOverridden sent to one device.
+type DefaultPush int
+
+const (
+	// DefaultSkipped: the device held an override before the push, nothing was sent.
+	DefaultSkipped DefaultPush = iota
+	// DefaultSent: the last value sent is the tenant default.
+	DefaultSent
+	// DefaultOverridden: an override landed during the push and was sent after it.
+	DefaultOverridden
+)
+
+// maxDefaultResends bounds the sends after the first while the field keeps changing.
+const maxDefaultResends = 2
+
+// PushUnlessOverridden sends value to one ProvisionTargets device unless it holds an override for
+// field. The check commits before push runs, so no row lock is held across the device round trip.
+// After each send that pushed ok the field is resolved again, and a value written meanwhile (an
+// override, a newer default) is sent next, so the device ends on what the store holds.
+// in: ctx, tenant, device, field, value, push (sends one value, reports ok). out: what was sent, error.
+func (s *SecretService) PushUnlessOverridden(ctx context.Context, tenantID string, devicePk uuid.UUID, field, value string, push func(string) bool) (DefaultPush, error) {
 	if !validSecretField(field) {
-		return false, fmt.Errorf("secret: unknown field %q", field)
+		return DefaultSkipped, fmt.Errorf("secret: unknown field %q", field)
 	}
-	ran := false
+	var overridden bool
 	err := db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
+		// SetSecret locks first too, so the check sees an override committed before it.
 		if err := lockDeviceConfig(ctx, tx, devicePk, nil, nil); err != nil {
 			return err
 		}
-		var overridden bool
 		if err := tx.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM device_config_secrets WHERE device_pk = $1 AND field = $2)`,
 			devicePk, field).Scan(&overridden); err != nil {
 			return fmt.Errorf("look up override %s: %w", field, err)
 		}
-		if overridden {
-			return nil
-		}
-		ran = true
-		push()
 		return nil
 	})
-	return ran, err
+	if err != nil || overridden {
+		return DefaultSkipped, err
+	}
+	sent := DefaultSent
+	for resends := 0; push(value); resends++ {
+		now, origin, err := s.Resolve(ctx, tenantID, devicePk, field)
+		if err != nil {
+			return sent, fmt.Errorf("resolve %s after the push: %w", field, err)
+		}
+		// A cleared field leaves the device on what it holds, as every clear does.
+		if now == "" || now == value {
+			return sent, nil
+		}
+		if resends == maxDefaultResends {
+			return sent, fmt.Errorf("secret %s kept changing during the push", field)
+		}
+		value, sent = now, DefaultSent
+		if origin == OriginOverride {
+			sent = DefaultOverridden
+		}
+	}
+	return sent, nil
 }
 
 // ProvisionTargetCounts returns, per field, how many devices a default change

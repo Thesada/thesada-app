@@ -381,11 +381,12 @@ func (s *Server) fanOutOne(ctx context.Context, tenantID, field, value string, p
 	}
 	var msg string
 	var ok bool
-	// An override set after ProvisionTargets is seen here, under the lock its write takes.
-	ran, err := s.services.Secrets.PushUnlessOverridden(ctx, tenantID, pk, field, func() {
-		msg, ok = s.pushSecret(ctx, s.deviceTopicPrefix(device), field, value)
+	// An override set after ProvisionTargets is skipped, one set during the push is sent after it.
+	sent, err := s.services.Secrets.PushUnlessOverridden(ctx, tenantID, pk, field, value, func(v string) bool {
+		msg, ok = s.pushSecret(ctx, s.deviceTopicPrefix(device), field, v)
+		return ok
 	})
-	if !ran {
+	if sent == service.DefaultSkipped {
 		if err != nil {
 			slog.Error("tenant_secret.fanout_lookup_failed", "tenant", tenantID, "device", pk, "err", err)
 			out.Skipped++
@@ -396,7 +397,7 @@ func (s *Server) fanOutOne(ctx context.Context, tenantID, field, value string, p
 		return
 	}
 	if err != nil {
-		slog.Error("tenant_secret.fanout_commit_failed", "tenant", tenantID, "device", device.DeviceID, "err", err)
+		slog.Error("tenant_secret.fanout_recheck_failed", "tenant", tenantID, "device", device.DeviceID, "err", err)
 	}
 	if !ok {
 		// msg is a fixed, value-free string built by pushSecret.
@@ -407,6 +408,11 @@ func (s *Server) fanOutOne(ctx context.Context, tenantID, field, value string, p
 		} else {
 			out.Unreachable++
 		}
+		return
+	}
+	if sent == service.DefaultOverridden {
+		slog.Info("tenant_secret.fanout_override_resent", "tenant", tenantID, "device", device.DeviceID, "field", field)
+		out.Overridden++
 		return
 	}
 	out.Pushed++

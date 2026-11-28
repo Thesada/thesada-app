@@ -93,6 +93,50 @@ func TestLoginReturn_RefusesOffSiteTarget(t *testing.T) {
 	}
 }
 
+// TestLoginReturn_AbandonedChallengeTargetIsDropped checks that a later
+// challenge without rt expires the target an abandoned claim challenge left.
+// in: t. out: none.
+func TestLoginReturn_AbandonedChallengeTargetIsDropped(t *testing.T) {
+	env := servicetest.Start(t)
+	srv := New(env.Cfg, env.Services, nil, nil, nil, nil)
+	const tenant = "login-return-stale"
+	env.SeedTenant(t, tenant)
+	raw, encoded, err := totp.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tu := mustWebUser(t, env, tenant, "rt-stale@a.test", "correct-horse")
+	if err := env.Services.Auth.SetTOTPSecret(tenant, tu, encoded); err != nil {
+		t.Fatal(err)
+	}
+	abandoned := postLoginRT(t, srv, "rt-stale@a.test", "correct-horse", claimScan)
+	stale := cookieNamed(t, abandoned, loginReturnCookie)
+
+	ch := postLogin(t, srv, "rt-stale@a.test", "correct-horse")
+	if ch.Header().Get("Location") != "/login/totp" {
+		t.Fatalf("second login = %d %q, want 302 /login/totp", ch.Code, ch.Header().Get("Location"))
+	}
+	held := browserCookie(stale, ch, loginReturnCookie)
+	done := postTOTP(t, srv, cookieNamed(t, ch, totpPendingCookie), totp.Code(raw, time.Now()), "", held)
+	if done.Code != http.StatusFound || done.Header().Get("Location") != "/devices" {
+		t.Fatalf("totp code = %d %q, want 302 /devices", done.Code, done.Header().Get("Location"))
+	}
+}
+
+// browserCookie is the cookie a browser holds after rec: replaced, kept, or nil once expired.
+// in: cookie held before, recorder, name. out: cookie or nil.
+func browserCookie(held *http.Cookie, rec *httptest.ResponseRecorder, name string) *http.Cookie {
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == name {
+			if c.MaxAge < 0 {
+				return nil
+			}
+			return c
+		}
+	}
+	return held
+}
+
 // postLoginRT submits the password form with a return target.
 // in: t, handler, email, password, rt. out: recorder.
 func postLoginRT(t *testing.T, srv http.Handler, email, password, rt string) *httptest.ResponseRecorder {

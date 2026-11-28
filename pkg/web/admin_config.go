@@ -659,11 +659,10 @@ func writeChunkCount(n int) int { return (n + writeChunkSize - 1) / writeChunkSi
 // readbackChunkSize is one fs.cat read when a timed-out rename is checked.
 const readbackChunkSize = 2048
 
-// writeSteps is the CLI round trips a write may take: chunks, fs.cat, fs.mv,
-// the staging check, then fs.rm or a full readback of the destination, plus a
-// read of a masked staged copy.
+// writeSteps is the worst-case CLI round trips of a write: chunks, the size check
+// and its masked read, fs.mv, the staging check and a second masked read, fs.rm.
 func writeSteps(n int) int {
-	return writeChunkCount(n) + 3 + max(1, (n+readbackChunkSize-1)/readbackChunkSize) + maskedReadSteps(n)
+	return writeChunkCount(n) + 4 + 2*maskedReadSteps(n)
 }
 
 // maskedReadSteps bounds the read of a masked staged copy of n bytes. Markers and
@@ -948,14 +947,19 @@ func renameReadback(timedOut *writeFailure, step writeStep, cleanup func(*writeF
 	case f == nil || resp == nil || !outputHasPrefix(resp.Output, "File not found"):
 		return unknown
 	}
+	landed := func() error {
+		slog.Warn("device.file_write.rename_confirmed", "path", path, "reason", "fs.mv reply timed out")
+		return nil
+	}
 	// A size match alone could be another file, so the bytes must match too.
+	var got strings.Builder
 	for off := 0; off < size; {
 		resp, f = read(path, off, readbackChunkSize)
 		if off == 0 && f == nil && resp.Total != nil && *resp.Total != size {
 			if !maskedCopyMatches(step, cli, topicPrefix, path, content, *resp.Total) {
 				return unknown
 			}
-			break
+			return landed()
 		}
 		// A late reply without req_id can carry another offset's bytes.
 		if f != nil || resp.Total == nil || *resp.Total != size || resp.Data == nil ||
@@ -963,13 +967,17 @@ func renameReadback(timedOut *writeFailure, step writeStep, cleanup func(*writeF
 			return unknown
 		}
 		end := off + len(*resp.Data)
-		if end == off || end > size || *resp.Data != string(content[off:end]) {
+		if end == off || end > size {
 			return unknown
 		}
+		got.WriteString(*resp.Data)
 		off = end
 	}
-	slog.Warn("device.file_write.rename_confirmed", "path", path, "reason", "fs.mv reply timed out")
-	return nil
+	// A masked copy can keep the size, so other bytes still compare masked.
+	if got.String() != string(content) && !service.MaskedConfigEqual(string(content), got.String()) {
+		return unknown
+	}
+	return landed()
 }
 
 // ackedBytes parses the byte count of an fs.write/fs.append ack for staged.

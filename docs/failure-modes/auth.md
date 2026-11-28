@@ -10,7 +10,7 @@
 | Session fixation | Structurally prevented: fresh token only minted at `startSession`; no anonymous session adopted (`auth_sessions.go:38`) | N/A |
 | Stolen session cookie replayed | Bounded by 4h rotation (`auth_sessions.go:29`); stale hash -> anonymous | Rotation automatic; logout deletes |
 | Session gone while a live page is open | Next live refresh is an anonymous htmx GET; `RequireAuth` answers 401 + `HX-Redirect: /login` (`authmw.go`) | Browser navigates to `/login`; the live block is never swapped |
-| Logged-out scan of a claim link | `RequireAuth` redirects to `/login?rt=<path and query>` (`authmw.go::LoginURL`) | Login returns to the prefilled claim form. An off-site `rt` is dropped and the login lands on `/devices` |
+| Logged-out scan of a claim link | `RequireAuth` redirects to `/login?rt=<path and query>` (`authmw.go::LoginURL`) | A password or SSO login returns to the prefilled claim form, through the TOTP and passkey steps too. A magic-link login lands on `/devices`, as the emailed link carries no `rt`. An off-site `rt` is dropped and the login lands on `/devices` |
 | DB down during login | `slog.Error("password verify failed")` / `"magic link create failed"` + HTTP 500 (`web_auth.go:55`) | User retries when DB returns; not queued |
 
 ## Gaps
