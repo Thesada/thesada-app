@@ -254,7 +254,9 @@ func WaitForLive(t *testing.T, probeTopic string,
 	defer cancel()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		_ = publish(probeTopic, []byte("ping"), 0, false) // lost pings just retry
+		// A ping sent before the connect lands can block for the publish
+		// timeout, so pings go out without waiting. Lost pings just retry.
+		go func() { _ = publish(probeTopic, []byte("ping"), 0, false) }()
 		select {
 		case <-probe:
 			return

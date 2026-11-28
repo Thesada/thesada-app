@@ -16,6 +16,7 @@ package servicetest
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"testing"
 	"time"
@@ -85,7 +86,8 @@ type runFunc func(context.Context, string, ...testcontainers.ContainerCustomizer
 var startFn = func(t *testing.T) (string, error) { return startOnce(t, postgres.Run) }
 
 // startOnce runs one container and reads its URL, terminating it on any error.
-// in: testing.T, run func. out: base URL, error. Registers cleanup on success.
+// in: testing.T or nil, run func. out: base URL, error. With a t it registers
+// cleanup on success. Without one the container lives until Ryuk reaps it.
 func startOnce(t *testing.T, run runFunc) (string, error) {
 	ctx := context.Background()
 	ctr, err := run(ctx, Image,
@@ -96,14 +98,22 @@ func startOnce(t *testing.T, run runFunc) (string, error) {
 		// scheduler otherwise races migration DDL (0015 alters the oauth
 		// caggs) and intermittently deadlocks on a fresh container. Schema +
 		// service tests never need background refresh. Prod keeps them on.
-		testcontainers.WithCmd("postgres", "-c", "timescaledb.max_background_workers=0"),
+		testcontainers.WithCmd("postgres", "-c", "timescaledb.max_background_workers=0",
+			"-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"),
+		// Throwaway data, so no durability: the data dir lives in memory.
+		testcontainers.WithTmpfs(map[string]string{"/var/lib/postgresql/data": "rw"}),
 		waitReady(),
 	)
 	if err == nil {
 		var baseURL string
 		if baseURL, err = ctr.ConnectionString(ctx, "sslmode=disable"); err == nil {
+			err = holdReaper(ctx, ctr)
+		}
+		if err == nil {
 			// Background ctx: the test's ctx may already be cancelled at cleanup.
-			t.Cleanup(func() { _ = ctr.Terminate(context.Background()) })
+			if t != nil {
+				t.Cleanup(func() { _ = ctr.Terminate(context.Background()) })
+			}
 			return baseURL, nil
 		}
 	}
@@ -135,20 +145,28 @@ func StartPostgres(t *testing.T) (*db.Pool, string) {
 	}
 	t.Cleanup(super.Close)
 
+	if err := provision(ctx, super); err != nil {
+		t.Fatal(err)
+	}
+	return super, baseURL
+}
+
+// provision installs the extension and the thesada_app role on a fresh container.
+// in: context, superuser pool. out: error.
+func provision(ctx context.Context, super *db.Pool) error {
 	// 0003 calls create_hypertable but never CREATE EXTENSION (prod installs it
 	// out of band); the throwaway container owns its DB, so install it here.
 	if _, err := super.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS timescaledb`); err != nil {
-		t.Fatalf("create timescaledb extension: %v", err)
+		return fmt.Errorf("create timescaledb extension: %w", err)
 	}
 
 	// thesada_app must exist before 0013 (ALTER DEFAULT PRIVILEGES references
 	// it). LOGIN so the App pool can connect; NOBYPASSRLS so RLS applies.
 	if _, err := super.Exec(ctx,
 		`CREATE ROLE thesada_app LOGIN NOBYPASSRLS PASSWORD '`+rolePassword+`'`); err != nil {
-		t.Fatalf("provision thesada_app role: %v", err)
+		return fmt.Errorf("provision thesada_app role: %w", err)
 	}
-
-	return super, baseURL
+	return nil
 }
 
 // BootstrapProdRoles gives the container the production role shape, mirroring
@@ -159,7 +177,15 @@ func StartPostgres(t *testing.T) (*db.Pool, string) {
 // in: testing.T, superuser pool. out: none.
 func BootstrapProdRoles(t *testing.T, super *db.Pool) {
 	t.Helper()
-	if _, err := super.Exec(context.Background(), `
+	if err := bootstrapProdRoles(context.Background(), super); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// bootstrapProdRoles is BootstrapProdRoles without the testing.T.
+// in: context, superuser pool. out: error.
+func bootstrapProdRoles(ctx context.Context, super *db.Pool) error {
+	if _, err := super.Exec(ctx, `
 		CREATE ROLE thesada_app_admin LOGIN NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE PASSWORD '`+rolePassword+`';
 		CREATE ROLE thesada_app_mqtt  LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE PASSWORD '`+rolePassword+`';
 		ALTER ROLE thesada_app NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
@@ -173,8 +199,38 @@ func BootstrapProdRoles(t *testing.T, super *db.Pool) {
 		    GRANT USAGE, CREATE ON SCHEMA _timescaledb_internal TO thesada_app_admin;
 		  END IF;
 		END $$;`); err != nil {
-		t.Fatalf("bootstrap production roles: %v", err)
+		return fmt.Errorf("bootstrap production roles: %w", err)
 	}
+	return nil
+}
+
+// openAs opens a pool authenticated as role. The caller closes it.
+// in: context, base URL, role. out: pool, error.
+func openAs(ctx context.Context, baseURL, role string) (*db.Pool, error) {
+	dsn, err := roleURL(baseURL, role)
+	if err != nil {
+		return nil, fmt.Errorf("build %s URL: %w", role, err)
+	}
+	pool, err := db.Open(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open %s pool: %w", role, err)
+	}
+	return pool, nil
+}
+
+// openDB opens a superuser pool on another database of the same server.
+// in: context, base URL, database name. out: pool, error. The caller closes it.
+func openDB(ctx context.Context, baseURL, name string) (*db.Pool, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	u.Path = "/" + name
+	pool, err := db.Open(ctx, u.String())
+	if err != nil {
+		return nil, fmt.Errorf("open %s pool: %w", name, err)
+	}
+	return pool, nil
 }
 
 // OpenAs opens a pool authenticated as role, closed via t.Cleanup.

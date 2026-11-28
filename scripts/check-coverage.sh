@@ -4,79 +4,57 @@
 #
 # Locks in the CODE-GUIDELINES rule ("Stop letting test coverage drift on
 # security paths"): every package on the auth / CSRF / OAuth / pkg-pki
-# path stays at or above the threshold. Each package is measured against
-# its own statements via -coverpkg + -coverprofile; the run fails if any
-# falls below THRESHOLD. Runs with -tags integration so oauth's DB-backed
-# Start/LookupState count (real Postgres via testcontainers - needs Docker).
+# path stays at or above the threshold. It reads the profile that
+# `make test-integration` writes (-tags integration, -covermode=set), so
+# oauth's DB-backed Start/LookupState count against a real Postgres and the
+# integration tests run once for both the pass/fail and the coverage gate.
+# go test -cover instruments each package for its own tests only, so a
+# package is measured against its own statements, as -coverpkg did before.
 # pkg/service (auth.go) is deliberately absent: large surface, gated separately.
 #
 # Usage:
-#   scripts/check-coverage.sh            # gate at the default threshold
-#   THRESHOLD=85 scripts/check-coverage.sh
-# Exit code 0 = all packages pass, 1 = at least one below threshold.
+#   make coverage                                   # runs test-integration, then this
+#   PROFILE=coverage-integration.out scripts/check-coverage.sh
+#   THRESHOLD=85 PROFILE=... scripts/check-coverage.sh
+# Exit code 0 = all packages pass, 1 = at least one below threshold or no profile.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 THRESHOLD="${THRESHOLD:-80}"
+PROFILE="${PROFILE:-coverage-integration.out}"
 PKGS=(csrf oauth pki authmw)
 
 # allow-long-comment
 # FILES gates one file at a time, for packages too broad to gate whole (#281):
 # pkg/service sits around 84% over a wide surface, so gating the package would
 # block unrelated PRs; auth.go is the part that carries the security contract.
-# Format: <file>:<package whose tests exercise it>.
 FILES=(
-  "pkg/service/auth.go:pkg/service"
+  "pkg/service/auth.go"
 )
 
+if [ ! -s "$PROFILE" ] || [ "$(head -n 1 "$PROFILE")" != "mode: set" ]; then
+  printf 'FAIL  no set-mode coverage profile at %s (run make coverage)\n' "$PROFILE" >&2
+  exit 1
+fi
+
+module="$(awk '$1 == "module" { print $2; exit }' go.mod)"
 status=0
-profile="$(mktemp)"
-log="$(mktemp)"
-trap 'rm -f "$profile" "$log"' EXIT
 
-# Same budget as test-integration: pkg/service shares the runner's Docker with
-# the integration job and ran past 300s there. On a failure, show why.
-cover() {
-  local pkg="$1"
-  if ! go test -tags integration -covermode=set -timeout "${COVER_TIMEOUT:-600s}" \
-    -coverpkg="./${pkg}/..." -coverprofile="$profile" "./${pkg}/..." >"$log" 2>&1; then
-    printf 'FAIL  %s: go test failed\n' "$pkg" >&2
-    tail -n 40 "$log" >&2
-    exit 1
-  fi
-}
-
-for p in "${PKGS[@]}"; do
-  cover "pkg/${p}"
-
-  pct="$(go tool cover -func="$profile" | awk '/^total:/ {sub(/%/,"",$3); print $3}')"
-
-  if awk -v got="$pct" -v want="$THRESHOLD" 'BEGIN { exit !((got + 0) >= (want + 0)) }'; then
-    printf 'PASS  pkg/%-8s %5s%% (>= %s%%)\n' "$p" "$pct" "$THRESHOLD"
-  else
-    printf 'FAIL  pkg/%-8s %5s%% (<  %s%%)\n' "$p" "$pct" "$THRESHOLD" >&2
-    status=1
-  fi
-done
-
-for entry in "${FILES[@]}"; do
-  file="${entry%%:*}"
-  pkg="${entry##*:}"
-
-  cover "${pkg}"
-
-  # allow-long-comment
-  # Statement coverage for one file, off the profile lines
-  # "<import path>/<file>:<span> <numStmt> <count>". Every test binary in the
-  # package emits its own copy of each block, so blocks are merged by span
-  # taking the max count first - summing raw lines counts each one twice and
-  # reads as a coverage drop that never happened.
-  pct="$(awk -v want="$file" '
+# allow-long-comment
+# Statement coverage off the profile lines "<import path>/<file>:<span>
+# <numStmt> <count>". kind=pkg takes every file under the package dir (what
+# -coverpkg=./pkg/x/... measured), kind=file one file. Blocks are merged by
+# span taking the max count first: a block can appear more than once, and
+# summing raw lines reads as a coverage change that never happened.
+pct() {
+  awk -v kind="$1" -v want="${module}/$2" '
     NR == 1 { next }
-    { split($1, parts, ":"); path = parts[1] }
-    index(path, want) == length(path) - length(want) + 1 {
+    {
+      split($1, parts, ":"); path = parts[1]
+      if (kind == "file") { if (path != want) next }
+      else if (index(path, want "/") != 1) next
       stmts[$1] = $2
       if ($3 > 0 && $3 > hit[$1]) hit[$1] = $3
     }
@@ -87,17 +65,28 @@ for entry in "${FILES[@]}"; do
       }
       if (total == 0) { print "none"; exit }
       printf "%.1f", (covered / total) * 100
-    }' "$profile")"
+    }' "$PROFILE"
+}
 
-  if [ "$pct" = "none" ]; then
-    printf 'FAIL  %-24s no statements found in profile (renamed or deleted?)\n' "$file" >&2
+gate() {
+  local label="$1" got="$2"
+  if [ "$got" = "none" ]; then
+    printf 'FAIL  %-24s no statements found in profile (renamed or deleted?)\n' "$label" >&2
     status=1
-  elif awk -v got="$pct" -v want="$THRESHOLD" 'BEGIN { exit !((got + 0) >= (want + 0)) }'; then
-    printf 'PASS  %-24s %5s%% (>= %s%%)\n' "$file" "$pct" "$THRESHOLD"
+  elif awk -v got="$got" -v want="$THRESHOLD" 'BEGIN { exit !((got + 0) >= (want + 0)) }'; then
+    printf 'PASS  %-24s %5s%% (>= %s%%)\n' "$label" "$got" "$THRESHOLD"
   else
-    printf 'FAIL  %-24s %5s%% (<  %s%%)\n' "$file" "$pct" "$THRESHOLD" >&2
+    printf 'FAIL  %-24s %5s%% (<  %s%%)\n' "$label" "$got" "$THRESHOLD" >&2
     status=1
   fi
+}
+
+for p in "${PKGS[@]}"; do
+  gate "pkg/${p}" "$(pct pkg "pkg/${p}")"
+done
+
+for file in "${FILES[@]}"; do
+  gate "$file" "$(pct file "$file")"
 done
 
 if [ "$status" -ne 0 ]; then

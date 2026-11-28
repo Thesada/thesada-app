@@ -215,3 +215,47 @@ func TestWebAuthnParties(t *testing.T) {
 		})
 	}
 }
+
+// TestLoad_MQTTURLScheme pins the broker URL to raw TCP or TLS transports.
+// A ws:// or wss:// URL would route paho through gorilla/websocket client
+// framing (GO-2026-6278), which the govulncheck exclusion relies on never running.
+func TestLoad_MQTTURLScheme(t *testing.T) {
+	cases := []struct {
+		url     string
+		wantErr bool
+	}{
+		{"", false},
+		{"tcp://mosquitto:1883", false},
+		{"mqtt://mosquitto:1883", false},
+		{"tls://mqtt.example.com:8883", false},
+		{"ssl://mqtt.example.com:8883", false},
+		{"mqtts://mqtt.example.com:8883", false},
+		{"TLS://mqtt.example.com:8883", false},
+		{"mosquitto:1883", false},
+		{"ws://mosquitto:9001", true},
+		{"wss://mqtt.example.com:443/mqtt", true},
+		{"WSS://mqtt.example.com:443", true},
+		{"unix:///run/mosquitto.sock", true},
+		{"http://mqtt.example.com", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.url, func(t *testing.T) {
+			t.Setenv("THESADA_DATABASE_URL", "postgres://x")
+			t.Setenv("THESADA_COOKIE_SECRET", strings.Repeat("k", minCookieSecretLen))
+			t.Setenv("THESADA_MQTT_URL", tc.url)
+			_, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load() = nil, want an error for %q", tc.url)
+				}
+				if !strings.Contains(err.Error(), "THESADA_MQTT_URL") {
+					t.Errorf("error %q does not name THESADA_MQTT_URL", err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() = %v, want nil", err)
+			}
+		})
+	}
+}

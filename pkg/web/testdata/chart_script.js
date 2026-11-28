@@ -30,6 +30,8 @@ function Chart(canvas, config) {
   created++;
   this.canvas = canvas;
   this.data = config.data;
+  this.options = config.options;
+  lastChart = this;
   rendered.push(config.data.labels[0]);
 }
 Chart.prototype.destroy = function () { owned.delete(this.canvas); this.destroyed = true; };
@@ -37,9 +39,17 @@ Chart.prototype.update = function (mode) {
   if (this.destroyed) throw new Error("update on a destroyed chart");
   if (mode !== "none") throw new Error("update mode " + mode + ", want none");
   rendered.push(this.data.labels[0]);
+  lastChart = this;
 };
+let lastChart = null;
+let theme = "light";
+const themed = [];
 const sandbox = {
-  document: { querySelector: (s) => (s === "[data-chart-card]" ? card : null), addEventListener: (t, f) => { if (t === "htmx:before:settle") settle.push(f); } },
+  document: {
+    documentElement: { getAttribute: (k) => (k === "data-theme" ? theme : null) },
+    querySelector: (s) => (s === "[data-chart-card]" ? card : null),
+    addEventListener: (t, f) => { if (t === "htmx:before:settle") settle.push(f); if (t === "thesada:theme") themed.push(f); },
+  },
   localStorage: { getItem: () => null, setItem: () => {} },
   window: { innerWidth: 1024 },
   console: { error: (...a) => errors.push(a.join(" ")) },
@@ -82,6 +92,17 @@ function fail(msg) { console.log(msg); process.exit(1); }
   if (rendered.length !== drawn + 1) fail("refetch drew " + (rendered.length - drawn) + " times, want 1");
   if (created !== made) fail("refetch on the same canvas built " + (created - made) + " new charts, want 0");
   if (!rendered[rendered.length - 1].includes("range=7d")) fail("refetch lost the range: " + rendered[rendered.length - 1]);
+
+  // A theme flip redraws in place with colours that read on the new background.
+  const lightLine = lastChart.data.datasets[0].borderColor;
+  theme = "dark";
+  const pend = pending.length;
+  themed.forEach((f) => f());
+  if (pending.length !== pend + 1) fail("theme change fetched " + (pending.length - pend) + " times, want 1");
+  respond(pending.length - 1); await flush();
+  if (lastChart.data.datasets[0].borderColor === lightLine) fail("dark theme kept the light line colour " + lightLine);
+  const y = lastChart.options && lastChart.options.scales && lastChart.options.scales.y;
+  if (!y || !y.ticks || !y.ticks.color || !y.grid || !y.grid.color) fail("dark theme left axis colours at the light defaults");
 
   card.click("1h");
   const old = pending.length - 1;

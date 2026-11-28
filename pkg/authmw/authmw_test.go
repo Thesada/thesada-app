@@ -51,8 +51,8 @@ func TestRequireAuth_Anonymous_RedirectsToLogin(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusFound)
 	}
-	if loc := rec.Header().Get("Location"); loc != "/login" {
-		t.Errorf("Location = %q, want %q", loc, "/login")
+	if loc := rec.Header().Get("Location"); loc != "/login?rt=%2Fdevices" {
+		t.Errorf("Location = %q, want %q", loc, "/login?rt=%2Fdevices")
 	}
 	if called {
 		t.Error("next should not have been called for anonymous request")
@@ -162,8 +162,8 @@ func TestLoginGates_AnonymousNonHTMX_Keeps302(t *testing.T) {
 				if rec.Code != http.StatusFound {
 					t.Errorf("status = %d, want %d", rec.Code, http.StatusFound)
 				}
-				if loc := rec.Header().Get("Location"); loc != "/login" {
-					t.Errorf("Location = %q, want /login", loc)
+				if loc := rec.Header().Get("Location"); loc != "/login?rt=%2Fdevices" {
+					t.Errorf("Location = %q, want /login?rt=%%2Fdevices", loc)
 				}
 				if got := rec.Header().Get("HX-Redirect"); got != "" {
 					t.Errorf("HX-Redirect = %q, want none", got)
@@ -241,3 +241,25 @@ func TestEffectiveTenantID(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// A logged-out claim scan keeps its path and query as the vetted return target.
+func TestLoginURL_KeepsSafeReturnTarget(t *testing.T) {
+	cases := []struct {
+		method, target, hx, want string
+	}{
+		{http.MethodGet, "/devices/claim?device_id=thesada-0123456789ab&code=12345678", "",
+			"/login?rt=%2Fdevices%2Fclaim%3Fdevice_id%3Dthesada-0123456789ab%26code%3D12345678"},
+		{http.MethodGet, "/", "", "/login"},
+		{http.MethodPost, "/devices/claim", "", "/login"},
+		{http.MethodGet, "/devices", "true", "/login"},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(c.method, c.target, nil)
+		if c.hx != "" {
+			req.Header.Set("HX-Request", c.hx)
+		}
+		if got := LoginURL(req); got != c.want {
+			t.Errorf("LoginURL(%s %s hx=%s) = %q, want %q", c.method, c.target, c.hx, got, c.want)
+		}
+	}
+}

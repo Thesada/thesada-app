@@ -55,12 +55,13 @@ Both forms require a second-human review nod and a comment that explains *why*. 
 
 ## Adding a CVE exception
 
-govulncheck doesn't support inline silencing. If a reachable CVE has no upstream fix yet:
+govulncheck has no inline silencing or exclude flag. If a reachable CVE has no upstream fix yet:
 
 1. File an issue tracking the upstream fix.
 2. Add a build-time guard or a runtime mitigation that breaks the reachability path.
 3. Re-run `make sec-vuln`. If govulncheck no longer reports the CVE, you're done.
-4. If it still reports, you need to either pin to a different version or accept the gate failure on the affected branch (and tag the relevant commits with the issue link).
+4. If it still reports because static analysis cannot see the guard (a config check, say), add the id to `scripts/govulncheck-allowlist.txt` with the call path, the guard and a recheck note. `scripts/check-govulncheck.sh` fails on any reachable id not listed there, and on a listed id that is no longer reported, so the line has to go once the fix lands.
+5. Otherwise pin to a different version or accept the gate failure on the affected branch (and tag the relevant commits with the issue link).
 
 Do NOT skip the security workflow with `[skip ci]` or branch protection bypass to push past a vuln. The gate is the point.
 

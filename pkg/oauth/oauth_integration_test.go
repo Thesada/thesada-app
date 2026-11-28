@@ -2,7 +2,7 @@
 
 // Real-Postgres contracts for the OIDC auth-request state store. Start
 // persists a single-use, expiring, PKCE-bound request row; LookupState
-// consumes it exactly once. No mocked DB (AGENTS.md) - these run under the
+// consumes it exactly once. No mocked DB - these run under the
 // integration tag against a testcontainers TimescaleDB, on the same admin
 // (BYPASSRLS) pool the service layer uses.
 //

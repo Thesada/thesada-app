@@ -82,7 +82,7 @@ func TestBrokerDriftStaleReadLogsNoSave(t *testing.T) {
 	fd.Handle("config.dump", func(string, []byte) []mqtttest.Response { return mqtttest.OK(configJSON) })
 
 	// A config change that may land for an hour makes every read started now stale.
-	if err := env.Services.DeviceFiles.MarkConfigChanging(ctx, tenant, devicePk, time.Hour); err != nil {
+	if _, err := env.Services.DeviceFiles.MarkConfigChanging(ctx, tenant, devicePk, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	c.pullAndSnapshot(tenant, devicePk, prefix, "config.json", "drift", sha256Hex(configJSON))

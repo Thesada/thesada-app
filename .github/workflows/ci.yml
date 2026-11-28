@@ -64,13 +64,15 @@ jobs:
           THESADA_REQUIRE_TAGS: "1"
         run: make node-cli && make test
 
-  # 80%+ floor on csrf, oauth, pki, authmw + the file pkg/service/auth.go.
-  # Runs -tags integration; testcontainers uses ubuntu-latest's Docker daemon.
+  # 80%+ floor on csrf, oauth, pki, authmw + the file pkg/service/auth.go,
+  # off the profile of a full -tags integration run (make coverage runs
+  # test-integration first). Kept apart from integration: both job names are
+  # required checks in the GitHub rulesets.
   coverage:
     runs-on: ubuntu-latest
     # testcontainers spins Docker; bound the job so a daemon/pull/cleanup
     # stall can't hold the runner to GitHub's 360-min default.
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
         with:

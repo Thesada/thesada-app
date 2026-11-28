@@ -80,14 +80,28 @@ node-cli: ## Download the pinned Node into tools/node for the inline-script test
 tidy: ## Refresh go.sum and prune unused modules
 	$(GO) mod tidy
 
+TOOL_BIN = $(or $(shell $(GO) env GOBIN),$(shell $(GO) env GOPATH)/bin)
+
+# Skip a tool whose pinned version is installed, else build it beside the
+# target and rename it in, so parallel installs never share a half-written file.
+define go-tool
+	@bin="$(TOOL_BIN)/$(notdir $(1))"; \
+	if $(GO) version -m "$$bin" 2>/dev/null | awk '$$1 == "mod" && $$3 == "$(2)" { f = 1 } END { exit !f }'; then \
+		echo "$(notdir $(1)) $(2) already installed"; \
+	else \
+		mkdir -p "$(TOOL_BIN)" && tmp="$$(mktemp -d "$(TOOL_BIN)/.install.XXXXXX")" && \
+		{ GOBIN="$$tmp" $(GO) install $(1)@$(2) && mv -f "$$tmp/$(notdir $(1))" "$$bin"; rc=$$?; rm -rf "$$tmp"; exit $$rc; }; \
+	fi
+endef
+
 .PHONY: lint-tools
-lint-tools: ## Install the pinned golangci-lint into GOPATH/bin
-	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
+lint-tools: ## Install the pinned golangci-lint into GOBIN (or GOPATH/bin) unless it is there
+	$(call go-tool,github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_VERSION))
 
 .PHONY: sec-tools
-sec-tools: ## Install the pinned govulncheck and gosec into GOPATH/bin
-	$(GO) install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
-	$(GO) install github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION)
+sec-tools: ## Install the pinned govulncheck and gosec into GOBIN (or GOPATH/bin) unless they are there
+	$(call go-tool,golang.org/x/vuln/cmd/govulncheck,$(GOVULNCHECK_VERSION))
+	$(call go-tool,github.com/securego/gosec/v2/cmd/gosec,$(GOSEC_VERSION))
 
 ##@ Build
 
@@ -119,17 +133,20 @@ test: ## Unit tests, no database
 pin-check: ## Compose pin is not behind the newest tag and equals THESADA_RELEASE_TAG when set (the release workflow gate)
 	$(GO) test -count=1 -run '^TestComposePinIsNotBehindNewestTag$$' ./deploy/
 
+# One integration run gives both the pass/fail and the profile the coverage gate reads.
+INTEGRATION_PROFILE ?= coverage-integration.out
+
 .PHONY: test-integration
-test-integration: ## DB-backed tests via testcontainers (needs Docker, 1200s timeout)
-	$(GO) test -tags integration -timeout 1200s ./...
+test-integration: ## DB-backed tests via testcontainers, writes the coverage profile (needs Docker, 1200s timeout)
+	$(GO) test -tags integration -timeout 1200s -covermode=set -coverprofile=$(INTEGRATION_PROFILE) ./...
 
 .PHONY: cover
 cover: ## Coverage of the security packages on the integration lane (needs Docker)
 	$(GO) test -tags integration -cover -timeout 300s ./pkg/csrf/... ./pkg/oauth/... ./pkg/pki/... ./pkg/authmw/...
 
 .PHONY: coverage
-coverage: ## 80% floor on the security packages, the CI gate (needs Docker)
-	bash scripts/check-coverage.sh
+coverage: test-integration ## 80% floor on the security packages off the integration profile, the CI gate (needs Docker)
+	PROFILE=$(INTEGRATION_PROFILE) bash scripts/check-coverage.sh
 
 ##@ Lint
 
@@ -146,8 +163,8 @@ pools: ## Forbid new pools.App callers outside the pkg/db contract
 	bash scripts/check-pools-app.sh
 
 .PHONY: sec-vuln
-sec-vuln: ## Reachability scan against the Go vulnerability database
-	govulncheck ./...
+sec-vuln: ## Reachability scan, fails on any advisory not in scripts/govulncheck-allowlist.txt
+	bash scripts/check-govulncheck.sh
 
 .PHONY: sec-full
 sec-full: ## Full gosec report; findings do not fail the run
@@ -174,5 +191,3 @@ ci: lint pools test test-integration coverage sec ## Local CI: lint, pools guard
 .PHONY: clean
 clean: ## Remove the binary and the generated CSS
 	rm -rf bin pkg/web/static/css/app.css
-
--include .forgejo/publish.mk

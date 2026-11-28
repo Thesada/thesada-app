@@ -1,0 +1,13 @@
+# Advisories the sec-vuln gate tolerates. One GO-YYYY-NNNN id per line, then
+# the reason. # comments and blank lines ignored. scripts/check-govulncheck.sh
+# fails any reachable advisory not listed here, and any listed id that is no
+# longer reported, so a fixed advisory forces its line out.
+
+# GO-2026-6278: gorilla/websocket v1.5.3 draws the client frame mask key from
+# math/rand. Only a client masks frames. The app's own websocket use is server
+# side (ws.Hub, admin MQTT shell via Upgrader), which never masks. The one client
+# path is mqtt.Start -> paho Connect -> netconn ws/wss -> websocket.Dialer.Dial,
+# and config.validateMQTTScheme refuses ws:// and wss:// THESADA_MQTT_URL values
+# at load, so it cannot run. Recheck: remove when gorilla/websocket tags a fix
+# and go.mod moves to it.
+GO-2026-6278

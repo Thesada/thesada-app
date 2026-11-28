@@ -243,6 +243,27 @@ func (c *Config) validate() error {
 		}
 		slog.Warn("config.weak_cookie_secret", "len", l, "want_min", minCookieSecretLen, "override", "THESADA_ALLOW_WEAK_SECRET")
 	}
+	return validateMQTTScheme(c.MQTTBrokerURL)
+}
+
+// mqttSchemes are the paho schemes that dial raw TCP or TLS. ws and wss are
+// refused: they run gorilla/websocket client framing (GO-2026-6278).
+var mqttSchemes = map[string]bool{"tcp": true, "mqtt": true, "tls": true, "ssl": true, "mqtts": true}
+
+// validateMQTTScheme refuses a broker URL whose scheme is not raw TCP or TLS.
+// in: THESADA_MQTT_URL value. out: nil when empty, scheme-less (paho reads tcp) or allowed.
+func validateMQTTScheme(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !strings.Contains(raw, "://") {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("THESADA_MQTT_URL: %w", err)
+	}
+	if !mqttSchemes[u.Scheme] {
+		return fmt.Errorf("THESADA_MQTT_URL scheme %q is not supported, use tcp://, mqtt://, tls://, ssl:// or mqtts://", u.Scheme)
+	}
 	return nil
 }
 

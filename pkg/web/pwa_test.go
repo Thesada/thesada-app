@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -100,5 +101,39 @@ func TestServiceWorkerRoute(t *testing.T) {
 	}
 	if got := rec.Header().Get("Service-Worker-Allowed"); got != "/" {
 		t.Fatalf("scope header %q", got)
+	}
+}
+
+func TestLayoutHeaderNotFaded(t *testing.T) {
+	raw, err := fs.ReadFile(templatesFS, "templates/layout.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	if !strings.Contains(body, `<html lang="en" class="bg-slate-900">`) {
+		t.Error("html background must match theme-color so the iOS status bar area stays dark")
+	}
+	if strings.Contains(body, `text-slate-400 text-xs truncate`) {
+		t.Error("header email must not use the dim slate-400")
+	}
+}
+
+func TestPhoneTablesScrollInsteadOfBreaking(t *testing.T) {
+	raw, err := os.ReadFile("../../assets/css/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(raw)
+	for _, need := range []string{"@media (width < 48rem)", ".rounded-xl.overflow-x-auto > table", "white-space: nowrap"} {
+		if !strings.Contains(css, need) {
+			t.Errorf("app.css missing %q", need)
+		}
+	}
+	tmpl, err := fs.ReadFile(templatesFS, "templates/settings.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(tmpl), `font-mono text-xs break-all">{{.Target}}`) {
+		t.Error("channel target must not break mid-word")
 	}
 }

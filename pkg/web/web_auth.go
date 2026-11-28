@@ -16,7 +16,7 @@ import (
 // handleLoginForm renders the email/password + magic link login form.
 // in: writer, request. out: HTML form.
 func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
-	data := map[string]interface{}{}
+	data := map[string]interface{}{"ReturnTo": safeReturn(r.URL.Query().Get("rt"), "")}
 	if provs, err := s.services.OAuth.ListEnabledProvidersForLogin(r.Context()); err == nil && len(provs) > 0 {
 		data["OAuthProviders"] = provs
 	}
@@ -25,7 +25,7 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 
 // handleLoginSubmit processes login: a password is checked, then a session
 // or a TOTP challenge; an empty password emails a magic link.
-// in: writer, POST form (email, password). out: 302 to /devices, /login/totp, or the form.
+// in: writer, POST form (email, password, rt). out: 302 to rt or /devices, /login/totp, or the form.
 func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
@@ -33,8 +33,9 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	email := strings.TrimSpace(r.PostFormValue("email"))
 	password := r.PostFormValue("password")
+	rt := safeReturn(r.PostFormValue("rt"), "")
 	if email == "" {
-		s.render(w, r, "login.html", map[string]interface{}{"Error": "Email is required."})
+		s.render(w, r, "login.html", map[string]interface{}{"Error": "Email is required.", "ReturnTo": rt})
 		return
 	}
 
@@ -43,19 +44,19 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		u, err := s.services.Auth.VerifyPasswordAnyTenant(email, password, ip)
 		if err != nil {
 			if errors.Is(err, service.ErrBadCredentials) {
-				s.render(w, r, "login.html", map[string]interface{}{"Error": "Invalid email or password."})
+				s.render(w, r, "login.html", map[string]interface{}{"Error": "Invalid email or password.", "ReturnTo": rt})
 				return
 			}
 			if errors.Is(err, service.ErrLoginRateLimited) {
 				slog.Warn("auth.login.rate_limited", "ip", ip)
-				s.renderStatus(w, r, http.StatusTooManyRequests, "login.html", map[string]interface{}{"Error": "Too many attempts. Wait a few minutes and try again."})
+				s.renderStatus(w, r, http.StatusTooManyRequests, "login.html", map[string]interface{}{"Error": "Too many attempts. Wait a few minutes and try again.", "ReturnTo": rt})
 				return
 			}
 			slog.Error("auth.password.verify_failed", "ip", ip, "err", err)
 			http.Error(w, "login failed", http.StatusInternalServerError)
 			return
 		}
-		s.continueLocalLogin(w, r, u, "password")
+		s.continueLocalLogin(w, r, u, "password", rt)
 		return
 	}
 
@@ -101,7 +102,7 @@ func (s *Server) handleMagicLinkVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Magic link is a local login, so an enrolled TOTP secret still challenges.
-	s.continueLocalLogin(w, r, u, "magic_link")
+	s.continueLocalLogin(w, r, u, "magic_link", "")
 }
 
 // handleLogout revokes the current session and clears the cookie.

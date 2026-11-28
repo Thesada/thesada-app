@@ -6,9 +6,11 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"thesada.app/app/pkg/httpsec"
+	"thesada.app/app/pkg/oauth"
 	"thesada.app/app/pkg/service"
 )
 
@@ -104,6 +106,20 @@ func EffectiveTenantID(r *http.Request) string {
 	return s.User.TenantID
 }
 
+// LoginURL is /login, plus the request path and query as rt on a plain GET
+// that passes the same-origin check, so login returns to the scanned page.
+// in: request. out: login path.
+func LoginURL(r *http.Request) string {
+	if r.Method != http.MethodGet || r.Header.Get("HX-Request") == "true" {
+		return "/login"
+	}
+	rt := r.URL.RequestURI()
+	if rt == "/" || !oauth.IsSafeReturnTo(rt) {
+		return "/login"
+	}
+	return "/login?rt=" + url.QueryEscape(rt)
+}
+
 // redirectToLogin sends an anonymous caller to /login. htmx gets 401 plus
 // HX-Redirect, since fetch follows a 302 and the swap empties the block.
 // in: writer, request. out: none.
@@ -113,7 +129,7 @@ func redirectToLogin(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	http.Redirect(w, r, "/login", http.StatusFound)
+	http.Redirect(w, r, LoginURL(r), http.StatusFound)
 }
 
 // RequireAuth wraps a handler and redirects unauthenticated requests to /login.

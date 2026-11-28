@@ -229,6 +229,10 @@
             }
             canvas.classList.remove('hidden');
             empty.classList.add('hidden');
+            var dark = document.documentElement.getAttribute("data-theme") === "dark";
+            var line = dark ? "226, 232, 240" : "15, 23, 42";
+            var ink = dark ? "rgb(203, 213, 225)" : "rgb(71, 85, 105)";
+            var rule = dark ? "rgba(255, 255, 255, 0.1)" : "rgba(0, 0, 0, 0.1)";
             var config = {
               type: "line",
               data: {
@@ -240,8 +244,8 @@
                   {
                     label: currentMetric + " (avg)",
                     data: data.avg,
-                    borderColor: "rgb(15, 23, 42)",
-                    backgroundColor: "rgba(15, 23, 42, 0.1)",
+                    borderColor: "rgb(" + line + ")",
+                    backgroundColor: "rgba(" + line + ", 0.1)",
                     tension: 0.2,
                     pointRadius: 0,
                     borderWidth: 2
@@ -276,6 +280,7 @@
                     // overlap. Chart.js does not auto-adapt this and 8 ticks
                     // are unreadable below ~480px.
                     ticks: {
+                      color: ink,
                       maxRotation: 0,
                       autoSkip: true,
                       autoSkipPadding: 12,
@@ -283,10 +288,10 @@
                     },
                     grid: { display: false }
                   },
-                  y: { beginAtZero: false }
+                  y: { beginAtZero: false, ticks: { color: ink }, grid: { color: rule } }
                 },
                 plugins: {
-                  legend: { display: true, position: "top", labels: { boxWidth: 12, font: { size: 10 } } },
+                  legend: { display: true, position: "top", labels: { color: ink, boxWidth: 12, font: { size: 10 } } },
                   tooltip: { mode: "index", intersect: false }
                 }
               }
@@ -294,6 +299,7 @@
             // Same canvas: update in place, no destroy/recreate flicker.
             if (chart && chart.canvas === canvas) {
               chart.data = config.data;
+              chart.options = config.options;
               chart.update("none");
               return;
             }
@@ -338,6 +344,7 @@
         if (typeof Chart === "undefined") { setTimeout(init, 100); return; }
         bindCard();
         document.addEventListener("htmx:before:settle", bindCard);
+        document.addEventListener("thesada:theme", function () { if (chart) fetchAndRender(); });
       }
       init();
     })();

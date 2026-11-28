@@ -162,7 +162,7 @@ func (s *Server) bulkOTACheck(w http.ResponseWriter, r *http.Request) {
 			failedIDs = append(failedIDs, device.DeviceID)
 			continue
 		}
-		if err := s.markConfigChanging(r.Context(), device, otaConfigWindow); err != nil {
+		if _, err := s.markConfigChanging(r.Context(), device, otaConfigWindow); err != nil {
 			s.releaseDeviceWrite(device.ID, claim)
 			slog.Error("bulk ota: could not record the config change, not sent", "device", device.DeviceID, "err", err)
 			failed++

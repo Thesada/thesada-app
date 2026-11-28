@@ -1,6 +1,6 @@
 {{define "layout"}}
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="bg-slate-900">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -15,6 +15,7 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="icon" href="/static/icons/icon-192.png?v=2" type="image/png">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png?v=2">
+  <script src="/static/js/theme.js"></script>
   <link rel="stylesheet" href="/static/css/app.css">
   <!-- vendored JS - check quarterly, see  -->
   <!-- htmx 4.0.1 - https://four.htmx.org/docs/ -->
@@ -23,7 +24,7 @@
   <script src="/static/js/chart.umd.min.js" defer></script>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen">
-  <header class="sticky top-0 z-20 bg-slate-900 text-slate-100" style="padding-top: env(safe-area-inset-top)">
+  <header class="theme-fixed sticky top-0 z-20 bg-slate-900 text-slate-100" style="padding-top: env(safe-area-inset-top)">
     <div class="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
       <a href="/" class="font-semibold text-lg tracking-tight shrink-0">thesada</a>
       {{if .User}}
@@ -41,11 +42,11 @@
           </form>
           {{end}}
         {{end}}
-        <span class="text-slate-400 text-xs truncate">{{.User.Email}}</span>
+        <span class="text-slate-200 text-xs truncate">{{.User.Email}}</span>
       </div>
       {{end}}
     </div>
-    <nav class="hidden md:block bg-white border-b border-slate-200 text-slate-800">
+    <nav class="theme-follow hidden md:block bg-white border-b border-slate-200 text-slate-800">
       <div class="max-w-5xl mx-auto px-2 py-1 flex flex-wrap items-center gap-1">
         {{template "appnav" .}}
       </div>

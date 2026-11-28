@@ -72,7 +72,7 @@ func BackfillDeviceSecrets(ctx context.Context, secrets *SecretService, devices 
 		// canonical content with the blanked form and appends no history row.
 		if _, changed, berr := blankConfigSecrets(snap.Content); berr != nil {
 			// Fail loud: a blank failure here means plaintext may remain in
-			// device_files while the CLI reports success (AGENTS.md: reject
+			// device_files while the CLI reports success (reject
 			// silent fallbacks).
 			return res, fmt.Errorf("backfill: blank config %s/%s: %w", d.TenantID, d.DeviceID, berr)
 		} else if changed {
