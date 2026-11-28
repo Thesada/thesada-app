@@ -58,7 +58,7 @@ func TestAuthSessions(t *testing.T) {
 	}
 
 	t.Run("create_then_validate", func(t *testing.T) {
-		token, expires, err := auth.CreateSession(tA, user.ID, "password", "test-agent", "1.2.3.4")
+		token, expires, err := auth.CreateSession(tA, user.ID, "password", "test-browser", "1.2.3.4")
 		if err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}

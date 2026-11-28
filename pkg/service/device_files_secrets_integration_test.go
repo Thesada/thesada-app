@@ -383,6 +383,49 @@ func TestUpsertFromDevice(t *testing.T) {
 		}
 	})
 
+	// Masked firmware reads (set) or (empty) for a secret: neither is a value.
+	t.Run("a_masked_read_stores_no_secret", func(t *testing.T) {
+		pk := mustUpsert(t, svcs.Devices, tA, "dfs-dev-20", "", "", "", "")
+		content := `{"mqtt":{"password":"(set)"},"web":{"password":"(empty)"},"wifi":{"networks":[` +
+			`{"ssid":"home","password":"(set)"},{"ssid":"cafe","password":"(empty)"}]}}`
+		read(t, pk, content, "sha-masked", start(t))
+		for _, f := range []string{"mqtt.password", "web.password", "wifi.password:home", "wifi.password:cafe"} {
+			if v, found := reveal(t, pk, f); found {
+				t.Errorf("%s stored as %q, want nothing", f, v)
+			}
+		}
+		if !open(t, df, pk, "cafe") || open(t, df, pk, "home") {
+			t.Error("want cafe open and home not")
+		}
+		latest, err := df.Latest(ctx, tA, pk, "config.json")
+		if err != nil || latest == nil || latest.SHA256 != "sha-masked" {
+			t.Fatalf("Latest = %+v, %v", latest, err)
+		}
+		if service.HasMaskMarker(latest.Content) {
+			t.Errorf("snapshot keeps a marker: %s", latest.Content)
+		}
+		// The same device on old firmware still fills the gap from its clear value.
+		read(t, pk, `{"mqtt":{"password":"mq-clear"}}`, "sha-clear", start(t))
+		if v, _ := reveal(t, pk, "mqtt.password"); v != "mq-clear" {
+			t.Errorf("mqtt.password after a clear read = %q, want mq-clear", v)
+		}
+	})
+
+	t.Run("a_marker_is_never_a_secret_value", func(t *testing.T) {
+		pk := mustUpsert(t, svcs.Devices, tA, "dfs-dev-21", "", "", "", "")
+		for _, m := range []string{"(set)", "(empty)"} {
+			if err := sec.SetSecret(ctx, tA, pk, "mqtt.password", m); !errors.Is(err, service.ErrMarkerSecret) {
+				t.Errorf("SetSecret %s = %v, want ErrMarkerSecret", m, err)
+			}
+			if err := sec.SetTenantSecret(ctx, tA, "mqtt.password", m); !errors.Is(err, service.ErrMarkerSecret) {
+				t.Errorf("SetTenantSecret %s = %v, want ErrMarkerSecret", m, err)
+			}
+		}
+		if err := sec.SetSecret(ctx, tA, pk, "mqtt.password", "(set)!"); err != nil {
+			t.Errorf("a longer value holding a marker: %v", err)
+		}
+	})
+
 	t.Run("operator_content_never_reaches_the_store", func(t *testing.T) {
 		pk := mustUpsert(t, svcs.Devices, tA, "dfs-dev-11", "", "", "", "")
 		content := `{"wifi":{"networks":[{"ssid":"lab","password":""}]},"mqtt":{"password":"typed"}}`

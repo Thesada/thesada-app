@@ -50,7 +50,7 @@ func (s *AuthService) CreateSession(userID uuid.UUID, method AuthMethod) (string
 
 Headers are not the place for essays. One subtle WHY clause is fine; full
 rationale (alternatives considered, history, tuning math) goes in the commit
-body or a session doc, never the header. If a header runs past ~3 lines, the
+body or the PR description, never the header. If a header runs past ~3 lines, the
 extra lines are rationale that belongs elsewhere.
 
 Big functions get split into helpers. Three similar lines is better
@@ -186,11 +186,12 @@ If a function is part of the auth / CSRF / OAuth / pkg-pki / tenant-
 scoping path, the contract test exists. The test describes what must
 remain true. It runs in CI on every PR.
 
-The `coverage` job in ci.yml enforces 80 %+ statement coverage on
+`make coverage` enforces 80 %+ statement coverage on
 `pkg/csrf`, `pkg/oauth`, `pkg/pki`, and `pkg/authmw` via
-`scripts/check-coverage.sh` (run it locally with `make cover`). It runs
-`-tags integration` so oauth's DB-backed paths count against a real
-Postgres (testcontainers, no mocked DB).
+`scripts/check-coverage.sh`. It reads the profile of the
+`make test-integration` run, so the integration tests run once for both
+gates, and oauth's DB-backed paths count against a real Postgres
+(testcontainers, no mocked DB). The `integration` job in CI runs it.
 
 `pkg/service/auth.go` is gated too, as a **file** rather than a package
 (the `FILES` list in the script). `pkg/service` as a whole sits around

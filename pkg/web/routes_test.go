@@ -12,6 +12,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -112,8 +113,9 @@ func TestGatedRoutes_RejectAnonymous(t *testing.T) {
 				t.Fatalf("anonymous %s %s = %d, want 302 (missing auth wrapper?)",
 					rt.method, rt.path, rec.Code)
 			}
-			if loc := rec.Header().Get("Location"); loc != "/login" {
-				t.Errorf("Location = %q, want /login", loc)
+			loc, err := url.Parse(rec.Header().Get("Location"))
+			if err != nil || loc.Path != "/login" {
+				t.Errorf("Location = %q, want /login", rec.Header().Get("Location"))
 			}
 		})
 	}

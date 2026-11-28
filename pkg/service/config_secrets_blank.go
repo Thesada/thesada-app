@@ -19,7 +19,10 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -29,7 +32,21 @@ import (
 // sensitiveConfigKeyRE matches a config leaf key whose value must never be
 // persisted in cleartext. Long words match as a suffix (`api_key`, `passwd`),
 // short ones only as the whole key or after _ . - (`sim_pin`, not `spin`).
-var sensitiveConfigKeyRE = regexp.MustCompile(`(?i)(password|passwd|secret|token|key|passphrase|credential|(^|[_.-])(pass|pwd|psk|pin|seed))$`)
+// Same list as the firmware mask (config_mask_policy.h): a bare `pin` is a GPIO.
+var sensitiveConfigKeyRE = regexp.MustCompile(`(?i)(password|passwd|secret|token|key|passphrase|credential|claim_code|(^|[_.-])(pass|pwd|psk|seed|sim_pin))$`)
+
+// Masked firmware reads a secret field back as one of these, never its value.
+// The device refuses to store either, so the exact strings are not secrets.
+const (
+	MaskSet   = "(set)"
+	MaskEmpty = "(empty)"
+)
+
+// isMaskMarker reports whether v is exactly one of the read markers.
+func isMaskMarker(v any) bool {
+	s, ok := v.(string)
+	return ok && (s == MaskSet || s == MaskEmpty)
+}
 
 // blankConfigSecrets returns config.json content with every sensitive leaf
 // emptied (value -> ""), preserving the object shape and key set. It blanks
@@ -51,7 +68,7 @@ func blankConfigSecrets(content string) (string, bool, error) {
 	if err := json.Unmarshal([]byte(trimmed), &m); err != nil {
 		// Object-shaped ("{...") content that will not parse must fail closed:
 		// returning it verbatim would persist plaintext secrets through the
-		// Upsert chokepoint (AGENTS.md: reject silent fallbacks).
+		// Upsert chokepoint (reject silent fallbacks).
 		return "", false, fmt.Errorf("blank config secrets: parse config.json: %w", err)
 	}
 
@@ -99,12 +116,12 @@ func extractConfigSecrets(content string) map[string]string {
 		return out
 	}
 	for _, dotted := range ScalarSecretFields {
-		if v, ok := readPath(m, strings.Split(dotted, ".")); ok && v != "" {
+		if v, ok := readPath(m, strings.Split(dotted, ".")); ok && v != "" && !isMaskMarker(v) {
 			out[dotted] = v
 		}
 	}
 	for _, ssid := range WifiNetworkSSIDs(m) {
-		if pw, ok := wifiNetworkPassword(m, ssid); ok && pw != "" {
+		if pw, ok := wifiNetworkPassword(m, ssid); ok && pw != "" && !isMaskMarker(pw) {
 			out[WifiSecretField(ssid)] = pw
 		}
 	}
@@ -234,7 +251,7 @@ func primaryWifiSSID(content string) string {
 }
 
 // openWifiSSIDs returns the SSID of every wifi.networks[] entry whose password
-// is an explicit "", in config order. A device read records these as open (#88).
+// is an explicit "" or reads (empty), in config order. A device read records these as open (#88).
 // in: config.json content. out: SSIDs (may be empty).
 func openWifiSSIDs(content string) []string {
 	var m map[string]any
@@ -244,7 +261,7 @@ func openWifiSSIDs(content string) []string {
 	var out []string
 	for _, net := range wifiNetworks(m) {
 		ssid, _ := net["ssid"].(string)
-		if pw, ok := net["password"].(string); ok && pw == "" && ssid != "" && !slices.Contains(out, ssid) {
+		if pw, ok := net["password"].(string); ok && (pw == "" || pw == MaskEmpty) && ssid != "" && !slices.Contains(out, ssid) {
 			out = append(out, ssid)
 		}
 	}
@@ -290,8 +307,9 @@ func BlankSecretFields(content string) ([]string, []string, error) {
 	return fields, unknown, nil
 }
 
-// emptyValue: "" or null, both of which the firmware reads as an empty string.
-func emptyValue(v any) bool { return v == nil || v == "" }
+// emptyValue: "" or null, both of which the firmware reads as an empty string,
+// or a read marker, which the app sends as "".
+func emptyValue(v any) bool { return v == nil || v == "" || isMaskMarker(v) }
 
 // emptyLeafAt reports whether the leaf at segs is present and empty or null.
 func emptyLeafAt(m map[string]any, segs []string) bool {
@@ -329,7 +347,7 @@ func blankSensitivePaths(v any, at string, out *[]string) {
 				p = at + "." + k
 			}
 			if s, ok := val.(string); ok || val == nil {
-				if s == "" && sensitiveConfigKeyRE.MatchString(k) {
+				if (s == "" || isMaskMarker(s)) && sensitiveConfigKeyRE.MatchString(k) {
 					*out = append(*out, p)
 				}
 				continue
@@ -341,4 +359,106 @@ func blankSensitivePaths(v any, at string, out *[]string) {
 			blankSensitivePaths(item, fmt.Sprintf("%s[%d]", at, i), out)
 		}
 	}
+}
+
+// walkSecretLeaves calls fn for every value under a sensitive key, in maps and
+// arrays, with the map holding it. Values under other keys are walked into.
+func walkSecretLeaves(v any, fn func(m map[string]any, k string)) {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			if sensitiveConfigKeyRE.MatchString(k) {
+				fn(t, k)
+				continue
+			}
+			walkSecretLeaves(val, fn)
+		}
+	case []any:
+		for _, item := range t {
+			walkSecretLeaves(item, fn)
+		}
+	}
+}
+
+// decodeConfig parses config.json content with numbers kept as written. out: tree, ok.
+func decodeConfig(content string) (any, bool) {
+	dec := json.NewDecoder(strings.NewReader(content))
+	dec.UseNumber()
+	var v any
+	if dec.Decode(&v) != nil {
+		return nil, false
+	}
+	// More stops at a closing delimiter, so only EOF proves nothing trails the value.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, false
+	}
+	return v, true
+}
+
+// HasMaskMarker reports whether config.json content holds a read marker under a
+// secret key, so it is a masked read. in: content. out: masked.
+func HasMaskMarker(content string) bool {
+	v, ok := decodeConfig(content)
+	if !ok {
+		return false
+	}
+	found := false
+	walkSecretLeaves(v, func(m map[string]any, k string) {
+		found = found || isMaskMarker(m[k])
+	})
+	return found
+}
+
+// BlankMaskMarkers returns content with every marker under a secret key sent as
+// "", so neither firmware generation stores a marker as a value. Content without
+// one, or that does not parse, comes back unchanged. in: content. out: content.
+func BlankMaskMarkers(content string) string {
+	v, ok := decodeConfig(content)
+	if !ok {
+		return content
+	}
+	changed := false
+	walkSecretLeaves(v, func(m map[string]any, k string) {
+		if isMaskMarker(m[k]) {
+			m[k] = ""
+			changed = true
+		}
+	})
+	if !changed {
+		return content
+	}
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return content
+	}
+	return string(out)
+}
+
+// maskLikeFirmware replaces every non-null value under a secret key with the
+// marker the firmware serves for it: (empty) for "", (set) for anything else.
+func maskLikeFirmware(v any) {
+	walkSecretLeaves(v, func(m map[string]any, k string) {
+		switch m[k] {
+		case nil:
+		case "":
+			m[k] = MaskEmpty
+		default:
+			m[k] = MaskSet
+		}
+	})
+}
+
+// MaskedConfigEqual reports whether served, a masked copy the firmware read
+// back, is written once masked the same way. Numbers compare by value, as the
+// firmware prints them again. in: written content, served copy. out: equal.
+func MaskedConfigEqual(written, served string) bool {
+	var w, s any
+	if json.Unmarshal([]byte(written), &w) != nil || json.Unmarshal([]byte(served), &s) != nil {
+		return false
+	}
+	if _, ok := w.(map[string]any); !ok {
+		return false
+	}
+	maskLikeFirmware(w)
+	return reflect.DeepEqual(w, s)
 }

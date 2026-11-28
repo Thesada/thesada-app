@@ -81,7 +81,7 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		writePasskeyError(w, http.StatusInternalServerError, "Login failed.")
 		return
 	}
-	writePasskeyJSON(w, http.StatusOK, map[string]string{"redirect": "/devices"})
+	writePasskeyJSON(w, http.StatusOK, map[string]string{"redirect": s.takeLoginReturn(w, r)})
 }
 
 // passkeyLoginFailed maps a login ceremony error to its JSON answer.

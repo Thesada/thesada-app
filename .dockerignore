@@ -3,11 +3,7 @@
 # excluded so the linux builder redownloads the linux binary.
 tools/
 bin/
-.git/
-.github/
-.gitea/
-.forgejo/
+# Dotfiles and dot dirs (VCS, CI, editor, env) stay out.
+.*
 *.md
-.env
-.env.*
 !.env.example

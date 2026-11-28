@@ -109,6 +109,8 @@ Optional (but recommended):
 - `THESADA_HTTP_ADDR` - default `:8080`
 - `THESADA_MQTT_URL` / `_USER` / `_PASS` / `_CLIENT_ID` / `_TOPIC_ROOT` - MQTT
   subscriber. If `THESADA_MQTT_URL` is empty, the subscriber is disabled.
+  Schemes: `tcp://`, `mqtt://`, `tls://`, `ssl://`, `mqtts://`. `ws://` and
+  `wss://` are refused at startup.
 - `THESADA_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_FROM` - magic link email
   send. If `THESADA_SMTP_HOST` is empty, the mailer logs a warning and drops
   the message (useful for local dev; paste the link from the log instead).

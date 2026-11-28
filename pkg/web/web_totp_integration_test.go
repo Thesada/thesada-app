@@ -158,12 +158,12 @@ func postLogin(t *testing.T, srv http.Handler, email, password string) *httptest
 }
 
 // postTOTP submits a code against the pending challenge cookie.
-// in: t, handler, cookie, code, remote addr. out: recorder.
-func postTOTP(t *testing.T, srv http.Handler, pending *http.Cookie, code, remote string) *httptest.ResponseRecorder {
+// in: t, handler, cookie, code, remote addr, extra cookies. out: recorder.
+func postTOTP(t *testing.T, srv http.Handler, pending *http.Cookie, code, remote string, extra ...*http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
 	tok := csrfCookie(t, srv)
 	form := url.Values{"code": {code}, csrf.FormField: {tok.Value}}
-	return submitForm(srv, "/login/totp", form, []*http.Cookie{tok, pending}, remote)
+	return submitForm(srv, "/login/totp", form, append([]*http.Cookie{tok, pending}, extra...), remote)
 }
 
 // postAuthed submits a settings form with the session and a CSRF token.

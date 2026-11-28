@@ -15,12 +15,13 @@ import (
 const (
 	totpPendingCookie = "totp_pending"
 	totpSetupCookie   = "totp_setup"
+	loginReturnCookie = "login_rt"
 )
 
 // continueLocalLogin opens a session, or a second-factor challenge when the
-// account enrolled TOTP or a passkey.
-// in: writer, request, user, session method. out: redirect or 500.
-func (s *Server) continueLocalLogin(w http.ResponseWriter, r *http.Request, u *service.User, method string) {
+// account enrolled TOTP or a passkey. A vetted rt rides the challenge in a cookie.
+// in: writer, request, user, session method, rt ("" for /devices). out: redirect or 500.
+func (s *Server) continueLocalLogin(w http.ResponseWriter, r *http.Request, u *service.User, method, rt string) {
 	secret, keys, err := s.services.Auth.SecondFactors(u.TenantID, u.ID)
 	if err != nil {
 		slog.Error("auth.totp.lookup_failed", "user_id", u.ID, "err", err)
@@ -28,7 +29,7 @@ func (s *Server) continueLocalLogin(w http.ResponseWriter, r *http.Request, u *s
 		return
 	}
 	if secret == "" && !keys {
-		s.startSessionAndRedirect(w, r, u, method, "/devices")
+		s.startSessionAndRedirect(w, r, u, method, safeReturn(rt, "/devices"))
 		return
 	}
 	token, expires, err := s.services.Auth.BeginTOTPLogin(u.TenantID, u.ID, method)
@@ -41,6 +42,12 @@ func (s *Server) continueLocalLogin(w http.ResponseWriter, r *http.Request, u *s
 		Name: totpPendingCookie, Value: token, Path: "/login",
 		Expires: expires, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
 	})
+	if rt != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name: loginReturnCookie, Value: url.QueryEscape(rt), Path: "/login",
+			Expires: expires, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+		})
+	}
 	slog.Info("auth.totp.state_change",
 		"from", method, "to", "challenged",
 		"user_id", u.ID, "tenant", u.TenantID)
@@ -141,7 +148,7 @@ func (s *Server) handleTOTPSubmit(w http.ResponseWriter, r *http.Request) {
 	slog.Info("auth.totp.state_change",
 		"from", "challenged", "to", "passed",
 		"user_id", u.ID, "tenant", u.TenantID, "method", method)
-	s.startSessionAndRedirect(w, r, u, method, "/devices")
+	s.startSessionAndRedirect(w, r, u, method, s.takeLoginReturn(w, r))
 }
 
 // handleTOTPBegin starts authenticator enrollment for a password account.
@@ -280,6 +287,21 @@ func (s *Server) clearTOTPCookie(w http.ResponseWriter, name, path string) {
 		Name: name, Value: "", Path: path, MaxAge: -1,
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
 	})
+}
+
+// takeLoginReturn reads and clears the challenge's return target, vetted again.
+// in: writer, request. out: rt or /devices.
+func (s *Server) takeLoginReturn(w http.ResponseWriter, r *http.Request) string {
+	c, err := r.Cookie(loginReturnCookie)
+	if err != nil || c.Value == "" {
+		return "/devices"
+	}
+	s.clearTOTPCookie(w, loginReturnCookie, "/login")
+	rt, err := url.QueryUnescape(c.Value)
+	if err != nil {
+		return "/devices"
+	}
+	return safeReturn(rt, "/devices")
 }
 
 // totpAuthURL is the otpauth link shown while enrollment is pending.

@@ -5,6 +5,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -257,7 +258,8 @@ func TestSensitiveConfigKey(t *testing.T) {
 	for _, k := range []string{
 		"password", "ap_password", "bot_token", "client_secret", "api_key", "client_key",
 		"passphrase", "credential", "pass", "web_pass", "pwd", "mqtt_pwd", "psk", "PSK",
-		"pin", "sim_pin", "seed", "wallet_seed", "passwd", "Password",
+		"sim_pin", "cellular_sim_pin", "seed", "wallet_seed", "passwd", "Password",
+		"claim_code", "enroll_claim_code",
 	} {
 		if !sensitiveConfigKeyRE.MatchString(k) {
 			t.Errorf("%q: want a match", k)
@@ -266,6 +268,7 @@ func TestSensitiveConfigKey(t *testing.T) {
 	for _, k := range []string{
 		"ssid", "host", "bypass", "compass", "spin", "spinning", "pinout", "pins",
 		"seeded", "proceed", "user", "chat_id", "port", "passive", "pass_through",
+		"pin", "heartbeat_pin", "led_pin", "PIN", "code", "claim",
 	} {
 		if sensitiveConfigKeyRE.MatchString(k) {
 			t.Errorf("%q: want no match", k)
@@ -293,5 +296,131 @@ func TestBlankSecretFields_NullIsEmpty(t *testing.T) {
 		if !slices.Equal(fields, c.fields) || (len(unknown) > 0) != c.unknown {
 			t.Errorf("%s: got %v unknown=%v, want %v unknown=%v", c.content, fields, unknown, c.fields, c.unknown)
 		}
+	}
+}
+
+// The two firmware masked generations side by side: an old dump carries the
+// values, a masked one only markers, and a marker is never a secret value.
+func TestMaskMarkers_BothFirmwareGenerations(t *testing.T) {
+	for _, c := range []struct {
+		name, content string
+		secrets       map[string]string
+		open          []string
+		marker        bool
+	}{
+		{"clear values", `{"mqtt":{"password":"m"},"wifi":{"networks":[{"ssid":"home","password":"pw"},{"ssid":"cafe","password":""}]}}`,
+			map[string]string{"mqtt.password": "m", "wifi.password:home": "pw"}, []string{"cafe"}, false},
+		{"masked", `{"mqtt":{"password":"(set)"},"web":{"password":"(empty)"},"wifi":{"networks":[{"ssid":"home","password":"(set)"},{"ssid":"cafe","password":"(empty)"}]}}`,
+			map[string]string{}, []string{"cafe"}, true},
+		{"marker inside a longer value is a value", `{"mqtt":{"password":"x(set)"},"wifi":{"networks":[{"ssid":"home","password":"(empty) "}]}}`,
+			map[string]string{"mqtt.password": "x(set)", "wifi.password:home": "(empty) "}, nil, false},
+		{"marker under a plain key is a value", `{"wifi":{"networks":[{"ssid":"(set)","password":"pw"}]},"device":{"name":"(empty)"}}`,
+			map[string]string{"wifi.password:(set)": "pw"}, nil, false},
+		{"case differs", `{"mqtt":{"password":"(SET)"}}`, map[string]string{"mqtt.password": "(SET)"}, nil, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := extractConfigSecrets(c.content); !maps.Equal(got, c.secrets) {
+				t.Errorf("secrets = %v, want %v", got, c.secrets)
+			}
+			if got := openWifiSSIDs(c.content); !slices.Equal(got, c.open) {
+				t.Errorf("open = %v, want %v", got, c.open)
+			}
+			if got := HasMaskMarker(c.content); got != c.marker {
+				t.Errorf("HasMaskMarker = %v, want %v", got, c.marker)
+			}
+			blanked, _, err := blankConfigSecrets(c.content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if HasMaskMarker(blanked) {
+				t.Errorf("stored form keeps a marker: %s", blanked)
+			}
+		})
+	}
+}
+
+// A marker in a posted config counts as blank, so the device guard runs for it.
+func TestBlankSecretFields_MarkerIsBlank(t *testing.T) {
+	for _, c := range []struct {
+		content string
+		fields  []string
+		unknown bool
+	}{
+		{`{"mqtt":{"password":"(set)"}}`, []string{"mqtt.password"}, false},
+		{`{"web":{"password":"(empty)"}}`, []string{"web.password"}, false},
+		{`{"wifi":{"networks":[{"ssid":"home","password":"(set)"}]}}`, []string{"wifi.password:home"}, false},
+		{`{"cellular":{"sim_pin":"(set)"}}`, nil, true},
+		{`{"mqtt":{"password":"(set)x"}}`, nil, false},
+	} {
+		fields, unknown, err := BlankSecretFields(c.content)
+		if err != nil {
+			t.Fatalf("%s: %v", c.content, err)
+		}
+		sort.Strings(fields)
+		if !slices.Equal(fields, c.fields) || (len(unknown) > 0) != c.unknown {
+			t.Errorf("%s: got %v unknown=%v, want %v unknown=%v", c.content, fields, unknown, c.fields, c.unknown)
+		}
+	}
+}
+
+// The app never sends a marker: each one under a secret key goes out as "".
+func TestBlankMaskMarkers(t *testing.T) {
+	in := `{"mqtt":{"password":"(set)","port":8883,"big":12345678901234567},"wifi":{"networks":[{"ssid":"(set)","password":"(empty)"}]},"lora":{"psk":"(set)"}}`
+	out := BlankMaskMarkers(in)
+	if HasMaskMarker(out) {
+		t.Fatalf("marker left: %s", out)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range [][]string{{"mqtt", "password"}, {"lora", "psk"}} {
+		if v, ok := leaf(t, m, p...); !ok || v != "" {
+			t.Errorf("%v = %q, want blank", p, v)
+		}
+	}
+	nets := m["wifi"].(map[string]any)["networks"].([]any)
+	if net := nets[0].(map[string]any); net["ssid"] != "(set)" || net["password"] != "" {
+		t.Errorf("network = %v, want ssid kept and password blank", net)
+	}
+	if !strings.Contains(out, "12345678901234567") {
+		t.Errorf("number lost precision: %s", out)
+	}
+	for _, same := range []string{`{"mqtt":{"password":"s3cret"}}`, `{"mqtt":{"password":""}}`, `not json`, `{"device":{"name":"(set)"}}`} {
+		if got := BlankMaskMarkers(same); got != same {
+			t.Errorf("%s changed to %s", same, got)
+		}
+	}
+	// Trailing input after the object is not JSON, so the write guard still refuses it.
+	for _, junk := range []string{`{"mqtt":{"password":"(set)"}}]`, `{"mqtt":{"password":"(set)"}}}`, `{"mqtt":{"password":"(set)"}} {}`} {
+		if got := BlankMaskMarkers(junk); got != junk || HasMaskMarker(junk) {
+			t.Errorf("%s changed to %s, want it unchanged", junk, got)
+		}
+	}
+}
+
+// The firmware serves a config-shaped file masked and pretty printed. A copy
+// is the written content when both mask to the same tree.
+func TestMaskedConfigEqual(t *testing.T) {
+	written := `{"mqtt":{"password":"","port":8883,"user":"u"},"wifi":{"networks":[{"ssid":"a","password":"pw"}]},"rate":0.5}`
+	served := "{\n  \"mqtt\": {\n    \"password\": \"(empty)\",\n    \"port\": 8883,\n    \"user\": \"u\"\n  },\n" +
+		"  \"wifi\": {\n    \"networks\": [\n      {\n        \"ssid\": \"a\",\n        \"password\": \"(set)\"\n      }\n    ]\n  },\n  \"rate\": 0.5\n}"
+	if !MaskedConfigEqual(written, served) {
+		t.Fatal("masked copy of the same config: want equal")
+	}
+	for name, other := range map[string]string{
+		"plain value changed": strings.Replace(served, `"u"`, `"v"`, 1),
+		"set for empty":       strings.Replace(served, `"(empty)"`, `"(set)"`, 1),
+		"empty for set":       strings.Replace(served, `"password": "(set)"`, `"password": "(empty)"`, 1),
+		"truncated":           served[:len(served)/2],
+		"key missing":         strings.Replace(served, `"rate": 0.5`, `"other": 0.5`, 1),
+		"clear value served":  strings.Replace(served, `"(set)"`, `"pw"`, 1),
+	} {
+		if MaskedConfigEqual(written, other) {
+			t.Errorf("%s: want not equal", name)
+		}
+	}
+	if MaskedConfigEqual("not json", "not json") {
+		t.Error("non-JSON content: want not equal, the bytes compare already ran")
 	}
 }

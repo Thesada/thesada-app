@@ -421,7 +421,7 @@ func (s *Server) tenantSecretTarget(w http.ResponseWriter, r *http.Request) (*se
 	slug := r.PathValue("slug")
 	tenant, err := s.services.Tenants.Get(slug)
 	// Get signals a missing tenant with ErrNotFound, never (nil, nil): a typo'd
-	// slug is a 404, and only a real backend failure is a 500 (AGENTS.md: a
+	// slug is a 404, and only a real backend failure is a 500 (a
 	// backend error must not masquerade as 404, nor a 404 as an error).
 	if errors.Is(err, service.ErrNotFound) {
 		http.NotFound(w, r)

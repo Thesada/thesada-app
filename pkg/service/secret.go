@@ -90,6 +90,10 @@ var ErrSecretsDisabled = errors.New("secret: device-config secrets disabled (THE
 // is a row in device_open_networks, and clearing a field is ClearDeviceSecret.
 var ErrEmptySecret = errors.New("secret: empty value, an open network or a cleared field is not a secret")
 
+// ErrMarkerSecret refuses a read marker, (set) or (empty), which masked firmware
+// shows in place of a secret and refuses to store itself.
+var ErrMarkerSecret = errors.New("secret: (set) and (empty) are read markers, not secret values")
+
 // SecretService encrypts, stores, and (server-side) decrypts device-config
 // secrets. keyring holds the deployment root KEK; nil means the feature is
 // off.
@@ -204,6 +208,9 @@ func checkDeviceSecret(devicePk uuid.UUID, field, value string) error {
 	if value == "" {
 		return ErrEmptySecret
 	}
+	if isMaskMarker(value) {
+		return ErrMarkerSecret
+	}
 	return nil
 }
 
@@ -274,6 +281,9 @@ func (s *SecretService) SetTenantSecret(ctx context.Context, tenantID, field, va
 	}
 	if value == "" {
 		return ErrEmptySecret
+	}
+	if isMaskMarker(value) {
+		return ErrMarkerSecret
 	}
 	return db.WithTenant(ctx, s.pools.App, tenantID, func(tx pgx.Tx) error {
 		dek, err := s.tenantDEK(ctx, tx, tenantID)

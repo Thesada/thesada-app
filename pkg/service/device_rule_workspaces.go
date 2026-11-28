@@ -48,6 +48,9 @@ func NormalizeRuleSlot(slot string) string {
 	return slot
 }
 
+// ErrRuleSlotHeld is SaveUnlessSource finding the slot saved from the source it must keep.
+var ErrRuleSlotHeld = errors.New("rule slot held by another source")
+
 // Save upserts the canonical workspace for (devicePk, slot) and always appends
 // a history row. Tenant-scoped via WithTenant.
 //
@@ -59,6 +62,20 @@ func (s *DeviceRuleWorkspacesService) Save(
 	devicePk uuid.UUID,
 	slot, workspaceJSON, luaContent, source string,
 	createdBy *uuid.UUID,
+) (string, error) {
+	return s.SaveUnlessSource(ctx, tenantID, devicePk, slot, workspaceJSON, luaContent, source, createdBy, "")
+}
+
+// SaveUnlessSource is Save that writes nothing when the slot's row has source keep, checked in
+// the upsert itself, so a save of keep that lands first wins. An empty keep is Save.
+// out: lua sha256 hex, ErrRuleSlotHeld or another error.
+func (s *DeviceRuleWorkspacesService) SaveUnlessSource(
+	ctx context.Context,
+	tenantID string,
+	devicePk uuid.UUID,
+	slot, workspaceJSON, luaContent, source string,
+	createdBy *uuid.UUID,
+	keep string,
 ) (string, error) {
 	if !ValidRuleSlot(slot) {
 		return "", fmt.Errorf("invalid rule slot %q", slot)
@@ -81,7 +98,7 @@ func (s *DeviceRuleWorkspacesService) Save(
 			return err
 		}
 
-		_, err = tx.Exec(ctx,
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO device_rule_workspaces
 			   (device_pk, slot, workspace_json, lua_content, lua_sha256, source, updated_at, updated_by)
 			 VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)
@@ -91,10 +108,14 @@ func (s *DeviceRuleWorkspacesService) Save(
 			       lua_sha256     = EXCLUDED.lua_sha256,
 			       source         = EXCLUDED.source,
 			       updated_at     = EXCLUDED.updated_at,
-			       updated_by     = EXCLUDED.updated_by`,
-			devicePk, slot, workspaceJSON, luaContent, shaHex, source, createdBy)
+			       updated_by     = EXCLUDED.updated_by
+			 WHERE $8 = '' OR device_rule_workspaces.source <> $8`,
+			devicePk, slot, workspaceJSON, luaContent, shaHex, source, createdBy, keep)
 		if err != nil {
 			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrRuleSlotHeld
 		}
 
 		// One history row per save so a bad rule can roll back to the prior

@@ -4,7 +4,7 @@ package oauth
 // lane: LoadProvider discovery, every Exchange branch, and the pure helpers,
 // all against an httptest OIDC provider (fakeIDP) that mints RS256 id_tokens.
 // The DB-backed Start / LookupState paths use a real Postgres and live in
-// oauth_integration_test.go (no mocked DB - AGENTS.md).
+// oauth_integration_test.go (no mocked DB).
 //
 // What must stay true is asserted directly; the inputs that must fail (bad
 // nonce, wrong aud/iss/key, missing id_token/subject, open-redirect

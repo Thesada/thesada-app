@@ -20,6 +20,14 @@
   </div>
   {{end}}
 
+  <h2 id="appearance" class="text-lg font-medium mb-2">Appearance</h2>
+  <div role="group" aria-label="Theme" class="flex gap-1 text-sm mb-1">
+    <button type="button" data-act="setTheme" data-arg="light" data-theme-option="light" aria-pressed="false" class="rounded border border-slate-300 px-3 py-1.5 hover:bg-slate-100 aria-pressed:bg-slate-900 aria-pressed:text-white">Light</button>
+    <button type="button" data-act="setTheme" data-arg="dark" data-theme-option="dark" aria-pressed="false" class="rounded border border-slate-300 px-3 py-1.5 hover:bg-slate-100 aria-pressed:bg-slate-900 aria-pressed:text-white">Dark</button>
+    <button type="button" data-act="setTheme" data-arg="system" data-theme-option="system" aria-pressed="false" class="rounded border border-slate-300 px-3 py-1.5 hover:bg-slate-100 aria-pressed:bg-slate-900 aria-pressed:text-white">System</button>
+  </div>
+  <p class="text-xs text-slate-500 mb-8">System follows the device setting. Saved in this browser.</p>
+
   <h2 class="text-lg font-medium mb-2">Profile</h2>
   <form method="POST" action="/settings/profile" class="space-y-4 mb-8">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
@@ -202,7 +210,7 @@
         {{range .Channels}}
         <tr>
           <td class="px-4 py-2">{{.Kind}}</td>
-          <td class="px-4 py-2 font-mono text-xs break-all">{{.Target}}{{if .FollowsAccount}} <span class="font-sans text-xs px-1.5 py-0.5 rounded bg-sky-50 text-sky-700">account email</span>{{end}}</td>
+          <td class="px-4 py-2 font-mono text-xs">{{.Target}}{{if .FollowsAccount}} <span class="font-sans text-xs px-1.5 py-0.5 rounded bg-sky-50 text-sky-700">account email</span>{{end}}</td>
           <td class="px-4 py-2">{{.Label}}</td>
           <td class="px-4 py-2">
             <form method="POST" action="/settings/channels/{{.ID}}/toggle" class="inline">

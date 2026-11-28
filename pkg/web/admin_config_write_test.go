@@ -20,6 +20,8 @@ type fakeFS struct {
 	files map[string]string
 	calls []string
 	hook  func(n int, cmd, arg string) *fakeReply
+	// view is what fs.cat serves for a file, as masked firmware does. nil serves the bytes.
+	view func(path, body string) string
 }
 
 // fakeReply overrides one reply. errTimeout makes the call wait out its deadline.
@@ -95,6 +97,9 @@ func (f *fakeFS) CLIRequest(ctx context.Context, _, cmd, args string) (*mqtt.CLI
 			body, ok := f.files[parts[0]]
 			if !ok {
 				return &mqtt.CLIResponse{Cmd: cmd, OK: false, Output: []string{"File not found"}}
+			}
+			if f.view != nil {
+				body = f.view(parts[0], body)
 			}
 			total := len(body)
 			off, n := total, 0
@@ -303,8 +308,8 @@ func TestStagedWrite_RefusesPathsTheShellSplits(t *testing.T) {
 }
 
 func TestWriteSteps_CoversChunksSizeCheckRenameAndRemove(t *testing.T) {
-	if got := writeSteps(writeChunkSize + 1); got != 7 {
-		t.Fatalf("writeSteps = %d, want 2 chunks + fs.cat + fs.mv + staging check + 2 readback reads", got)
+	if got := writeSteps(writeChunkSize + 1); got != 15 {
+		t.Fatalf("writeSteps = %d, want 2 chunks + fs.cat + fs.mv + staging check + 2 readback reads + 8 masked copy reads", got)
 	}
 }
 
@@ -576,5 +581,113 @@ func TestStagedWrite_UncorrelatedSizeCheckDoesNotRename(t *testing.T) {
 	}
 	if fs.files["/config.json"] != oldConfig {
 		t.Fatalf("config.json = %q, want it untouched", fs.files["/config.json"])
+	}
+}
+
+// maskedWritten is a config.json as the app sends it, maskedServed what masked
+// firmware serves for it: secrets as markers, pretty printed.
+const (
+	maskedWritten = `{"mqtt":{"host":"h","password":""},"wifi":{"networks":[{"ssid":"a","password":"pw"}]}}`
+	maskedServed  = "{\n  \"mqtt\": {\n    \"host\": \"h\",\n    \"password\": \"(empty)\"\n  },\n" +
+		"  \"wifi\": {\n    \"networks\": [\n      {\n        \"ssid\": \"a\",\n        \"password\": \"(set)\"\n      }\n    ]\n  }\n}"
+)
+
+// Masked firmware reports the size of the masked copy, so the size check reads
+// the copy and compares it masked.
+func TestStagedWrite_MaskedCopyPassesTheSizeCheck(t *testing.T) {
+	fs := newFakeFS(map[string]string{"/config.json": oldConfig})
+	fs.view = func(_, body string) string {
+		if body == maskedWritten {
+			return maskedServed
+		}
+		return body
+	}
+	if err := stagedWrite(context.Background(), fs, time.Second, "p", "/config.json", []byte(maskedWritten)); err != nil {
+		t.Fatalf("stagedWrite: %v", err)
+	}
+	if fs.files["/config.json"] != maskedWritten {
+		t.Fatalf("config.json = %q, want the written bytes", fs.files["/config.json"])
+	}
+}
+
+func TestStagedWrite_MaskedCopyThatDiffersFails(t *testing.T) {
+	for name, served := range map[string]string{
+		"plain value":   strings.Replace(maskedServed, `"h"`, `"other"`, 1),
+		"set for empty": strings.Replace(maskedServed, `"(empty)"`, `"(set)"`, 1),
+		"cut short":     maskedServed[:40],
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := newFakeFS(map[string]string{"/config.json": oldConfig})
+			fs.view = func(_, body string) string {
+				if body == maskedWritten {
+					return served
+				}
+				return body
+			}
+			err := stagedWrite(context.Background(), fs, time.Second, "p", "/config.json", []byte(maskedWritten))
+			if err == nil || !strings.Contains(err.Error(), "size check") {
+				t.Fatalf("err = %v, want a size check failure", err)
+			}
+			if fs.files["/config.json"] != oldConfig {
+				t.Fatal("live config changed")
+			}
+			if _, left := fs.files["/config.json.new"]; left {
+				t.Fatal("staging file left behind")
+			}
+		})
+	}
+}
+
+// Masked firmware serves the masked size after a timed-out fs.mv too, so the
+// readback compares masked for the staging copy and the destination alike.
+func TestStagedWrite_MaskedRenameTimeoutReadsBackTheOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		renamed  bool
+		served   string
+		wantErr  string
+		wantLive string
+	}{
+		{"rename landed", true, maskedServed, "", maskedWritten},
+		{"rename never ran", false, maskedServed, "timed out", oldConfig},
+		{"destination differs", true, strings.Replace(maskedServed, `"h"`, `"other"`, 1), "rename outcome is unknown", maskedWritten},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeFS(map[string]string{"/config.json": oldConfig})
+			sizeChecked := false
+			fs.view = func(_, body string) string {
+				if body == maskedWritten {
+					if sizeChecked {
+						return tc.served
+					}
+					return maskedServed
+				}
+				return body
+			}
+			fs.hook = func(_ int, cmd, _ string) *fakeReply {
+				if cmd != "fs.mv" {
+					return nil
+				}
+				sizeChecked = true
+				if tc.renamed {
+					fs.files["/config.json"] = fs.files["/config.json.new"]
+					delete(fs.files, "/config.json.new")
+				}
+				return &fakeReply{err: errTimeout}
+			}
+			err := stagedWrite(context.Background(), fs, 50*time.Millisecond, "p", "/config.json", []byte(maskedWritten))
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("stagedWrite = %v, want success read back", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+			if err != nil && tc.wantErr == "timed out" && strings.Contains(err.Error(), "unknown") {
+				t.Fatalf("err = %v, want the staging copy read as no rename", err)
+			}
+			if fs.files["/config.json"] != tc.wantLive {
+				t.Fatalf("config.json = %q, want %q", fs.files["/config.json"], tc.wantLive)
+			}
+		})
 	}
 }

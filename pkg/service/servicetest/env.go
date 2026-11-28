@@ -4,8 +4,12 @@ package servicetest
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"thesada.app/app/migrations"
 	"thesada.app/app/pkg/config"
@@ -27,25 +31,50 @@ type Env struct {
 	Cfg      *config.Config
 }
 
-// Start brings up a container, applies every migration, opens the three
-// role-scoped pools, and builds a Services bundle against them. This is the
-// entry point for DB-backed service tests.
-//
-// in: testing.T. out: ready *Env. All resources are released via t.Cleanup.
-func Start(t *testing.T) *Env {
-	t.Helper()
+// tmplName holds the migrated schema each Start clones into dbName.
+const tmplName = "thesada_tmpl"
+
+// shared is one migrated container per test binary. Ryuk reaps it on exit.
+var shared struct {
+	once    sync.Once
+	baseURL string
+	err     error
+}
+
+// migrateTemplate brings up the shared container, migrates dbName as the
+// production migrate role, finalizes the role logins and grants, then turns
+// dbName into the template. Same steps Start ran per test before.
+// in: testing.T (for Fatal during setup). out: none; sets shared.
+func migrateTemplate(t *testing.T) {
 	ctx := context.Background()
-
-	super, baseURL := StartPostgres(t)
-
-	// Migrate as the production migrate role, so a migration that only works
-	// for a superuser (RLS-blind backfills, say) fails here first.
-	BootstrapProdRoles(t, super)
-	migrator := OpenAs(t, baseURL, "thesada_app")
-	if err := migrations.Apply(ctx, migrator); err != nil {
-		t.Fatalf("apply migrations as thesada_app: %v", err)
+	baseURL, err := startRetry(t, func() (string, error) { return startOnce(nil, postgres.Run) })
+	if err != nil {
+		shared.err = fmt.Errorf("start timescaledb container: %w", err)
+		return
 	}
+	super, err := db.Open(ctx, baseURL)
+	if err != nil {
+		shared.err = fmt.Errorf("open superuser pool: %w", err)
+		return
+	}
+	defer super.Close()
+	if shared.err = provision(ctx, super); shared.err != nil {
+		return
+	}
+	if shared.err = bootstrapProdRoles(ctx, super); shared.err != nil {
+		return
+	}
+	migrator, err := openAs(ctx, baseURL, "thesada_app")
+	if err != nil {
+		shared.err = err
+		return
+	}
+	err = migrations.Apply(ctx, migrator)
 	migrator.Close()
+	if err != nil {
+		shared.err = fmt.Errorf("apply migrations as thesada_app: %w", err)
+		return
+	}
 
 	// 0013 created thesada_app_admin / thesada_app_mqtt as NOLOGIN. Grant LOGIN
 	// + password so the test can open pools as them, and give the app role
@@ -57,8 +86,69 @@ func Start(t *testing.T) *Env {
 		GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA public TO thesada_app;
 		GRANT USAGE,  SELECT, UPDATE         ON ALL SEQUENCES IN SCHEMA public TO thesada_app;`,
 	); err != nil {
-		t.Fatalf("finalize role logins + app grants: %v", err)
+		shared.err = fmt.Errorf("finalize role logins + app grants: %w", err)
+		return
 	}
+	super.Close()
+
+	admin, err := openDB(ctx, baseURL, "postgres")
+	if err != nil {
+		shared.err = err
+		return
+	}
+	defer admin.Close()
+	if _, err := admin.Exec(ctx, `ALTER DATABASE `+dbName+` RENAME TO `+tmplName); err != nil {
+		shared.err = fmt.Errorf("make template: %w", err)
+		return
+	}
+	shared.baseURL = baseURL
+}
+
+// cloneTemplate replaces dbName with a fresh copy of the template, with the
+// template's owner and database ACL (0001 grants CONNECT on dbName).
+// in: context, base URL. out: error.
+func cloneTemplate(ctx context.Context, baseURL string) error {
+	admin, err := openDB(ctx, baseURL, "postgres")
+	if err != nil {
+		return err
+	}
+	defer admin.Close()
+	for _, q := range []string{
+		`DROP DATABASE IF EXISTS ` + dbName + ` WITH (FORCE)`,
+		`CREATE DATABASE ` + dbName + ` TEMPLATE ` + tmplName + ` OWNER thesada_app`,
+		`UPDATE pg_database SET datacl = (SELECT datacl FROM pg_database WHERE datname = '` + tmplName + `') WHERE datname = '` + dbName + `'`,
+	} {
+		if _, err := admin.Exec(ctx, q); err != nil {
+			return fmt.Errorf("clone template: %w", err)
+		}
+	}
+	return nil
+}
+
+// Start gives the test a fully migrated database, opens the three role-scoped
+// pools, and builds a Services bundle against them. The container and the
+// migrations run once per test binary; each Start gets a fresh copy of the
+// migrated database under the same name. Tests using Start must not run in
+// parallel with each other.
+//
+// in: testing.T. out: ready *Env. All resources are released via t.Cleanup.
+func Start(t *testing.T) *Env {
+	t.Helper()
+	ctx := context.Background()
+
+	shared.once.Do(func() { migrateTemplate(t) })
+	if shared.err != nil {
+		t.Fatalf("shared timescaledb: %v", shared.err)
+	}
+	baseURL := shared.baseURL
+	if err := cloneTemplate(ctx, baseURL); err != nil {
+		t.Fatal(err)
+	}
+	super, err := db.Open(ctx, baseURL)
+	if err != nil {
+		t.Fatalf("open superuser pool: %v", err)
+	}
+	t.Cleanup(super.Close)
 
 	// Opened but not wired into Pools: proves the ingest role exists and can
 	// log in with its grants intact, which is what routing will need.
